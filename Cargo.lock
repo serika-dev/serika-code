@@ -3417,7 +3417,7 @@ dependencies = [
 
 [[package]]
 name = "serika-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "rpassword",
@@ -3431,7 +3431,7 @@ dependencies = [
 
 [[package]]
 name = "serika-desktop"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "eframe",
  "rfd",
@@ -3443,7 +3443,7 @@ dependencies = [
 
 [[package]]
 name = "serika-runtime"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "dirs",
  "dunce",

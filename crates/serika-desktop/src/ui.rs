@@ -335,6 +335,7 @@ struct SerikaApp {
     auto_approve_session: bool,
     status: String,
     running: bool,
+    rewind_confirm: Option<i64>,
 
     // Providers, Harnesses & Live API Endpoints
     local_harnesses: Vec<LocalHarness>,
@@ -490,6 +491,7 @@ impl SerikaApp {
             auto_approve_session: false,
             status: "Ready".into(),
             running: false,
+            rewind_confirm: None,
             local_harnesses,
             provider_models,
             discovery_report: ProviderDiscoveryReport::default(),
@@ -624,6 +626,83 @@ impl SerikaApp {
         self.diffs.clear();
         self.streaming_reply.clear();
         self.streaming_reasoning.clear();
+        self.rewind_confirm = None;
+    }
+
+    fn draw_turn(&mut self, ui: &mut egui::Ui, msg: &StoredMessage) {
+        ui.add_space(8.0);
+        if msg.role == "user" {
+            let confirming = self.rewind_confirm == Some(msg.id);
+            egui::Frame::NONE
+                .fill(BG_CARD)
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("You").size(12.0).color(TEXT_DIM));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if !self.running
+                                && ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Rewind").size(12.0).color(TEXT_PRIMARY),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .on_hover_text("Put files back and drop this message and everything after it")
+                                    .clicked()
+                            {
+                                self.rewind_confirm = Some(msg.id);
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(&msg.content).size(15.0).color(TEXT_PRIMARY));
+                    if confirming {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new("Restore files to before this message and remove it from the thread?")
+                                .size(12.0)
+                                .color(TEXT_MUTED),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Rewind").clicked() {
+                                let id = msg.id;
+                                self.apply_rewind(id);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.rewind_confirm = None;
+                            }
+                        });
+                    }
+                });
+        } else {
+            ui.label(RichText::new(&msg.content).size(14.5).color(TEXT_PRIMARY));
+        }
+    }
+
+    fn apply_rewind(&mut self, message_id: i64) {
+        self.rewind_confirm = None;
+        if self.running {
+            return;
+        }
+        let Some(core) = self.core.clone() else { return };
+        let Some(session_id) = self.active_session.clone() else { return };
+        match core.sessions.rewind(&session_id, message_id) {
+            Ok(outcome) => {
+                self.prompt = outcome.prompt;
+                self.select_session(&session_id);
+                self.status = if outcome.restored_files == 0 {
+                    "Rewound. This turn had no file checkpoint.".into()
+                } else if outcome.restored_files == 1 {
+                    "Rewound. Restored 1 file.".into()
+                } else {
+                    format!("Rewound. Restored {} files.", outcome.restored_files)
+                };
+                self.refresh_git_async();
+            }
+            Err(err) => self.status = err.to_string(),
+        }
     }
 
     fn send_prompt(&mut self) {
@@ -1300,12 +1379,14 @@ impl SerikaApp {
                         Vec2::new(lane_w, 10.0),
                         Layout::top_down(Align::LEFT),
                         |ui| {
-                            for msg in &self.messages {
-                                if msg.content.starts_with("Tool results:\n") {
-                                    continue;
-                                }
-                                draw_message_card(ui, msg);
-                                ui.add_space(10.0);
+                            let turns: Vec<StoredMessage> = self
+                                .messages
+                                .iter()
+                                .filter(|msg| !msg.content.starts_with("Tool results:\n"))
+                                .cloned()
+                                .collect();
+                            for msg in turns {
+                                self.draw_turn(ui, &msg);
                             }
 
                             if !self.tools.is_empty() {
@@ -2743,19 +2824,6 @@ fn draw_thread_row(ui: &mut egui::Ui, item: &SessionSummary, is_active: bool) ->
         clicked = true;
     }
     (clicked, deleted)
-}
-
-fn draw_message_card(ui: &mut egui::Ui, msg: &StoredMessage) {
-    let is_user = msg.role == "user";
-    ui.add_space(4.0);
-    if is_user {
-        ui.label(RichText::new("You").size(12.0).color(TEXT_DIM));
-        ui.add_space(2.0);
-        ui.label(RichText::new(&msg.content).size(15.0).color(TEXT_PRIMARY));
-    } else {
-        ui.label(RichText::new(&msg.content).size(14.5).color(TEXT_PRIMARY));
-    }
-    ui.add_space(10.0);
 }
 
 fn draw_tool_pill(ui: &mut egui::Ui, tool: &ToolRun, has_diff: bool) -> bool {
