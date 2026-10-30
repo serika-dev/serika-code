@@ -1,0 +1,24 @@
+[package]
+name = "serika-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Serika Code command-line interface"
+
+[[bin]]
+name = "serika"
+path = "src/main.rs"
+
+[dependencies]
+serika-runtime = { path = "../serika-runtime" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio-util = "0.7"
+rpassword = "7"
+serde_json = "1"
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

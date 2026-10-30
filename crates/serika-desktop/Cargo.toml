@@ -1,0 +1,20 @@
+[package]
+name = "serika-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Serika Code native desktop application"
+
+[[bin]]
+name = "serika-desktop"
+path = "src/main.rs"
+
+[dependencies]
+serika-runtime = { path = "../serika-runtime" }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio-util = "0.7"
+rfd = "0.17"
+zeroize = { version = "1", features = ["derive"] }
