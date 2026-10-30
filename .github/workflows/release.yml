@@ -18,8 +18,33 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare-release:
+    name: Create GitHub Release
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Ensure GitHub Release exists
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name != 'main' && github.ref_name || inputs.tag }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release create "${TAG}" \
+              --title "Serika Code ${TAG}" \
+              --generate-notes \
+              --latest
+          fi
+          gh release upload "${TAG}" install.sh install.ps1 --clobber
+
   build:
     name: Release ${{ matrix.name }}
+    needs: prepare-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -44,7 +69,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Linux system dependencies
         if: startsWith(matrix.os, 'blacksmith-4vcpu-ubuntu')
@@ -75,62 +100,62 @@ jobs:
       - name: Build release binaries
         run: cargo build --workspace --release --locked --target ${{ matrix.target }}
 
-      - name: Package Unix archive
+      - name: Package and upload Unix archive
         if: matrix.archive == 'tar.gz'
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
           mkdir -p dist staging
           cp target/${{ matrix.target }}/release/serika staging/
           cp target/${{ matrix.target }}/release/serika-desktop staging/
           cp install.sh README.md LICENSE staging/
-          tar -C staging -czf dist/serika-code-${{ matrix.target }}.tar.gz .
+          ARCHIVE="serika-code-${{ matrix.target }}.tar.gz"
+          tar -C staging -czf "dist/${ARCHIVE}" .
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          else
+            shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          fi
+          gh release upload "${TAG}" "${ARCHIVE}" "${ARCHIVE}.sha256" --clobber
 
-      - name: Package Windows archive
+      - name: Package and upload Windows archive
         if: matrix.archive == 'zip'
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
           New-Item -ItemType Directory -Force -Path dist, staging | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/serika.exe" staging/
           Copy-Item "target/${{ matrix.target }}/release/serika-desktop.exe" staging/
           Copy-Item "install.ps1", "README.md", "LICENSE" staging/
-          Compress-Archive -Path "staging/*" -DestinationPath "dist/serika-code-${{ matrix.target }}.zip" -Force
+          $archive = "serika-code-${{ matrix.target }}.zip"
+          Compress-Archive -Path "staging/*" -DestinationPath "dist/$archive" -Force
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$archive").Hash.ToLower()
+          "$hash  $archive" | Out-File -FilePath "dist/$archive.sha256" -Encoding ascii -NoNewline
+          "`n" | Out-File -FilePath "dist/$archive.sha256" -Encoding ascii -Append -NoNewline
+          gh release upload $env:TAG "dist/$archive" "dist/$archive.sha256" --clobber
 
-      - name: Upload release package
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.target }}
-          path: dist/*
-
-  publish:
-    name: Publish GitHub Release
+  finalize-checksums:
+    name: Publish SHA256SUMS
+    needs: [prepare-release, build]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: build
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Download all release packages
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Generate SHA256SUMS and include installer scripts
+      - name: Assemble and upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
         run: |
-          cp install.sh install.ps1 artifacts/
-          cd artifacts
-          sha256sum serika-code-* install.sh install.ps1 > SHA256SUMS
+          mkdir -p sums
+          cd sums
+          gh release download "${TAG}" -p "*.sha256" -p "install.sh" -p "install.ps1"
+          cat *.sha256 > SHA256SUMS
+          sha256sum install.sh install.ps1 >> SHA256SUMS
           cat SHA256SUMS
-
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name != 'main' && github.ref_name || inputs.tag }}
-          generate_release_notes: true
-          prerelease: false
-          make_latest: true
-          files: |
-            artifacts/serika-code-*
-            artifacts/install.sh
-            artifacts/install.ps1
-            artifacts/SHA256SUMS
+          gh release upload "${TAG}" SHA256SUMS --clobber

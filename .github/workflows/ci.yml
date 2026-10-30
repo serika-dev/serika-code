@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Linux system dependencies
         if: startsWith(matrix.os, 'blacksmith-4vcpu-ubuntu')
@@ -71,7 +71,7 @@ jobs:
       - name: Build release binaries
         run: cargo build --workspace --release --locked --target ${{ matrix.target }}
 
-      - name: Smoke-test CLI binary
+      - name: Smoke-test CLI and desktop binaries
         if: matrix.target != 'x86_64-apple-darwin'
         shell: bash
         run: |
@@ -83,14 +83,15 @@ jobs:
             ./target/${{ matrix.target }}/release/serika-desktop --version
           fi
 
-      - name: Package release archive (Unix)
+      - name: Verify release archive packaging (Unix)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           mkdir -p dist
           tar -C target/${{ matrix.target }}/release -czf dist/serika-code-${{ matrix.target }}.tar.gz serika serika-desktop
+          ls -lh dist/
 
-      - name: Package release archive (Windows)
+      - name: Verify release archive packaging (Windows)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
@@ -100,9 +101,4 @@ jobs:
             "target/${{ matrix.target }}/release/serika-desktop.exe", `
             "install.ps1" `
             -DestinationPath "dist/serika-code-${{ matrix.target }}.zip" -Force
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: serika-code-${{ matrix.target }}
-          path: dist/*
+          Get-ChildItem dist
