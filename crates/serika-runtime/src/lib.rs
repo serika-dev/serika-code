@@ -22,6 +22,7 @@ pub mod patch;
 pub mod paths;
 pub mod permissions;
 pub mod protocol;
+pub mod providers;
 pub mod sessions;
 pub mod setup;
 pub mod shell;

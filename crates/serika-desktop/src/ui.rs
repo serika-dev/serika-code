@@ -1,2494 +1,2928 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use eframe::egui;
+use eframe::egui::{
+    self, Align, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Key,
+    Layout, Margin, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit,
+    TextStyle, Theme, Vec2,
+};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio_util::sync::CancellationToken;
+
+use serika_runtime::client::LoginOutcome;
+use serika_runtime::credentials::StoredSession;
 use serika_runtime::gitinfo::{self, GitRepoSnapshot};
+use serika_runtime::model::{AccountProfile, ChatModel, ModelCatalog, UsageSnapshot};
+use serika_runtime::permissions::PermissionMode;
+use serika_runtime::providers::{
+    builtin_provider_models, detect_local_harnesses, LocalHarness, ProviderKind,
+};
+use serika_runtime::sessions::{SessionSummary, StoredMessage, ToolRun};
 use serika_runtime::setup::{self, SetupOptions};
 use serika_runtime::updater::{self, UpdateInfo};
-use serika_runtime::{
-    AgentEvent, FileDiff, LoginOutcome, PermissionMode, Runtime, SessionSummary, TaskRequest,
-    UsageSnapshot,
-};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio_util::sync::CancellationToken;
-use zeroize::Zeroize;
+use serika_runtime::{AgentEvent, Runtime, TaskOutcome, TaskRequest};
+
+// =============================================================================
+// Serika Brand Guidelines Palette (`serika-accounts/app/globals.css` + T3 Code)
+// =============================================================================
+const BG_DEEP: Color32 = Color32::from_rgb(9, 9, 11); // #09090B (--color-bg)
+const BG_SIDEBAR: Color32 = Color32::from_rgb(12, 12, 15); // #0C0C0F (T3 sidebar chrome)
+const BG_CARD: Color32 = Color32::from_rgb(18, 18, 21); // #121215 (--color-bg-card)
+const BG_CARD_HOVER: Color32 = Color32::from_rgb(24, 24, 28); // #18181C (--color-bg-card-hover)
+const BG_INPUT: Color32 = Color32::from_rgb(22, 22, 26); // #16161A (--color-bg-input)
+const BG_ACTIVE_ROW: Color32 = Color32::from_rgb(28, 23, 44); // Subtle Serika violet tint
+
+const BORDER_SUBTLE: Color32 = Color32::from_rgb(34, 34, 41); // rgba(255,255,255,0.08)
+const BORDER_STRONG: Color32 = Color32::from_rgb(52, 52, 64); // rgba(255,255,255,0.15)
+
+const TEXT_PRIMARY: Color32 = Color32::from_rgb(244, 244, 245); // #F4F4F5 (--color-text)
+const TEXT_MUTED: Color32 = Color32::from_rgb(161, 161, 170); // #A1A1AA (--color-text-muted)
+const TEXT_DIM: Color32 = Color32::from_rgb(113, 113, 122); // #71717A (--color-text-dim)
+
+const SERIKA_VIOLET: Color32 = Color32::from_rgb(139, 92, 246); // #8B5CF6 (--color-primary)
+const SERIKA_VIOLET_HOVER: Color32 = Color32::from_rgb(124, 58, 237); // #7C3AED (--color-primary-hover)
+const SERIKA_VIOLET_LIGHT: Color32 = Color32::from_rgb(167, 139, 250); // #A78BFA (--color-secondary)
+const SERIKA_VIOLET_SOFT: Color32 = Color32::from_rgba_premultiplied(28, 20, 48, 255);
+
+const EMERALD: Color32 = Color32::from_rgb(16, 185, 129); // #10B981 (--color-success)
+const AMBER: Color32 = Color32::from_rgb(245, 158, 11); // #F59E0B (--color-warning)
+const ROSE: Color32 = Color32::from_rgb(244, 63, 94); // #F43F5E (--color-danger)
+
+// =============================================================================
+// Custom Anti-Aliased Vector Icon Renderer (Zero Missing Glyph `▯` Boxes!)
+// =============================================================================
+#[derive(Debug, Clone, Copy)]
+enum Icon {
+    SerikaMark,
+    Plus,
+    Folder,
+    GitBranch,
+    Worktree,
+    Search,
+    Send,
+    Stop,
+    Sliders,
+    Key,
+    PanelRight,
+    Sparkle,
+    Check,
+    Refresh,
+    Terminal,
+    Close,
+}
+
+fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.42;
+    let stroke = Stroke::new(1.5, color);
+
+    match icon {
+        Icon::SerikaMark => {
+            let top = Pos2::new(c.x, c.y - r * 1.15);
+            let right = Pos2::new(c.x + r * 1.05, c.y);
+            let bottom = Pos2::new(c.x, c.y + r * 1.15);
+            let left = Pos2::new(c.x - r * 1.05, c.y);
+            painter.add(egui::Shape::convex_polygon(
+                vec![top, right, bottom, left],
+                color,
+                Stroke::NONE,
+            ));
+            let inner_r = r * 0.45;
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    Pos2::new(c.x, c.y - inner_r),
+                    Pos2::new(c.x + inner_r, c.y),
+                    Pos2::new(c.x, c.y + inner_r),
+                    Pos2::new(c.x - inner_r, c.y),
+                ],
+                BG_DEEP,
+                Stroke::NONE,
+            ));
+        }
+        Icon::Plus => {
+            painter.line_segment([Pos2::new(c.x - r, c.y), Pos2::new(c.x + r, c.y)], stroke);
+            painter.line_segment([Pos2::new(c.x, c.y - r), Pos2::new(c.x, c.y + r)], stroke);
+        }
+        Icon::Folder => {
+            let box_rect =
+                Rect::from_center_size(Pos2::new(c.x, c.y + 1.0), Vec2::new(r * 2.1, r * 1.5));
+            let tab_rect = Rect::from_min_size(
+                Pos2::new(box_rect.left(), box_rect.top() - r * 0.35),
+                Vec2::new(r * 0.9, r * 0.45),
+            );
+            painter.rect_stroke(tab_rect, 1.5, stroke, StrokeKind::Inside);
+            painter.rect_stroke(box_rect, 2.0, stroke, StrokeKind::Inside);
+        }
+        Icon::GitBranch => {
+            let top_left = Pos2::new(c.x - r * 0.55, c.y - r * 0.75);
+            let bot_left = Pos2::new(c.x - r * 0.55, c.y + r * 0.75);
+            let top_right = Pos2::new(c.x + r * 0.6, c.y - r * 0.25);
+            painter.line_segment([top_left, bot_left], stroke);
+            painter.line_segment([Pos2::new(c.x - r * 0.55, c.y + r * 0.15), top_right], stroke);
+            painter.circle_filled(top_left, 2.2, color);
+            painter.circle_filled(bot_left, 2.2, color);
+            painter.circle_filled(top_right, 2.2, color);
+        }
+        Icon::Worktree => {
+            let root = Pos2::new(c.x, c.y + r * 0.8);
+            let left = Pos2::new(c.x - r * 0.7, c.y - r * 0.6);
+            let right = Pos2::new(c.x + r * 0.7, c.y - r * 0.6);
+            painter.line_segment([root, left], stroke);
+            painter.line_segment([root, right], stroke);
+            painter.circle_filled(root, 2.2, color);
+            painter.circle_filled(left, 2.2, color);
+            painter.circle_filled(right, 2.2, color);
+        }
+        Icon::Search => {
+            let circle_c = Pos2::new(c.x - r * 0.18, c.y - r * 0.18);
+            painter.circle_stroke(circle_c, r * 0.68, stroke);
+            painter.line_segment(
+                [
+                    Pos2::new(circle_c.x + r * 0.48, circle_c.y + r * 0.48),
+                    Pos2::new(c.x + r * 0.85, c.y + r * 0.85),
+                ],
+                stroke,
+            );
+        }
+        Icon::Send => {
+            let top = Pos2::new(c.x, c.y - r * 0.85);
+            let bot = Pos2::new(c.x, c.y + r * 0.85);
+            let wing_l = Pos2::new(c.x - r * 0.65, c.y - r * 0.15);
+            let wing_r = Pos2::new(c.x + r * 0.65, c.y - r * 0.15);
+            let s = Stroke::new(1.8, color);
+            painter.line_segment([bot, top], s);
+            painter.line_segment([top, wing_l], s);
+            painter.line_segment([top, wing_r], s);
+        }
+        Icon::Stop => {
+            let sq = Rect::from_center_size(c, Vec2::splat(r * 1.35));
+            painter.rect_filled(sq, 2.0, color);
+        }
+        Icon::Sliders => {
+            let y1 = c.y - r * 0.45;
+            let y2 = c.y + r * 0.45;
+            painter.line_segment([Pos2::new(c.x - r, y1), Pos2::new(c.x + r, y1)], stroke);
+            painter.line_segment([Pos2::new(c.x - r, y2), Pos2::new(c.x + r, y2)], stroke);
+            painter.circle_filled(Pos2::new(c.x - r * 0.3, y1), 2.5, color);
+            painter.circle_filled(Pos2::new(c.x + r * 0.35, y2), 2.5, color);
+        }
+        Icon::Key => {
+            let head = Pos2::new(c.x - r * 0.35, c.y);
+            painter.circle_stroke(head, r * 0.5, stroke);
+            painter.line_segment(
+                [Pos2::new(head.x + r * 0.5, c.y), Pos2::new(c.x + r * 0.9, c.y)],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(c.x + r * 0.55, c.y),
+                    Pos2::new(c.x + r * 0.55, c.y + r * 0.4),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(c.x + r * 0.85, c.y),
+                    Pos2::new(c.x + r * 0.85, c.y + r * 0.4),
+                ],
+                stroke,
+            );
+        }
+        Icon::PanelRight => {
+            let box_rect = Rect::from_center_size(c, Vec2::new(r * 2.1, r * 1.65));
+            painter.rect_stroke(box_rect, 2.0, stroke, StrokeKind::Inside);
+            let split_x = box_rect.right() - box_rect.width() * 0.35;
+            painter.line_segment(
+                [
+                    Pos2::new(split_x, box_rect.top()),
+                    Pos2::new(split_x, box_rect.bottom()),
+                ],
+                stroke,
+            );
+        }
+        Icon::Sparkle => {
+            painter.line_segment([Pos2::new(c.x - r, c.y), Pos2::new(c.x + r, c.y)], stroke);
+            painter.line_segment([Pos2::new(c.x, c.y - r), Pos2::new(c.x, c.y + r)], stroke);
+            let d = r * 0.55;
+            painter.line_segment(
+                [Pos2::new(c.x - d, c.y - d), Pos2::new(c.x + d, c.y + d)],
+                Stroke::new(1.1, color),
+            );
+            painter.line_segment(
+                [Pos2::new(c.x - d, c.y + d), Pos2::new(c.x + d, c.y - d)],
+                Stroke::new(1.1, color),
+            );
+        }
+        Icon::Check => {
+            let p1 = Pos2::new(c.x - r * 0.75, c.y + r * 0.05);
+            let p2 = Pos2::new(c.x - r * 0.15, c.y + r * 0.65);
+            let p3 = Pos2::new(c.x + r * 0.85, c.y - r * 0.55);
+            let s = Stroke::new(1.8, color);
+            painter.line_segment([p1, p2], s);
+            painter.line_segment([p2, p3], s);
+        }
+        Icon::Refresh => {
+            painter.circle_stroke(c, r * 0.75, stroke);
+            painter.circle_filled(Pos2::new(c.x + r * 0.65, c.y - r * 0.35), 2.2, color);
+        }
+        Icon::Terminal => {
+            let p1 = Pos2::new(c.x - r * 0.75, c.y - r * 0.45);
+            let p2 = Pos2::new(c.x - r * 0.15, c.y);
+            let p3 = Pos2::new(c.x - r * 0.75, c.y + r * 0.45);
+            painter.line_segment([p1, p2], stroke);
+            painter.line_segment([p2, p3], stroke);
+            painter.line_segment(
+                [
+                    Pos2::new(c.x + r * 0.05, c.y + r * 0.45),
+                    Pos2::new(c.x + r * 0.75, c.y + r * 0.45),
+                ],
+                stroke,
+            );
+        }
+        Icon::Close => {
+            let d = r * 0.65;
+            painter.line_segment([Pos2::new(c.x - d, c.y - d), Pos2::new(c.x + d, c.y + d)], stroke);
+            painter.line_segment([Pos2::new(c.x - d, c.y + d), Pos2::new(c.x + d, c.y - d)], stroke);
+        }
+    }
+}
 
 pub fn launch(smoke: bool) {
-    let runtime = match Runtime::open() {
-        Ok(runtime) => Arc::new(runtime),
-        Err(err) => {
-            eprintln!("serika-desktop: {err}");
-            std::process::exit(1);
-        }
-    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1400.0, 880.0])
-            .with_min_inner_size([960.0, 620.0])
-            .with_title("Serika Code"),
+            .with_title("Serika Code")
+            .with_inner_size([1380.0, 860.0])
+            .with_min_inner_size([960.0, 620.0]),
         ..Default::default()
     };
-    if let Err(err) = eframe::run_native(
+    let result = eframe::run_native(
         "Serika Code",
         options,
-        Box::new(move |cc| Ok(Box::new(SerikaApp::new(cc, runtime, smoke)))),
-    ) {
-        eprintln!("serika-desktop: {err}");
+        Box::new(move |cc| Ok(Box::new(SerikaApp::new(cc, smoke)))),
+    );
+    if let Err(err) = result {
+        eprintln!("serika-desktop failed to start: {err}");
         std::process::exit(1);
     }
 }
 
-#[derive(Clone)]
-enum MessageSegment {
-    Text(String),
-    Code { lang: String, code: String },
+enum UiNotice {
+    Catalog(Result<ModelCatalog, String>),
+    Account(Result<(AccountProfile, UsageSnapshot), String>),
+    LoggedIn(Result<LoginOutcome, String>),
+    GitRefreshed(GitRepoSnapshot),
+    GitActionDone(Result<String, String>),
+    DiffLoaded((String, String)),
+    WorktreeCreated(Result<PathBuf, String>),
+    UpdateChecked(Result<UpdateInfo, String>),
+    SetupDone(Result<String, String>),
+    TaskFinished(Result<TaskOutcome, String>),
 }
 
-#[derive(Clone)]
-struct UiMessage {
-    role: String,
-    raw: String,
-    segments: Vec<MessageSegment>,
-}
-
-impl UiMessage {
-    fn new(role: impl Into<String>, raw: impl Into<String>) -> Self {
-        let role = role.into();
-        let raw = raw.into();
-        let segments = parse_segments(&raw);
-        Self {
-            role,
-            raw,
-            segments,
-        }
-    }
-}
-
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct PendingApproval {
     id: String,
     title: String,
     detail: String,
-    destructive: bool,
 }
 
-enum AppMsg {
-    GitSnapshot(GitRepoSnapshot),
-    GitActionDone { notice: String, snapshot: GitRepoSnapshot },
-    WorktreeCreated { path: PathBuf, snapshot: GitRepoSnapshot },
-    FileDiffLoaded { title: String, diff: String },
-    UpdateChecked(serika_runtime::Result<UpdateInfo>),
-    UpdateInstalled(serika_runtime::Result<updater::UpdateOutcome>),
-    SetupCompleted(serika_runtime::Result<setup::SetupReport>),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RightTab {
-    Diff,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectorTab {
     Git,
+    Diffs,
     Activity,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DiffScope {
-    Session,
-    Unstaged,
-    Staged,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DiffViewMode {
-    Unified,
-    Split,
-}
-
-enum SidebarAction {
-    OpenSession(String),
-    DeleteSession(String),
-    SwitchProject(String),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerMode {
+    Build,
+    Plan,
 }
 
 struct SerikaApp {
-    rt: tokio::runtime::Runtime,
-    core: Arc<Runtime>,
-    events_tx: UnboundedSender<AgentEvent>,
-    events_rx: UnboundedReceiver<AgentEvent>,
-    app_tx: UnboundedSender<AppMsg>,
-    app_rx: UnboundedReceiver<AppMsg>,
-    cancel: Option<CancellationToken>,
     smoke: bool,
-    project: String,
-    recent_projects: Vec<String>,
+    tokio: tokio::runtime::Runtime,
+    core: Option<Arc<Runtime>>,
+    startup_error: Option<String>,
+    tx: UnboundedSender<UiNotice>,
+    rx: UnboundedReceiver<UiNotice>,
+    events_rx: Option<UnboundedReceiver<AgentEvent>>,
+    pending_approval: Option<PendingApproval>,
+    cancel: Option<CancellationToken>,
+
+    // Workspace & Threads
+    project: PathBuf,
+    recent_projects: Vec<PathBuf>,
     sessions: Vec<SessionSummary>,
     session_filter: String,
-    session_id: Option<String>,
-    messages: Vec<UiMessage>,
-    streaming: String,
-    streaming_segments: Vec<MessageSegment>,
-    active_tool: Option<String>,
-    input: String,
-    activity: Vec<String>,
-    diffs: Vec<FileDiff>,
-    diff_index: usize,
-    diff_scope: DiffScope,
-    diff_view_mode: DiffViewMode,
-    custom_diff_title: String,
-    custom_diff_text: String,
-    usage: Option<UsageSnapshot>,
-    model_ids: Vec<String>,
-    model_labels: Vec<String>,
-    model_index: usize,
+    active_session: Option<String>,
+    messages: Vec<StoredMessage>,
+    tools: Vec<ToolRun>,
+    diffs: Vec<(String, String)>,
+    selected_diff: usize,
+    streaming_reply: String,
+    streaming_reasoning: String,
+
+    // Composer state
+    prompt: String,
+    composer_mode: ComposerMode,
+    selected_model: String,
     permission: PermissionMode,
-    account: String,
+    auto_approve_session: bool,
     status: String,
     running: bool,
-    approval: Option<PendingApproval>,
-    show_settings: bool,
-    show_account: bool,
-    show_palette: bool,
+
+    // Providers, Harnesses & Optional APIs
+    local_harnesses: Vec<LocalHarness>,
+    provider_models: Vec<ChatModel>,
+    catalog: ModelCatalog,
+    openai_key_input: String,
+    anthropic_key_input: String,
+    gemini_key_input: String,
+    api_base_input: String,
+    accounts_base_input: String,
+
+    // Optional Serika Cloud Account
+    session: Option<StoredSession>,
+    profile: Option<AccountProfile>,
+    usage: Option<UsageSnapshot>,
+    email_input: String,
+    password_input: String,
+    two_factor_input: String,
+    magic_token_input: String,
+    auth_notice: String,
+
+    // Panels & Modals
     show_inspector: bool,
+    inspector_tab: InspectorTab,
+    show_providers: bool,
+    show_settings: bool,
+    show_palette: bool,
     palette_query: String,
-    right: RightTab,
+
+    // Git & Worktree state
     git: GitRepoSnapshot,
-    git_loading: bool,
-    git_commit_msg: String,
-    git_new_branch: String,
+    commit_message: String,
+    worktree_branch_input: String,
+    last_git_poll: Instant,
+
+    // Updater
     update_info: Option<UpdateInfo>,
-    updating: bool,
-    login_email: String,
-    login_password: String,
-    login_code: String,
-    login_magic: String,
-    login_note: String,
-    timeout: String,
-    retention: String,
+    setup_status: String,
 }
 
 impl SerikaApp {
-    fn new(cc: &eframe::CreationContext<'_>, core: Arc<Runtime>, smoke: bool) -> Self {
-        apply_theme(&cc.egui_ctx, &core.config.theme);
-        let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (app_tx, app_rx) = tokio::sync::mpsc::unbounded_channel();
-        let rt = tokio::runtime::Builder::new_multi_thread()
+    fn new(cc: &eframe::CreationContext<'_>, smoke: bool) -> Self {
+        install_system_fonts(&cc.egui_ctx);
+        apply_serika_theme(&cc.egui_ctx);
+
+        let tokio = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
-            .expect("tokio");
-        let project = std::env::current_dir()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|_| core.paths.scratch_dir().display().to_string());
-        let permission = core.config.permission;
-        let timeout = core.config.command_timeout_secs.to_string();
-        let retention = core.config.session_retention_days.to_string();
-        let account = core
-            .signed_in()
-            .ok()
-            .flatten()
-            .map(|session| {
-                format!(
-                    "{} · {}",
-                    session.username,
-                    if session.is_premium { "premium" } else { "free" }
-                )
-            })
-            .unwrap_or_else(|| "Not signed in".into());
+            .expect("tokio runtime");
+        let (tx, rx) = unbounded_channel();
+        let (core, startup_error) = match Runtime::open() {
+            Ok(runtime) => (Some(Arc::new(runtime)), None),
+            Err(err) => (None, Some(err.to_string())),
+        };
+
+        let local_harnesses = detect_local_harnesses();
+        let provider_models = builtin_provider_models(&local_harnesses);
+
+        let permission = core
+            .as_ref()
+            .map(|c| c.config.permission)
+            .unwrap_or(PermissionMode::Standard);
+        let selected_model = core
+            .as_ref()
+            .and_then(|c| c.config.model.clone())
+            .unwrap_or_else(|| {
+                if let Some(c) = &core {
+                    if c.config.resolve_anthropic_key().is_some() {
+                        return "claude/claude-sonnet-4-20250514".to_string();
+                    }
+                    if c.config.resolve_openai_key().is_some() {
+                        return "openai/gpt-4.1".to_string();
+                    }
+                    if c.config.resolve_gemini_key().is_some() {
+                        return "gemini/gemini-2.5-pro".to_string();
+                    }
+                }
+                "local/workspace".to_string()
+            });
+
+        let session = core.as_ref().and_then(|c| c.secrets.load().ok().flatten());
+        let recent_projects = core
+            .as_ref()
+            .and_then(|c| c.sessions.recent_projects().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+            .collect::<Vec<_>>();
+
+        let project = choose_initial_workspace(&core, &recent_projects);
+        let sessions = core
+            .as_ref()
+            .and_then(|c| c.sessions.list(Some(&project)).ok())
+            .unwrap_or_default();
+
+        let openai_key_input = core
+            .as_ref()
+            .and_then(|c| c.config.openai_api_key.clone())
+            .unwrap_or_default();
+        let anthropic_key_input = core
+            .as_ref()
+            .and_then(|c| c.config.anthropic_api_key.clone())
+            .unwrap_or_default();
+        let gemini_key_input = core
+            .as_ref()
+            .and_then(|c| c.config.gemini_api_key.clone())
+            .unwrap_or_default();
+        let api_base_input = core
+            .as_ref()
+            .map(|c| c.config.api_base_url.clone())
+            .unwrap_or_default();
+        let accounts_base_input = core
+            .as_ref()
+            .map(|c| c.config.accounts_base_url.clone())
+            .unwrap_or_default();
+
+        let git = gitinfo::snapshot_sync(&project).unwrap_or_default();
+        // Only auto-open the right inspector if there are uncommitted changes in a Git repo
+        let show_inspector = git.is_repo && !git.entries.is_empty();
+
         let mut app = Self {
-            rt,
-            core,
-            events_tx,
-            events_rx,
-            app_tx,
-            app_rx,
-            cancel: None,
             smoke,
+            tokio,
+            core,
+            startup_error,
+            tx,
+            rx,
+            events_rx: None,
+            pending_approval: None,
+            cancel: None,
             project,
-            recent_projects: Vec::new(),
-            sessions: Vec::new(),
+            recent_projects,
+            sessions,
             session_filter: String::new(),
-            session_id: None,
+            active_session: None,
             messages: Vec::new(),
-            streaming: String::new(),
-            streaming_segments: Vec::new(),
-            active_tool: None,
-            input: String::new(),
-            activity: Vec::new(),
+            tools: Vec::new(),
             diffs: Vec::new(),
-            diff_index: 0,
-            diff_scope: DiffScope::Session,
-            diff_view_mode: DiffViewMode::Unified,
-            custom_diff_title: String::new(),
-            custom_diff_text: String::new(),
-            usage: None,
-            model_ids: Vec::new(),
-            model_labels: Vec::new(),
-            model_index: 0,
+            selected_diff: 0,
+            streaming_reply: String::new(),
+            streaming_reasoning: String::new(),
+            prompt: String::new(),
+            composer_mode: ComposerMode::Build,
+            selected_model,
             permission,
-            account,
+            auto_approve_session: false,
             status: "Ready".into(),
             running: false,
-            approval: None,
+            local_harnesses,
+            provider_models,
+            catalog: ModelCatalog::default(),
+            openai_key_input,
+            anthropic_key_input,
+            gemini_key_input,
+            api_base_input,
+            accounts_base_input,
+            session,
+            profile: None,
+            usage: None,
+            email_input: String::new(),
+            password_input: String::new(),
+            two_factor_input: String::new(),
+            magic_token_input: String::new(),
+            auth_notice: String::new(),
+            show_inspector,
+            inspector_tab: InspectorTab::Git,
+            show_providers: false,
             show_settings: false,
-            show_account: false,
             show_palette: false,
-            show_inspector: true,
             palette_query: String::new(),
-            right: RightTab::Git,
-            git: GitRepoSnapshot::default(),
-            git_loading: false,
-            git_commit_msg: String::new(),
-            git_new_branch: String::new(),
+            git,
+            commit_message: String::new(),
+            worktree_branch_input: String::new(),
+            last_git_poll: Instant::now(),
             update_info: None,
-            updating: false,
-            login_email: String::new(),
-            login_password: String::new(),
-            login_code: String::new(),
-            login_magic: String::new(),
-            login_note: String::new(),
-            timeout,
-            retention,
+            setup_status: String::new(),
         };
-        if !smoke {
-            app.reload_sessions();
-            app.bootstrap(&cc.egui_ctx);
-            app.refresh_git(&cc.egui_ctx);
-        }
+        app.refresh_remote();
         app
     }
 
-    fn is_scratch(&self) -> bool {
-        let scratch = self.core.paths.scratch_dir();
-        let current = PathBuf::from(&self.project);
-        std::fs::canonicalize(&current).unwrap_or(current)
-            == std::fs::canonicalize(&scratch).unwrap_or(scratch)
-    }
-
-    fn bootstrap(&self, ctx: &egui::Context) {
-        self.load_models(ctx);
-        let core = self.core.clone();
-        let tx = self.events_tx.clone();
-        let egui_ctx = ctx.clone();
-        self.rt.spawn(async move {
-            if let Ok(usage) = core.usage().await {
-                let _ = tx.send(AgentEvent::UsageUpdated(usage));
-                egui_ctx.request_repaint();
-            }
-        });
-        self.check_updates(ctx, false);
-    }
-
-    fn check_updates(&self, ctx: &egui::Context, manual: bool) {
-        let tx = self.app_tx.clone();
-        let egui_ctx = ctx.clone();
-        self.rt.spawn(async move {
-            let res = updater::check_for_update().await;
-            if manual || res.as_ref().map(|u| u.update_available).unwrap_or(false) {
-                let _ = tx.send(AppMsg::UpdateChecked(res));
-                egui_ctx.request_repaint();
-            }
-        });
-    }
-
-    fn trigger_self_update(&mut self, ctx: &egui::Context) {
-        let Some(info) = self.update_info.clone() else {
-            self.check_updates(ctx, true);
-            return;
-        };
-        self.updating = true;
-        self.status = format!("Downloading update {}…", info.tag_name);
-        let tx = self.app_tx.clone();
-        let egui_ctx = ctx.clone();
-        self.rt.spawn(async move {
-            let res = updater::install_update(&info, None, true).await;
-            let _ = tx.send(AppMsg::UpdateInstalled(res));
-            egui_ctx.request_repaint();
-        });
-    }
-
-    fn trigger_system_setup(&mut self, ctx: &egui::Context) {
-        self.status = "Running system setup…".into();
-        let paths = self.core.paths.clone();
-        let tx = self.app_tx.clone();
-        let egui_ctx = ctx.clone();
-        self.rt.spawn(async move {
-            let res = tokio::task::spawn_blocking(move || {
-                setup::install_system(&paths, &SetupOptions::default())
-            })
-            .await
-            .map_err(|err| serika_runtime::Error::msg(err.to_string()))
-            .and_then(|r| r);
-            let _ = tx.send(AppMsg::SetupCompleted(res));
-            egui_ctx.request_repaint();
-        });
-    }
-
-    fn load_models(&self, ctx: &egui::Context) {
-        let core = self.core.clone();
-        let tx = self.events_tx.clone();
-        let egui_ctx = ctx.clone();
-        self.rt.spawn(async move {
-            match core.models().await {
-                Ok(catalog) => {
-                    let payload = catalog
-                        .all()
-                        .map(|model| {
-                            format!(
-                                "{}\t{}{}",
-                                model.id,
-                                model.name,
-                                if model.premium { " · PRO" } else { " · FREE" }
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let _ = tx.send(AgentEvent::Status(format!("catalog\n{payload}")));
-                    egui_ctx.request_repaint();
-                }
-                Err(err) => {
-                    let _ = tx.send(AgentEvent::Failed {
-                        message: format!("Could not load models: {err}"),
-                    });
-                    egui_ctx.request_repaint();
-                }
-            }
-        });
-    }
-
-    fn refresh_git(&mut self, ctx: &egui::Context) {
-        let root = PathBuf::from(&self.project);
-        if !root.is_dir() {
-            return;
+    fn refresh_remote(&mut self) {
+        let Some(core) = self.core.clone() else { return };
+        if self.session.is_some() {
+            let tx = self.tx.clone();
+            let core_models = core.clone();
+            self.tokio.spawn(async move {
+                let _ = tx.send(UiNotice::Catalog(
+                    core_models.client.models().await.map_err(|e| e.to_string()),
+                ));
+            });
         }
-        self.git_loading = true;
-        let tx = self.app_tx.clone();
-        let egui_ctx = ctx.clone();
-        self.rt.spawn(async move {
-            if let Ok(snap) = gitinfo::snapshot(&root).await {
-                let _ = tx.send(AppMsg::GitSnapshot(snap));
-                egui_ctx.request_repaint();
-            }
+        if let Some(session) = self.session.clone() {
+            let tx = self.tx.clone();
+            let core_acct = core;
+            self.tokio.spawn(async move {
+                let acct = core_acct.client.account(&session.token).await;
+                let usage = core_acct.client.usage(&session.token).await;
+                let result = match (acct, usage) {
+                    (Ok(a), Ok(u)) => Ok((a, u)),
+                    (Ok(a), Err(_)) => Ok((a, UsageSnapshot::default())),
+                    (Err(err), _) => Err(err.to_string()),
+                };
+                let _ = tx.send(UiNotice::Account(result));
+            });
+        }
+    }
+
+    fn refresh_git_async(&mut self) {
+        let project = self.project.clone();
+        let tx = self.tx.clone();
+        self.last_git_poll = Instant::now();
+        self.tokio.spawn(async move {
+            let snap = gitinfo::snapshot(&project).await.unwrap_or_default();
+            let _ = tx.send(UiNotice::GitRefreshed(snap));
+        });
+    }
+
+    fn check_updates_async(&mut self) {
+        let tx = self.tx.clone();
+        self.status = "Checking GitHub releases…".into();
+        self.tokio.spawn(async move {
+            let res = updater::check_for_update().await.map_err(|e| e.to_string());
+            let _ = tx.send(UiNotice::UpdateChecked(res));
         });
     }
 
     fn reload_sessions(&mut self) {
-        let path = PathBuf::from(&self.project);
-        self.sessions = self.core.sessions.list(Some(&path)).unwrap_or_default();
-        self.recent_projects = self.core.sessions.recent_projects().unwrap_or_default();
+        if let Some(core) = &self.core {
+            self.sessions = core.sessions.list(Some(&self.project)).unwrap_or_default();
+            if let Ok(recents) = core.sessions.recent_projects() {
+                self.recent_projects = recents
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_dir())
+                    .collect();
+            }
+        }
     }
 
-    fn new_thread(&mut self, scratch: bool, ctx: &egui::Context) {
-        if scratch {
-            let scratch_dir = self.core.paths.scratch_dir();
-            let _ = std::fs::create_dir_all(&scratch_dir);
-            self.project = scratch_dir.display().to_string();
-        }
-        self.session_id = None;
+    fn switch_project(&mut self, next: PathBuf) {
+        self.project = next;
+        self.active_session = None;
         self.messages.clear();
+        self.tools.clear();
         self.diffs.clear();
-        self.activity.clear();
-        self.streaming.clear();
-        self.streaming_segments.clear();
-        self.active_tool = None;
         self.reload_sessions();
-        self.refresh_git(ctx);
-        self.status = if scratch {
-            "New scratch thread ready".into()
-        } else {
-            "New thread ready".into()
+        self.refresh_git_async();
+    }
+
+    fn select_session(&mut self, id: &str) {
+        let Some(core) = &self.core else { return };
+        self.active_session = Some(id.to_string());
+        self.messages = core.sessions.messages(id).unwrap_or_default();
+        self.tools = core.sessions.tool_runs(id).unwrap_or_default();
+        self.diffs = core.sessions.changes(id).unwrap_or_default();
+        self.selected_diff = 0;
+    }
+
+    fn new_thread(&mut self) {
+        self.active_session = None;
+        self.messages.clear();
+        self.tools.clear();
+        self.diffs.clear();
+        self.streaming_reply.clear();
+        self.streaming_reasoning.clear();
+    }
+
+    fn send_prompt(&mut self) {
+        if self.running || self.prompt.trim().is_empty() {
+            return;
+        }
+        let Some(core) = self.core.clone() else { return };
+        let raw_prompt = self.prompt.trim().to_string();
+        let prompt = match self.composer_mode {
+            ComposerMode::Build => raw_prompt,
+            ComposerMode::Plan => format!(
+                "[PLAN MODE] Inspect the relevant files and produce a clear, step-by-step engineering plan before making edits:\n\n{raw_prompt}"
+            ),
         };
-    }
-
-    fn turn_into_project(&mut self, ctx: &egui::Context) {
-        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-            let _ = self.core.sessions.remember_project(&path);
-            if let Some(id) = &self.session_id {
-                let _ = self.core.sessions.relocate_project(id, &path);
-            }
-            self.project = path.display().to_string();
-            self.reload_sessions();
-            self.refresh_git(ctx);
-            self.status = format!("Thread bound to {}", path.display());
-        }
-    }
-
-    fn isolate_in_worktree(&mut self, ctx: &egui::Context) {
-        let root = PathBuf::from(&self.project);
-        let worktrees_root = self.core.paths.worktrees_dir();
-        let branch_name = if !self.git_new_branch.trim().is_empty() {
-            self.git_new_branch.trim().to_string()
-        } else if let Some(id) = &self.session_id {
-            format!("thread-{}", &id[..id.len().min(8)])
-        } else {
-            let secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            format!("thread-{secs:x}")
-        };
-        self.git_new_branch.clear();
-        self.status = format!("Creating isolated worktree `{branch_name}`…");
-        let tx = self.app_tx.clone();
-        let egui_ctx = ctx.clone();
-        self.rt.spawn(async move {
-            match gitinfo::create_worktree(&root, &worktrees_root, &branch_name).await {
-                Ok(wt_path) => {
-                    let snap = gitinfo::snapshot(&wt_path).await.unwrap_or_default();
-                    let _ = tx.send(AppMsg::WorktreeCreated {
-                        path: wt_path,
-                        snapshot: snap,
-                    });
-                    egui_ctx.request_repaint();
-                }
-                Err(err) => {
-                    let snap = gitinfo::snapshot(&root).await.unwrap_or_default();
-                    let _ = tx.send(AppMsg::GitActionDone {
-                        notice: format!("Worktree error: {err}"),
-                        snapshot: snap,
-                    });
-                    egui_ctx.request_repaint();
-                }
-            }
-        });
-    }
-
-    fn open_session(&mut self, id: &str) {
-        self.session_id = Some(id.to_string());
-        self.messages = self
-            .core
-            .sessions
-            .messages(id)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|message| message.role != "user" || !message.content.starts_with("Tool results:"))
-            .map(|message| UiMessage::new(message.role, strip_tools(&message.content)))
-            .collect();
-        self.diffs = self
-            .core
-            .sessions
-            .changes(id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(path, diff)| FileDiff { path, diff })
-            .collect();
-        self.activity = self
-            .core
-            .sessions
-            .tool_runs(id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|run| {
-                format!(
-                    "{} {} — {}",
-                    run.name,
-                    if run.ok { "ok" } else { "failed" },
-                    run.output.lines().next().unwrap_or("")
-                )
-            })
-            .collect();
-        self.diff_index = 0;
-        self.streaming.clear();
-        self.streaming_segments.clear();
-        self.active_tool = None;
-    }
-
-    fn send(&mut self, ctx: &egui::Context) {
-        if self.running {
-            return;
-        }
-        let prompt = self.input.trim().to_string();
-        if prompt.is_empty() {
-            return;
-        }
-        let project = PathBuf::from(&self.project);
-        if !project.is_dir() {
-            self.status = "Choose a project directory that exists.".into();
-            return;
-        }
-        self.input.clear();
-        self.messages.push(UiMessage::new("user", prompt.clone()));
-        self.streaming.clear();
-        self.streaming_segments.clear();
-        self.active_tool = None;
+        self.prompt.clear();
         self.running = true;
-        self.status = "Streaming response…".into();
+        self.streaming_reply.clear();
+        self.streaming_reasoning.clear();
+        self.status = "Running…".into();
+
+        let (events_tx, events_rx) = unbounded_channel();
+        self.events_rx = Some(events_rx);
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
-        let core = self.core.clone();
-        let tx = self.events_tx.clone();
-        let egui_ctx = ctx.clone();
-        let model = self.model_ids.get(self.model_index).cloned();
-        let permission = self.permission;
-        let session_id = self.session_id.clone();
-        self.rt.spawn(async move {
-            let result = core
-                .run_task(TaskRequest {
-                    project,
-                    prompt,
-                    session_id,
-                    model,
-                    permission: Some(permission),
-                    yes: false,
-                    events: tx.clone(),
-                    cancel,
-                })
-                .await;
-            if let Err(err) = result {
-                let _ = tx.send(AgentEvent::Failed {
-                    message: err.to_string(),
-                });
-            }
-            let _ = tx.send(AgentEvent::Status("__idle__".into()));
-            egui_ctx.request_repaint();
+
+        let request = TaskRequest {
+            project: self.project.clone(),
+            prompt,
+            session_id: self.active_session.clone(),
+            model: if self.selected_model.is_empty() {
+                None
+            } else {
+                Some(self.selected_model.clone())
+            },
+            permission: Some(if self.composer_mode == ComposerMode::Plan {
+                PermissionMode::ReadOnly
+            } else {
+                self.permission
+            }),
+            yes: self.auto_approve_session,
+            events: events_tx,
+            cancel,
+        };
+        let tx = self.tx.clone();
+        self.tokio.spawn(async move {
+            let result = core.run_task(request).await.map_err(|err| err.to_string());
+            let _ = tx.send(UiNotice::TaskFinished(result));
         });
     }
 
-    fn poll(&mut self, ctx: &egui::Context) {
-        let mut dirty_stream = false;
-        while let Ok(event) = self.events_rx.try_recv() {
-            if matches!(event, AgentEvent::MessageChunk { .. }) {
-                dirty_stream = true;
-            }
-            self.on_event(event, ctx);
-        }
-        if dirty_stream {
-            self.streaming_segments = parse_segments(&self.streaming);
-        }
-        while let Ok(msg) = self.app_rx.try_recv() {
-            self.on_app_msg(msg);
-        }
-        if self.running {
-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
-        }
-    }
-
-    fn on_app_msg(&mut self, msg: AppMsg) {
-        match msg {
-            AppMsg::GitSnapshot(snap) => {
-                self.git = snap;
-                self.git_loading = false;
-            }
-            AppMsg::GitActionDone { notice, snapshot } => {
-                self.status = notice;
-                self.git = snapshot;
-                self.git_loading = false;
-            }
-            AppMsg::WorktreeCreated { path, snapshot } => {
-                let _ = self.core.sessions.remember_project(&path);
-                if let Some(id) = &self.session_id {
-                    let _ = self.core.sessions.relocate_project(id, &path);
+    fn drain_channels(&mut self) {
+        while let Ok(notice) = self.rx.try_recv() {
+            match notice {
+                UiNotice::Catalog(Ok(catalog)) => {
+                    self.catalog = catalog;
                 }
-                self.project = path.display().to_string();
-                self.git = snapshot;
-                self.git_loading = false;
-                self.reload_sessions();
-                self.status = format!("Isolated thread in worktree {}", path.display());
-            }
-            AppMsg::FileDiffLoaded { title, diff } => {
-                self.custom_diff_title = title;
-                self.custom_diff_text = diff;
-                self.diff_scope = DiffScope::Unstaged;
-                self.right = RightTab::Diff;
-                self.show_inspector = true;
-            }
-            AppMsg::UpdateChecked(res) => match res {
-                Ok(info) => {
-                    if info.update_available {
-                        self.status = format!("Update available: {} (current {})", info.tag_name, info.current_version);
-                    } else {
-                        self.status = format!("Serika Code v{} is up to date", info.current_version);
+                UiNotice::Catalog(Err(_)) => {}
+                UiNotice::Account(Ok((profile, usage))) => {
+                    self.profile = Some(profile);
+                    self.usage = Some(usage);
+                }
+                UiNotice::Account(Err(_)) => {}
+                UiNotice::LoggedIn(Ok(LoginOutcome::SignedIn(session))) => {
+                    if let Some(core) = &self.core {
+                        let _ = core.secrets.save(&session);
                     }
+                    self.session = Some(session);
+                    self.password_input.clear();
+                    self.two_factor_input.clear();
+                    self.magic_token_input.clear();
+                    self.auth_notice = "Signed in to Serika Cloud.".into();
+                    self.refresh_remote();
+                }
+                UiNotice::LoggedIn(Ok(LoginOutcome::NeedsSecondFactor { message })) => {
+                    self.auth_notice = message;
+                }
+                UiNotice::LoggedIn(Err(err)) => {
+                    self.auth_notice = err;
+                }
+                UiNotice::GitRefreshed(snap) => {
+                    self.git = snap;
+                }
+                UiNotice::GitActionDone(res) => {
+                    match res {
+                        Ok(msg) => self.status = msg,
+                        Err(err) => self.status = format!("Git: {err}"),
+                    }
+                    self.refresh_git_async();
+                }
+                UiNotice::DiffLoaded((path, d)) => {
+                    self.diffs.retain(|(p, _)| p != &path);
+                    self.diffs.push((path, d));
+                    self.selected_diff = self.diffs.len().saturating_sub(1);
+                    self.inspector_tab = InspectorTab::Diffs;
+                }
+                UiNotice::WorktreeCreated(Ok(wt)) => {
+                    self.status = format!("Switched to worktree {}", wt.display());
+                    self.switch_project(wt);
+                }
+                UiNotice::WorktreeCreated(Err(e)) => {
+                    self.status = format!("Worktree: {e}");
+                }
+                UiNotice::UpdateChecked(Ok(info)) => {
+                    self.status = if info.update_available {
+                        format!("Update v{} available", info.latest_version)
+                    } else {
+                        format!("Up to date (v{})", info.current_version)
+                    };
                     self.update_info = Some(info);
                 }
-                Err(err) => {
-                    self.status = format!("Update check failed: {err}");
+                UiNotice::UpdateChecked(Err(e)) => {
+                    self.status = format!("Update check: {e}");
                 }
-            },
-            AppMsg::UpdateInstalled(res) => {
-                self.updating = false;
-                match res {
-                    Ok(outcome) => {
-                        self.status = format!(
-                            "Updated to v{} in {}. Restart Serika Code to run the new build.",
-                            outcome.installed_version,
-                            outcome.install_dir.display()
-                        );
-                        if let Some(info) = &mut self.update_info {
-                            info.update_available = false;
+                UiNotice::SetupDone(Ok(msg)) => {
+                    self.setup_status = msg;
+                    self.status = "Setup complete".into();
+                }
+                UiNotice::SetupDone(Err(e)) => {
+                    self.setup_status = format!("Setup failed: {e}");
+                }
+                UiNotice::TaskFinished(result) => {
+                    self.running = false;
+                    self.cancel = None;
+                    self.streaming_reply.clear();
+                    self.streaming_reasoning.clear();
+                    match result {
+                        Ok(outcome) => {
+                            self.status = if outcome.finished {
+                                "Ready".into()
+                            } else {
+                                "Stopped at tool round limit".into()
+                            };
+                            self.reload_sessions();
+                            self.select_session(&outcome.session_id);
+                            self.refresh_git_async();
+                        }
+                        Err(err) => {
+                            self.status = err;
+                            if let Some(id) = self.active_session.clone() {
+                                self.select_session(&id);
+                            }
                         }
                     }
-                    Err(err) => {
-                        self.status = format!("Update failed: {err}");
-                    }
                 }
             }
-            AppMsg::SetupCompleted(res) => match res {
-                Ok(report) => {
-                    self.status = format!(
-                        "Installed to {} ({} binaries, {} shortcuts)",
-                        report.bin_dir.display(),
-                        report.installed_binaries.len(),
-                        report.shortcuts_created.len()
-                    );
-                }
-                Err(err) => {
-                    self.status = format!("Setup failed: {err}");
-                }
-            },
         }
-    }
 
-    fn on_event(&mut self, event: AgentEvent, ctx: &egui::Context) {
-        match event {
-            AgentEvent::Started { session_id } => {
-                self.session_id = Some(session_id);
-                self.reload_sessions();
+        let mut incoming = Vec::new();
+        if let Some(rx) = &mut self.events_rx {
+            while let Ok(event) = rx.try_recv() {
+                incoming.push(event);
             }
-            AgentEvent::Status(text) if text == "__idle__" => {
-                self.running = false;
-                self.cancel = None;
-                self.active_tool = None;
-                if !self.streaming.is_empty() {
-                    let text = std::mem::take(&mut self.streaming);
-                    self.streaming_segments.clear();
-                    self.messages.push(UiMessage::new("assistant", text));
+        }
+        for event in incoming {
+            match event {
+                AgentEvent::Started { session_id } => {
+                    self.active_session = Some(session_id.clone());
+                    self.reload_sessions();
+                    self.select_session(&session_id);
                 }
-                self.status = "Ready".into();
-                self.reload_sessions();
-                self.refresh_git(ctx);
-            }
-            AgentEvent::Status(text) if text.starts_with("catalog\n") => {
-                self.model_ids.clear();
-                self.model_labels.clear();
-                for line in text.lines().skip(1) {
-                    if let Some((id, label)) = line.split_once('\t') {
-                        self.model_ids.push(id.to_string());
-                        self.model_labels.push(label.to_string());
+                AgentEvent::Status(text) => self.status = text,
+                AgentEvent::ReasoningChunk { text } => self.streaming_reasoning.push_str(&text),
+                AgentEvent::MessageChunk { text } => self.streaming_reply.push_str(&text),
+                AgentEvent::MessageCompleted { .. } => {
+                    self.streaming_reply.clear();
+                    self.streaming_reasoning.clear();
+                    if let Some(id) = self.active_session.clone() {
+                        self.select_session(&id);
                     }
                 }
-                if let Some(selected) = &self.core.config.model {
-                    if let Some(index) = self.model_ids.iter().position(|id| id == selected) {
-                        self.model_index = index;
-                    }
+                AgentEvent::ToolRequested { name, .. } => {
+                    self.status = format!("Preparing {name}…");
                 }
-            }
-            AgentEvent::Status(text) => {
-                if text.starts_with("signed in as ") {
-                    self.account = text.trim_start_matches("signed in as ").to_string();
-                }
-                self.status = text;
-            }
-            AgentEvent::MessageChunk { text } => {
-                if !text.is_empty() {
-                    self.streaming.push_str(&text);
-                }
-            }
-            AgentEvent::MessageCompleted { text } => {
-                self.streaming.clear();
-                self.streaming_segments.clear();
-                let cleaned = strip_tools(&text);
-                if !cleaned.is_empty() {
-                    self.messages.push(UiMessage::new("assistant", cleaned));
-                }
-            }
-            AgentEvent::ToolRequested { name, .. } => {
-                self.active_tool = Some(name.clone());
-                self.activity.push(format!("▸ {name}"));
-            }
-            AgentEvent::ApprovalRequired {
-                id,
-                title,
-                detail,
-                destructive,
-            } => {
-                self.approval = Some(PendingApproval {
+                AgentEvent::ApprovalRequired {
                     id,
                     title,
                     detail,
-                    destructive,
-                });
-                self.status = "Waiting for approval".into();
-            }
-            AgentEvent::ToolOutput { stream, .. } => {
-                if self.activity.len() > 120 {
-                    self.activity.drain(0..60);
+                    ..
+                } => {
+                    self.pending_approval = Some(PendingApproval { id, title, detail });
                 }
-                self.activity.push(stream);
-            }
-            AgentEvent::ToolFinished {
-                name, ok, summary, ..
-            } => {
-                self.active_tool = None;
-                self.activity.push(format!(
-                    "{} {} — {summary}",
-                    if ok { "✓" } else { "✗" },
-                    name
-                ));
-            }
-            AgentEvent::FileChanged(diff) => {
-                self.activity.push(format!("✎ edited {}", diff.path));
-                self.diffs.push(diff);
-                self.diff_index = self.diffs.len().saturating_sub(1);
-                self.diff_scope = DiffScope::Session;
-                self.right = RightTab::Diff;
-                self.refresh_git(ctx);
-            }
-            AgentEvent::UsageUpdated(usage) => {
-                self.status = usage.summary_line();
-                self.usage = Some(usage);
-            }
-            AgentEvent::Completed { summary } => {
-                let cleaned = strip_tools(&summary);
-                if self.messages.last().map(|m| m.raw.as_str()) != Some(cleaned.as_str())
-                    && !cleaned.is_empty()
-                {
-                    self.messages.push(UiMessage::new("assistant", cleaned));
+                AgentEvent::ToolStarted { name, .. } => {
+                    self.status = format!("Running {name}…");
                 }
+                AgentEvent::ToolOutput { .. } => {}
+                AgentEvent::ToolFinished { .. } => {
+                    if let Some(id) = self.active_session.clone() {
+                        self.select_session(&id);
+                    }
+                }
+                AgentEvent::FileChanged(diff) => {
+                    self.diffs.retain(|(p, _)| p != &diff.path);
+                    self.diffs.push((diff.path, diff.diff));
+                    self.selected_diff = self.diffs.len().saturating_sub(1);
+                }
+                AgentEvent::UsageUpdated(u) => self.usage = Some(u),
+                AgentEvent::Completed { .. } => self.status = "Ready".into(),
+                AgentEvent::Failed { message } => self.status = message,
+                AgentEvent::Cancelled => self.status = "Cancelled".into(),
             }
-            AgentEvent::Failed { message } => {
-                self.running = false;
-                self.active_tool = None;
-                self.status = message.clone();
-                self.messages.push(UiMessage::new("error", message));
-            }
-            AgentEvent::Cancelled => {
-                self.running = false;
-                self.active_tool = None;
-                self.status = "Cancelled".into();
-            }
-            AgentEvent::ReasoningChunk { .. } | AgentEvent::ToolStarted { .. } => {}
         }
     }
 
-    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        let (toggle_k, toggle_b, new_t, open_settings, esc) = ctx.input(|i| {
-            (
-                i.modifiers.command && i.key_pressed(egui::Key::K),
-                i.modifiers.command && i.key_pressed(egui::Key::B),
-                i.modifiers.command && i.key_pressed(egui::Key::N),
-                i.modifiers.command && i.key_pressed(egui::Key::Comma),
-                i.key_pressed(egui::Key::Escape),
-            )
-        });
-        if toggle_k {
-            self.show_palette = !self.show_palette;
-            self.palette_query.clear();
-        }
-        if toggle_b {
-            self.show_inspector = !self.show_inspector;
-        }
-        if new_t {
-            self.new_thread(false, ctx);
-        }
-        if open_settings {
-            self.show_settings = !self.show_settings;
-        }
-        if esc {
-            if self.show_palette {
-                self.show_palette = false;
-            } else if self.running {
-                if let Some(cancel) = &self.cancel {
-                    cancel.cancel();
+    fn save_providers_and_settings(&mut self) {
+        if let Some(core) = &self.core {
+            let mut config = core.config.clone();
+            config.permission = self.permission;
+            config.model = if self.selected_model.is_empty() {
+                None
+            } else {
+                Some(self.selected_model.clone())
+            };
+            config.openai_api_key = non_empty(&self.openai_key_input);
+            config.anthropic_api_key = non_empty(&self.anthropic_key_input);
+            config.gemini_api_key = non_empty(&self.gemini_key_input);
+            if !self.api_base_input.trim().is_empty() {
+                config.api_base_url = self.api_base_input.trim().to_string();
+            }
+            if !self.accounts_base_input.trim().is_empty() {
+                config.accounts_base_url = self.accounts_base_input.trim().to_string();
+            }
+            match config.save(&core.paths.config_file) {
+                Ok(()) => {
+                    if let Ok(reopened) = Runtime::open() {
+                        self.core = Some(Arc::new(reopened));
+                    }
+                    self.local_harnesses = detect_local_harnesses();
+                    self.provider_models = builtin_provider_models(&self.local_harnesses);
+                    self.status = "Saved providers & configuration".into();
                 }
-                self.core.approvals.deny_all();
+                Err(err) => self.status = format!("Save error: {err}"),
             }
         }
     }
 }
 
 impl eframe::App for SerikaApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+    fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = root_ui.ctx().clone();
         if self.smoke {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        self.poll(&ctx);
-        self.handle_shortcuts(&ctx);
-        self.top_bar(ui, &ctx);
-        self.sidebar(ui, &ctx);
-        if self.show_inspector {
-            self.right_panel(ui, &ctx);
+        self.drain_channels();
+        if self.running {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else if self.last_git_poll.elapsed() > Duration::from_secs(8) {
+            self.refresh_git_async();
         }
-        self.conversation(ui, &ctx);
-        self.settings_window(&ctx);
-        self.account_window(&ctx);
-        self.command_palette_window(&ctx);
+
+        // Global shortcuts
+        ctx.input_mut(|i| {
+            if i.consume_key(egui::Modifiers::COMMAND, Key::K) {
+                self.show_palette = !self.show_palette;
+            }
+            if i.consume_key(egui::Modifiers::COMMAND, Key::N) {
+                self.new_thread();
+            }
+            if i.consume_key(egui::Modifiers::COMMAND, Key::B) {
+                self.show_inspector = !self.show_inspector;
+            }
+        });
+
+        self.draw_sidebar(root_ui);
+        if self.show_inspector {
+            self.draw_inspector(root_ui);
+        }
+        self.draw_main_canvas(root_ui);
+
+        self.draw_approval_modal(&ctx);
+        self.draw_providers_modal(&ctx);
+        self.draw_settings_modal(&ctx);
+        self.draw_palette_modal(&ctx);
     }
 }
 
+// =============================================================================
+// UI Layout Sections (T3 Code + Serika Brand Guidelines)
+// =============================================================================
 impl SerikaApp {
-    fn top_bar(&mut self, root_ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::Panel::top("top_header")
-            .exact_size(44.0)
+    fn draw_sidebar(&mut self, root_ui: &mut egui::Ui) {
+        egui::Panel::left("t3_sidebar")
+            .resizable(true)
+            .default_size(252.0)
+            .size_range(210.0..=340.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(BG_SIDEBAR)
+                    .inner_margin(Margin::same(12))
+                    .stroke(Stroke::new(1.0, BORDER_SUBTLE)),
+            )
             .show(root_ui, |ui| {
-                ui.add_space(4.0);
+                // 1. T3 Brand Header Row
                 ui.horizontal(|ui| {
-                    ui.add_space(8.0);
+                    let (logo_rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+                    ui.painter().rect_filled(logo_rect, 6.0, SERIKA_VIOLET_SOFT);
+                    ui.painter().rect_stroke(
+                        logo_rect,
+                        6.0,
+                        Stroke::new(1.0, SERIKA_VIOLET.gamma_multiply(0.45)),
+                        StrokeKind::Inside,
+                    );
+                    paint_icon(
+                        ui.painter(),
+                        logo_rect.shrink(3.0),
+                        Icon::SerikaMark,
+                        SERIKA_VIOLET_LIGHT,
+                    );
+
+                    ui.add_space(2.0);
                     ui.label(
-                        egui::RichText::new("◆ SERIKA CODE")
+                        RichText::new("Serika")
                             .strong()
-                            .size(14.0)
-                            .color(egui::Color32::from_rgb(244, 63, 94)),
+                            .size(14.5)
+                            .color(TEXT_PRIMARY),
                     );
                     ui.label(
-                        egui::RichText::new(format!("v{}", serika_runtime::client::VERSION))
-                            .small()
-                            .color(egui::Color32::from_rgb(130, 134, 150)),
+                        RichText::new("Code")
+                            .strong()
+                            .size(14.5)
+                            .color(SERIKA_VIOLET_LIGHT),
                     );
-                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("v{}", serika_runtime::client::VERSION))
+                            .size(10.5)
+                            .color(TEXT_DIM),
+                    );
 
-                    // Project / Scratch indicator
-                    let project_name = PathBuf::from(&self.project)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(&self.project)
-                        .to_string();
-
-                    if self.is_scratch() {
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_rgb(48, 24, 40))
-                            .corner_radius(egui::CornerRadius::same(6))
-                            .inner_margin(egui::Margin::symmetric(8, 3))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    egui::RichText::new("✦ Scratch Workspace")
-                                        .small()
-                                        .color(egui::Color32::from_rgb(251, 113, 133)),
-                                );
-                            });
-                        if ui
-                            .button(egui::RichText::new("Turn into Project…").small())
-                            .on_hover_text("Bind this scratch thread to a real project directory")
-                            .clicked()
-                        {
-                            self.turn_into_project(ctx);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if icon_button(ui, Icon::Plus, "New Thread (Ctrl+N)", true).clicked() {
+                            self.new_thread();
                         }
-                    } else {
-                        if ui
-                            .button(egui::RichText::new(format!("📁 {project_name}")).small())
-                            .on_hover_text(&self.project)
-                            .clicked()
-                        {
-                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                let _ = self.core.sessions.remember_project(&path);
-                                self.project = path.display().to_string();
-                                self.session_id = None;
-                                self.messages.clear();
-                                self.reload_sessions();
-                                self.refresh_git(ctx);
+                        if icon_button(ui, Icon::Folder, "Open Project Folder", false).clicked() {
+                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                self.switch_project(folder);
                             }
                         }
-                    }
+                    });
+                });
 
-                    // Git Branch & Worktree Pill
-                    if self.git.is_repo {
-                        let dirty = self.git.entries.len();
-                        let branch_label = if dirty > 0 {
-                            format!("⎇ {} ({dirty}*)", self.git.branch)
-                        } else {
-                            format!("⎇ {}", self.git.branch)
-                        };
-                        let branch_color = if dirty > 0 {
-                            egui::Color32::from_rgb(245, 158, 11)
-                        } else {
-                            egui::Color32::from_rgb(16, 185, 129)
-                        };
+                ui.add_space(10.0);
+
+                // 2. Search / Filter Threads Input
+                egui::Frame::NONE
+                    .fill(BG_INPUT)
+                    .corner_radius(CornerRadius::same(8))
+                    .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(8, 5))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (ir, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+                            paint_icon(ui.painter(), ir, Icon::Search, TEXT_DIM);
+                            ui.add(
+                                TextEdit::singleline(&mut self.session_filter)
+                                    .hint_text("Filter threads…")
+                                    .frame(egui::Frame::NONE)
+                                    .font(FontId::proportional(12.0))
+                                    .desired_width(f32::INFINITY),
+                            );
+                            if !self.session_filter.is_empty()
+                                && ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("×").size(12.0).color(TEXT_DIM),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .clicked()
+                            {
+                                self.session_filter.clear();
+                            }
+                        });
+                    });
+
+                ui.add_space(12.0);
+
+                // 3. Active Project Section Header (T3 Project Group style)
+                let project_label = workspace_display_name(&self.project, &self.core);
+                ui.horizontal(|ui| {
+                    let (fr, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+                    paint_icon(ui.painter(), fr, Icon::Folder, SERIKA_VIOLET_LIGHT);
+                    ui.label(
+                        RichText::new(&project_label)
+                            .strong()
+                            .size(12.0)
+                            .color(TEXT_PRIMARY),
+                    );
+                    if self.git.is_repo && !self.git.branch.is_empty() {
+                        ui.label(
+                            RichText::new(format!("· {}", self.git.branch))
+                                .size(11.0)
+                                .color(TEXT_DIM),
+                        );
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .button(egui::RichText::new(branch_label).small().color(branch_color))
-                            .on_hover_text("Open Source Control & Branch Manager")
-                            .clicked()
-                        {
-                            self.show_inspector = true;
-                            self.right = RightTab::Git;
-                        }
-                        if ui
-                            .button(egui::RichText::new("⑂ Isolate Worktree").small())
-                            .on_hover_text(
-                                "T3-style isolated git worktree: spawn a dedicated branch & worktree for this thread",
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Scratch").size(10.5).color(TEXT_MUTED),
+                                )
+                                .fill(BG_CARD)
+                                .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                                .corner_radius(CornerRadius::same(5)),
                             )
+                            .on_hover_text("Switch to isolated Scratch workspace")
                             .clicked()
                         {
-                            self.isolate_in_worktree(ctx);
+                            if let Some(core) = &self.core {
+                                let scratch = core.paths.scratch_dir();
+                                let _ = std::fs::create_dir_all(&scratch);
+                                self.switch_project(scratch);
+                            }
+                        }
+                    });
+                });
+
+                ui.add_space(6.0);
+
+                // 4. Thread List
+                let q = self.session_filter.to_ascii_lowercase();
+                let filtered: Vec<SessionSummary> = self
+                    .sessions
+                    .iter()
+                    .filter(|s| q.is_empty() || s.title.to_ascii_lowercase().contains(&q))
+                    .cloned()
+                    .collect();
+
+                let footer_reserve = 88.0;
+                let list_h = (ui.available_height() - footer_reserve).max(100.0);
+                ScrollArea::vertical()
+                    .id_salt("t3_thread_scroll")
+                    .max_height(list_h)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if filtered.is_empty() {
+                            ui.add_space(14.0);
+                            ui.label(
+                                RichText::new(
+                                    "No threads yet. Start typing in the composer to begin.",
+                                )
+                                .size(11.5)
+                                .color(TEXT_DIM),
+                            );
+                        }
+                        let mut to_select = None;
+                        let mut to_delete = None;
+                        for item in &filtered {
+                            let is_active =
+                                self.active_session.as_deref() == Some(item.id.as_str());
+                            let row_resp = draw_thread_row(ui, item, is_active);
+                            if row_resp.0 {
+                                to_select = Some(item.id.clone());
+                            }
+                            if row_resp.1 {
+                                to_delete = Some(item.id.clone());
+                            }
+                        }
+                        if let Some(id) = to_select {
+                            self.select_session(&id);
+                        }
+                        if let Some(id) = to_delete {
+                            if let Some(core) = &self.core {
+                                let _ = core.sessions.delete(&id);
+                                if self.active_session.as_deref() == Some(id.as_str()) {
+                                    self.new_thread();
+                                }
+                                self.reload_sessions();
+                            }
+                        }
+
+                        if self.recent_projects.len() > 1 {
+                            ui.add_space(12.0);
+                            ui.label(
+                                RichText::new("RECENT WORKSPACES")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(TEXT_DIM),
+                            );
+                            ui.add_space(4.0);
+                            let mut switch_to = None;
+                            for rp in &self.recent_projects {
+                                if rp == &self.project {
+                                    continue;
+                                }
+                                let name = rp
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("project");
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(name).size(11.5).color(TEXT_MUTED),
+                                        )
+                                        .fill(Color32::TRANSPARENT)
+                                        .frame(false),
+                                    )
+                                    .on_hover_text(rp.display().to_string())
+                                    .clicked()
+                                {
+                                    switch_to = Some(rp.clone());
+                                }
+                            }
+                            if let Some(p) = switch_to {
+                                self.switch_project(p);
+                            }
+                        }
+                    });
+
+                // 5. Sidebar Footer (Provider Pill + Quick Actions)
+                ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
+                    ui.horizontal(|ui| {
+                        if pill_icon_button(ui, Icon::Key, "Providers & Keys", self.show_providers)
+                            .clicked()
+                        {
+                            self.show_providers = !self.show_providers;
+                        }
+                        if pill_icon_button(ui, Icon::Sliders, "Settings", self.show_settings)
+                            .clicked()
+                        {
+                            self.show_settings = !self.show_settings;
+                        }
+                        if pill_icon_button(ui, Icon::Refresh, "Updates", false).clicked() {
+                            self.check_updates_async();
+                        }
+                    });
+
+                    ui.add_space(6.0);
+                    let active_provider = ProviderKind::from_model_id(&self.selected_model);
+                    let provider_ready = match active_provider {
+                        ProviderKind::Local => true,
+                        ProviderKind::OpenAi => self
+                            .core
+                            .as_ref()
+                            .and_then(|c| c.config.resolve_openai_key())
+                            .is_some(),
+                        ProviderKind::Anthropic => self
+                            .core
+                            .as_ref()
+                            .and_then(|c| c.config.resolve_anthropic_key())
+                            .is_some(),
+                        ProviderKind::Gemini => self
+                            .core
+                            .as_ref()
+                            .and_then(|c| c.config.resolve_gemini_key())
+                            .is_some(),
+                        ProviderKind::Serika => self.session.is_some(),
+                    };
+                    let dot_color = if provider_ready { EMERALD } else { AMBER };
+                    ui.horizontal(|ui| {
+                        let (dr, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                        ui.painter().circle_filled(dr.center(), 3.5, dot_color);
+                        ui.label(
+                            RichText::new(active_provider.label())
+                                .size(11.5)
+                                .strong()
+                                .color(TEXT_PRIMARY),
+                        );
+                        ui.label(
+                            RichText::new(format!("· {}", self.status))
+                                .size(11.0)
+                                .color(TEXT_DIM),
+                        );
+                    });
+                    ui.separator();
+                });
+            });
+    }
+
+    fn draw_main_canvas(&mut self, root_ui: &mut egui::Ui) {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(BG_DEEP))
+            .show(root_ui, |ui| {
+                // 1. Minimal T3 Top Breadcrumb Bar
+                self.draw_top_header(ui);
+
+                if let Some(err) = &self.startup_error {
+                    ui.add_space(12.0);
+                    ui.colored_label(ROSE, format!("Runtime error: {err}"));
+                    return;
+                }
+
+                // 2. Main Canvas: Draft Hero State vs Active Conversation State
+                let is_draft = self.messages.is_empty() && !self.running;
+                if is_draft {
+                    self.draw_t3_draft_hero(ui);
+                } else {
+                    self.draw_active_thread_canvas(ui);
+                }
+            });
+    }
+
+    fn draw_top_header(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::NONE
+            .fill(BG_DEEP)
+            .inner_margin(Margin::symmetric(18, 9))
+            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let proj_name = workspace_display_name(&self.project, &self.core);
+                    let (fr, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                    paint_icon(ui.painter(), fr, Icon::Folder, SERIKA_VIOLET_LIGHT);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(&proj_name)
+                                    .size(12.5)
+                                    .strong()
+                                    .color(TEXT_PRIMARY),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text(format!(
+                            "{}\nClick to change project folder",
+                            self.project.display()
+                        ))
+                        .clicked()
+                    {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            self.switch_project(folder);
                         }
                     }
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(8.0);
-                        let inspector_label = if self.show_inspector {
-                            "◫ Inspector"
+                    ui.label(RichText::new("/").size(12.5).color(TEXT_DIM));
+
+                    let thread_title = self
+                        .active_session
+                        .as_ref()
+                        .and_then(|id| self.sessions.iter().find(|s| &s.id == id))
+                        .map(|s| s.title.as_str())
+                        .unwrap_or("New thread");
+                    ui.label(RichText::new(thread_title).size(12.5).color(TEXT_MUTED));
+
+                    if self.git.is_repo {
+                        ui.add_space(6.0);
+                        egui::Frame::NONE
+                            .fill(BG_CARD)
+                            .corner_radius(CornerRadius::same(6))
+                            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                            .inner_margin(Margin::symmetric(7, 2))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    let (gr, _) =
+                                        ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
+                                    paint_icon(
+                                        ui.painter(),
+                                        gr,
+                                        Icon::GitBranch,
+                                        SERIKA_VIOLET_LIGHT,
+                                    );
+                                    ui.label(
+                                        RichText::new(&self.git.branch)
+                                            .size(11.0)
+                                            .color(TEXT_MUTED),
+                                    );
+                                    if !self.git.entries.is_empty() {
+                                        ui.label(
+                                            RichText::new(format!("+{}", self.git.entries.len()))
+                                                .size(10.5)
+                                                .strong()
+                                                .color(AMBER),
+                                        );
+                                    }
+                                });
+                            });
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let inspector_badge = self.git.entries.len() + self.diffs.len();
+                        let insp_label = if inspector_badge > 0 {
+                            format!("Inspector ({inspector_badge})")
                         } else {
-                            "▭ Inspector"
+                            "Inspector".to_string()
                         };
-                        if ui
-                            .button(egui::RichText::new(inspector_label).small())
-                            .on_hover_text("Toggle Right Inspector (Ctrl+B)")
+                        if pill_icon_button(ui, Icon::PanelRight, &insp_label, self.show_inspector)
+                            .on_hover_text("Toggle Git & Diffs Inspector (Ctrl+B)")
                             .clicked()
                         {
                             self.show_inspector = !self.show_inspector;
                         }
 
-                        if ui
-                            .button(egui::RichText::new("⌘K Palette").small())
+                        if pill_icon_button(ui, Icon::Search, "Ctrl+K", self.show_palette)
                             .on_hover_text("Open Command Palette (Ctrl+K)")
                             .clicked()
                         {
                             self.show_palette = !self.show_palette;
-                            self.palette_query.clear();
-                        }
-
-                        if let Some(info) = &self.update_info {
-                            if info.update_available {
-                                let btn = egui::Button::new(
-                                    egui::RichText::new(format!("⬆ Update {}", info.tag_name))
-                                        .small()
-                                        .strong()
-                                        .color(egui::Color32::WHITE),
-                                )
-                                .fill(egui::Color32::from_rgb(225, 29, 72));
-                                if ui.add_enabled(!self.updating, btn).clicked() {
-                                    self.trigger_self_update(ctx);
-                                }
-                            }
                         }
                     });
                 });
             });
     }
 
-    fn sidebar(&mut self, root_ui: &mut egui::Ui, ctx: &egui::Context) {
-        let mut action: Option<SidebarAction> = None;
+    /// T3 Code Draft Hero State: Centered floating Composer card + Context Strip + Compact Pills.
+    fn draw_t3_draft_hero(&mut self, ui: &mut egui::Ui) {
+        let avail = ui.available_size();
+        let top_pad = ((avail.y - 340.0) * 0.36).max(28.0);
 
-        egui::Panel::left("sidebar")
-            .exact_size(270.0)
-            .show(root_ui, |ui| {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    let new_btn = egui::Button::new(
-                        egui::RichText::new("+ New Thread")
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(egui::Color32::from_rgb(225, 29, 72))
-                    .min_size(egui::vec2(150.0, 30.0));
-                    if ui.add(new_btn).on_hover_text("Start a new thread in this project (Ctrl+N)").clicked() {
-                        self.new_thread(false, ctx);
-                    }
-                    let scratch_btn = egui::Button::new(
-                        egui::RichText::new("✦ Scratch")
-                            .small()
-                            .color(egui::Color32::from_rgb(251, 113, 133)),
-                    )
-                    .min_size(egui::vec2(88.0, 30.0));
-                    if ui
-                        .add(scratch_btn)
-                        .on_hover_text("Start a project-less scratch thread")
-                        .clicked()
-                    {
-                        self.new_thread(true, ctx);
-                    }
-                });
-
-                ui.add_space(6.0);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.session_filter)
-                        .hint_text("🔍 Filter threads…")
-                        .desired_width(f32::INFINITY),
-                );
-
-                if !self.recent_projects.is_empty() {
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("WORKSPACES")
-                            .size(10.5)
-                            .strong()
-                            .color(egui::Color32::from_rgb(120, 124, 142)),
-                    );
-                    egui::ScrollArea::horizontal()
-                        .id_salt("recent_workspaces")
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                for proj in self.recent_projects.iter().take(6) {
-                                    let name = std::path::Path::new(proj.as_str())
-                                        .file_name()
-                                        .and_then(|n| n.to_str())
-                                        .unwrap_or(proj.as_str());
-                                    let active = proj == &self.project;
-                                    if ui
-                                        .selectable_label(
-                                            active,
-                                            egui::RichText::new(name).small(),
-                                        )
-                                        .on_hover_text(proj)
-                                        .clicked()
-                                    {
-                                        action = Some(SidebarAction::SwitchProject(proj.clone()));
-                                    }
-                                }
-                            });
-                        });
-                }
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new("THREADS")
-                            .size(10.5)
-                            .strong()
-                            .color(egui::Color32::from_rgb(120, 124, 142)),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{}", self.sessions.len()))
-                                .size(10.5)
-                                .color(egui::Color32::from_rgb(120, 124, 142)),
-                        );
-                    });
-                });
-
-                let filter = self.session_filter.trim().to_ascii_lowercase();
-                egui::ScrollArea::vertical()
-                    .id_salt("threads_scroll")
-                    .max_height(ui.available_height() - 96.0)
-                    .show(ui, |ui| {
-                        if self.sessions.is_empty() {
-                            ui.add_space(12.0);
-                            ui.label(
-                                egui::RichText::new("No threads in this workspace yet.")
-                                    .small()
-                                    .weak(),
+        ScrollArea::vertical()
+            .id_salt("t3_draft_hero_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(top_pad);
+                ui.vertical_centered(|ui| {
+                    let lane_w = ui.available_width().min(680.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(lane_w, 10.0),
+                        Layout::top_down(Align::Center),
+                        |ui| {
+                            let glow_center = ui.cursor().min + Vec2::new(lane_w * 0.5, 16.0);
+                            ui.painter().circle_filled(
+                                glow_center,
+                                120.0,
+                                Color32::from_rgba_unmultiplied(139, 92, 246, 10),
                             );
-                        }
-                        for session in &self.sessions {
-                            if !filter.is_empty()
-                                && !session.title.to_ascii_lowercase().contains(&filter)
-                            {
-                                continue;
-                            }
-                            let selected = self.session_id.as_deref() == Some(session.id.as_str());
-                            let frame_fill = if selected {
-                                egui::Color32::from_rgb(38, 22, 34)
-                            } else {
-                                egui::Color32::from_rgb(20, 21, 28)
-                            };
-                            let stroke_color = if selected {
-                                egui::Color32::from_rgb(225, 29, 72)
-                            } else {
-                                egui::Color32::from_rgb(34, 36, 48)
-                            };
-                            egui::Frame::new()
-                                .fill(frame_fill)
-                                .stroke(egui::Stroke::new(1.0, stroke_color))
-                                .corner_radius(egui::CornerRadius::same(7))
-                                .inner_margin(egui::Margin::symmetric(8, 6))
+
+                            // Hero Brand Pill
+                            egui::Frame::NONE
+                                .fill(SERIKA_VIOLET_SOFT)
+                                .corner_radius(CornerRadius::same(20))
+                                .stroke(Stroke::new(1.0, SERIKA_VIOLET.gamma_multiply(0.45)))
+                                .inner_margin(Margin::symmetric(12, 4))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        let dot = if selected && self.running {
-                                            egui::RichText::new("●")
-                                                .small()
-                                                .color(egui::Color32::from_rgb(16, 185, 129))
-                                        } else if selected {
-                                            egui::RichText::new("●")
-                                                .small()
-                                                .color(egui::Color32::from_rgb(244, 63, 94))
-                                        } else {
-                                            egui::RichText::new("○")
-                                                .small()
-                                                .color(egui::Color32::from_rgb(100, 104, 120))
-                                        };
-                                        ui.label(dot);
-                                        let title_text = if session.title.chars().count() > 24 {
-                                            let short: String =
-                                                session.title.chars().take(24).collect();
-                                            format!("{short}…")
-                                        } else {
-                                            session.title.clone()
-                                        };
-                                        if ui
-                                            .selectable_label(
-                                                selected,
-                                                egui::RichText::new(title_text).size(13.0),
+                                        let (mr, _) = ui
+                                            .allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                                        paint_icon(
+                                            ui.painter(),
+                                            mr,
+                                            Icon::SerikaMark,
+                                            SERIKA_VIOLET_LIGHT,
+                                        );
+                                        ui.label(
+                                            RichText::new(
+                                                "Serika Code · Local & Multi-Provider Harness",
                                             )
-                                            .clicked()
-                                        {
-                                            action =
-                                                Some(SidebarAction::OpenSession(session.id.clone()));
-                                        }
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .small_button("×")
-                                                    .on_hover_text("Delete thread")
-                                                    .clicked()
-                                                {
-                                                    action = Some(SidebarAction::DeleteSession(
-                                                        session.id.clone(),
-                                                    ));
-                                                }
-                                            },
+                                            .size(11.0)
+                                            .strong()
+                                            .color(SERIKA_VIOLET_LIGHT),
                                         );
                                     });
                                 });
-                        }
-                    });
 
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("⚙ Settings").clicked() {
-                            self.show_settings = true;
-                        }
-                        if ui.button("👤 Account").clicked() {
-                            self.show_account = true;
-                        }
-                        if ui
-                            .button("⬇ Setup")
-                            .on_hover_text("Install Serika Code to PATH & create system shortcuts")
-                            .clicked()
-                        {
-                            self.trigger_system_setup(ctx);
-                        }
-                    });
-                    ui.label(
-                        egui::RichText::new(&self.status)
-                            .small()
-                            .color(egui::Color32::from_rgb(165, 170, 188)),
-                    );
-                    ui.label(
-                        egui::RichText::new(&self.account)
-                            .small()
-                            .strong()
-                            .color(egui::Color32::from_rgb(251, 113, 133)),
-                    );
-                    ui.separator();
-                });
-            });
-
-        if let Some(act) = action {
-            match act {
-                SidebarAction::OpenSession(id) => self.open_session(&id),
-                SidebarAction::DeleteSession(id) => {
-                    let _ = self.core.sessions.delete(&id);
-                    if self.session_id.as_deref() == Some(id.as_str()) {
-                        self.session_id = None;
-                        self.messages.clear();
-                        self.diffs.clear();
-                    }
-                    self.reload_sessions();
-                }
-                SidebarAction::SwitchProject(proj) => {
-                    self.project = proj;
-                    self.session_id = None;
-                    self.messages.clear();
-                    self.diffs.clear();
-                    self.reload_sessions();
-                    self.refresh_git(ctx);
-                }
-            }
-        }
-    }
-
-    fn conversation(&mut self, root_ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(root_ui, |ui| {
-            let avail_h = ui.available_height();
-            let composer_h = if self.approval.is_some() { 215.0 } else { 145.0 };
-            let scroll_h = (avail_h - composer_h).max(160.0);
-
-            let mut starter_prompt: Option<String> = None;
-
-            egui::ScrollArea::vertical()
-                .id_salt("conversation_scroll")
-                .max_height(scroll_h)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    if self.messages.is_empty() && self.streaming.is_empty() {
-                        ui.add_space(36.0);
-                        ui.vertical_centered(|ui| {
+                            ui.add_space(12.0);
                             ui.label(
-                                egui::RichText::new("◆ Serika Code")
+                                RichText::new("What are we building?")
                                     .size(26.0)
                                     .strong()
-                                    .color(egui::Color32::from_rgb(244, 63, 94)),
+                                    .color(TEXT_PRIMARY),
                             );
                             ui.add_space(4.0);
                             ui.label(
-                                egui::RichText::new(
-                                    "Fast native coding agent harness · Isolated worktrees · Granular turn diffs",
+                                RichText::new(
+                                    "Works locally with zero API keys · Optional OpenAI, Gemini & Claude APIs",
                                 )
-                                .color(egui::Color32::from_rgb(150, 155, 172)),
+                                .size(12.5)
+                                .color(TEXT_MUTED),
                             );
-                            ui.add_space(20.0);
-                        });
 
-                        ui.columns(2, |cols| {
-                            let cards = [
-                                (
-                                    "🧭 Architecture Overview",
-                                    "Map the crates, entrypoints, and data flow in this repository.",
-                                ),
-                                (
-                                    "🔍 Review Uncommitted Changes",
-                                    "Inspect the current git status and diff, and point out any bugs or edge cases.",
-                                ),
-                                (
-                                    "🧪 Run & Verify Tests",
-                                    "Run the test suite in this workspace and fix any failing tests or warnings.",
-                                ),
-                                (
-                                    "⚡ Performance & UX Audit",
-                                    "Find any blocking calls or hot-path allocations and optimize them.",
-                                ),
-                            ];
-                            for (i, (title, prompt)) in cards.iter().enumerate() {
-                                let col = &mut cols[i % 2];
-                                col.add_space(6.0);
-                                egui::Frame::new()
-                                    .fill(egui::Color32::from_rgb(22, 23, 31))
-                                    .stroke(egui::Stroke::new(
-                                        1.0,
-                                        egui::Color32::from_rgb(42, 44, 58),
-                                    ))
-                                    .corner_radius(egui::CornerRadius::same(8))
-                                    .inner_margin(egui::Margin::same(12))
-                                    .show(col, |ui| {
-                                        ui.label(egui::RichText::new(*title).strong().size(14.0));
-                                        ui.add_space(2.0);
-                                        ui.label(
-                                            egui::RichText::new(*prompt)
-                                                .small()
-                                                .color(egui::Color32::from_rgb(155, 160, 178)),
-                                        );
-                                        ui.add_space(6.0);
-                                        if ui.small_button("Use prompt →").clicked() {
-                                            starter_prompt = Some((*prompt).to_string());
-                                        }
-                                    });
-                            }
-                        });
-                    }
+                            ui.add_space(22.0);
 
-                    for message in &self.messages {
-                        message_card(ui, &message.role, &message.raw, &message.segments);
-                    }
-                    if !self.streaming.is_empty() {
-                        message_card(ui, "assistant", &self.streaming, &self.streaming_segments);
-                    }
-                    if let Some(tool) = &self.active_tool {
-                        ui.add_space(6.0);
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_rgb(32, 24, 42))
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(168, 85, 247)))
-                            .corner_radius(egui::CornerRadius::same(6))
-                            .inner_margin(egui::Margin::symmetric(10, 5))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spinner();
-                                    ui.label(
-                                        egui::RichText::new(format!("Executing tool: {tool}"))
-                                            .small()
-                                            .monospace()
-                                            .color(egui::Color32::from_rgb(216, 180, 254)),
-                                    );
-                                });
+                            // T3 Floating Composer Surface
+                            ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
+                                self.draw_composer_card(ui, true);
+                                ui.add_space(8.0);
+                                self.draw_t3_context_strip(ui);
                             });
-                    }
-                });
 
-            if let Some(prompt) = starter_prompt {
-                self.input = prompt;
-            }
+                            ui.add_space(18.0);
 
-            ui.add_space(6.0);
-            if let Some(approval) = self.approval.clone() {
-                egui::Frame::new()
-                    .fill(egui::Color32::from_rgb(44, 24, 30))
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        egui::Color32::from_rgb(244, 63, 94),
-                    ))
-                    .corner_radius(egui::CornerRadius::same(8))
-                    .inner_margin(egui::Margin::same(10))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!("⚠ Allow {}?", approval.title))
-                                    .strong()
-                                    .color(egui::Color32::from_rgb(253, 164, 175)),
-                            );
-                            if approval.destructive {
-                                ui.colored_label(
-                                    egui::Color32::from_rgb(245, 158, 11),
-                                    "[DESTRUCTIVE]",
-                                );
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.button("Deny").clicked() {
-                                        self.core.approvals.resolve(&approval.id, false);
-                                        self.approval = None;
-                                    }
-                                    let allow_btn = egui::Button::new(
-                                        egui::RichText::new("Allow").strong().color(egui::Color32::WHITE),
-                                    )
-                                    .fill(egui::Color32::from_rgb(16, 185, 129));
-                                    if ui.add(allow_btn).clicked() {
-                                        self.core.approvals.resolve(&approval.id, true);
-                                        self.approval = None;
-                                        self.status = "Working…".into();
-                                    }
-                                },
-                            );
-                        });
-                        ui.label(egui::RichText::new(approval.detail).small().monospace());
-                    });
-                ui.add_space(4.0);
-            }
-
-            // Floating T3-style Composer Card
-            egui::Frame::new()
-                .fill(egui::Color32::from_rgb(19, 20, 27))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(46, 48, 64)))
-                .corner_radius(egui::CornerRadius::same(10))
-                .inner_margin(egui::Margin::same(10))
-                .show(ui, |ui| {
-                    let hint = if cfg!(target_os = "macos") {
-                        "Ask Serika Code to inspect, edit, or test… (⌘+Enter to send, ⌘+K for palette)"
-                    } else {
-                        "Ask Serika Code to inspect, edit, or test… (Ctrl+Enter to send, Ctrl+K for palette)"
-                    };
-                    let editor = egui::TextEdit::multiline(&mut self.input)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY)
-                        .frame(egui::Frame::NONE)
-                        .hint_text(hint)
-                        .show(ui);
-
-                    let send_shortcut = editor.response.has_focus()
-                        && ui.input(|input| {
-                            input.key_pressed(egui::Key::Enter) && input.modifiers.command
-                        });
-                    if send_shortcut && self.input.ends_with('\n') {
-                        self.input.pop();
-                        if self.input.ends_with('\r') {
-                            self.input.pop();
-                        }
-                    }
-
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        // Model selector pill right inside the composer
-                        if !self.model_labels.is_empty() {
-                            let current_model = self
-                                .model_labels
-                                .get(self.model_index)
-                                .cloned()
-                                .unwrap_or_else(|| "Select model".into());
-                            egui::ComboBox::from_id_salt("composer_model")
-                                .width(230.0)
-                                .selected_text(egui::RichText::new(current_model).small())
-                                .show_ui(ui, |ui| {
-                                    for (index, label) in self.model_labels.iter().enumerate() {
-                                        ui.selectable_value(&mut self.model_index, index, label);
-                                    }
-                                });
-                        } else {
-                            ui.label(egui::RichText::new("Loading models…").small().weak());
-                        }
-
-                        // Permission pill
-                        egui::ComboBox::from_id_salt("composer_permission")
-                            .width(120.0)
-                            .selected_text(
-                                egui::RichText::new(format!("🛡 {}", self.permission.as_str()))
-                                    .small(),
-                            )
-                            .show_ui(ui, |ui| {
-                                for (mode, label) in [
-                                    (PermissionMode::ReadOnly, "read_only"),
-                                    (PermissionMode::Standard, "standard"),
-                                    (PermissionMode::Restricted, "restricted"),
-                                    (PermissionMode::Full, "full"),
+                            // Compact Horizontal Starter Chips (Zero `Use prompt ▯` bars!)
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+                                for (icon, label, prompt_text) in [
+                                    (
+                                        Icon::Sparkle,
+                                        "Map architecture",
+                                        "Inspect the workspace architecture and summarize the crates, entrypoints, and data flow.",
+                                    ),
+                                    (
+                                        Icon::GitBranch,
+                                        "Review git diffs",
+                                        "Inspect the current git status and uncommitted diffs, and point out any bugs or edge cases.",
+                                    ),
+                                    (
+                                        Icon::Terminal,
+                                        "Run & verify tests",
+                                        "Run the test suite in this workspace and fix any failing tests or warnings.",
+                                    ),
+                                    (
+                                        Icon::Sliders,
+                                        "Performance audit",
+                                        "Audit the codebase for blocking calls, hot-path allocations, or UX bottlenecks.",
+                                    ),
                                 ] {
-                                    ui.selectable_value(&mut self.permission, mode, label);
+                                    if starter_chip(ui, icon, label).clicked() {
+                                        self.prompt = prompt_text.to_string();
+                                        self.send_prompt();
+                                    }
                                 }
                             });
-
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let send_btn = egui::Button::new(
-                                egui::RichText::new("Send ⏎")
-                                    .strong()
-                                    .color(egui::Color32::WHITE),
-                            )
-                            .fill(egui::Color32::from_rgb(225, 29, 72))
-                            .min_size(egui::vec2(84.0, 28.0));
-
-                            if ui.add_enabled(!self.running, send_btn).clicked() || send_shortcut {
-                                self.send(ctx);
-                            }
-                            if self.running {
-                                let stop_btn = egui::Button::new(
-                                    egui::RichText::new("■ Stop")
-                                        .color(egui::Color32::from_rgb(253, 164, 175)),
-                                )
-                                .min_size(egui::vec2(72.0, 28.0));
-                                if ui.add(stop_btn).clicked() {
-                                    if let Some(cancel) = &self.cancel {
-                                        cancel.cancel();
-                                    }
-                                    self.core.approvals.deny_all();
-                                }
-                            }
-                        });
-                    });
+                        },
+                    );
                 });
-        });
-    }
-
-    fn right_panel(&mut self, root_ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::Panel::right("inspector")
-            .exact_size(400.0)
-            .show(root_ui, |ui| {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let git_label = if self.git.entries.is_empty() {
-                        "Source Control".to_string()
-                    } else {
-                        format!("Source Control ({})", self.git.entries.len())
-                    };
-                    let diff_label = if self.diffs.is_empty() {
-                        "Diffs".to_string()
-                    } else {
-                        format!("Diffs ({})", self.diffs.len())
-                    };
-                    if ui
-                        .selectable_label(self.right == RightTab::Git, git_label)
-                        .clicked()
-                    {
-                        self.right = RightTab::Git;
-                        self.refresh_git(ctx);
-                    }
-                    if ui
-                        .selectable_label(self.right == RightTab::Diff, diff_label)
-                        .clicked()
-                    {
-                        self.right = RightTab::Diff;
-                    }
-                    if ui
-                        .selectable_label(self.right == RightTab::Activity, "Activity")
-                        .clicked()
-                    {
-                        self.right = RightTab::Activity;
-                    }
-                });
-                ui.separator();
-
-                egui::ScrollArea::vertical()
-                    .id_salt("inspector_scroll")
-                    .show(ui, |ui| match self.right {
-                        RightTab::Git => self.git_panel(ui, ctx),
-                        RightTab::Diff => self.diff_view(ui),
-                        RightTab::Activity => {
-                            if let Some(usage) = &self.usage {
-                                egui::Frame::new()
-                                    .fill(egui::Color32::from_rgb(22, 23, 31))
-                                    .corner_radius(egui::CornerRadius::same(6))
-                                    .inner_margin(egui::Margin::same(8))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            egui::RichText::new("ACCOUNT USAGE")
-                                                .size(10.5)
-                                                .strong()
-                                                .color(egui::Color32::from_rgb(244, 63, 94)),
-                                        );
-                                        ui.label(egui::RichText::new(usage.summary_line()).small());
-                                    });
-                                ui.add_space(6.0);
-                            }
-                            if self.activity.is_empty() {
-                                ui.label(
-                                    egui::RichText::new("Tool runs and telemetry appear here.")
-                                        .small()
-                                        .weak(),
-                                );
-                            }
-                            for line in &self.activity {
-                                ui.label(egui::RichText::new(line).monospace().size(12.0));
-                            }
-                        }
-                    });
             });
     }
 
-    fn git_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn draw_t3_context_strip(&mut self, ui: &mut egui::Ui) {
+        let proj_name = workspace_display_name(&self.project, &self.core);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let (fr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                paint_icon(ui.painter(), fr, Icon::Folder, TEXT_DIM);
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(format!("Project: {proj_name}"))
+                                .size(11.0)
+                                .color(TEXT_MUTED),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text("Click to select a project directory")
+                    .clicked()
+                {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        self.switch_project(folder);
+                    }
+                }
+            });
+
+            ui.label(RichText::new("·").size(11.0).color(TEXT_DIM));
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let (gr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                paint_icon(ui.painter(), gr, Icon::GitBranch, TEXT_DIM);
+                let git_txt = if self.git.is_repo {
+                    format!("Branch: {}", self.git.branch)
+                } else {
+                    "No Git repo (Local folder)".to_string()
+                };
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(git_txt).size(11.0).color(TEXT_MUTED))
+                            .frame(false),
+                    )
+                    .clicked()
+                {
+                    self.show_inspector = true;
+                    self.inspector_tab = InspectorTab::Git;
+                }
+            });
+
+            if self.git.is_repo {
+                ui.label(RichText::new("·").size(11.0).color(TEXT_DIM));
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let (wr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    paint_icon(ui.painter(), wr, Icon::Worktree, TEXT_DIM);
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Create isolated worktree")
+                                    .size(11.0)
+                                    .color(SERIKA_VIOLET_LIGHT),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text("Create an isolated git worktree for parallel agent work")
+                        .clicked()
+                    {
+                        self.show_inspector = true;
+                        self.inspector_tab = InspectorTab::Git;
+                    }
+                });
+            }
+        });
+    }
+
+    fn draw_active_thread_canvas(&mut self, ui: &mut egui::Ui) {
+        let avail_h = ui.available_height();
+        let composer_reserve = 148.0;
+        let scroll_h = (avail_h - composer_reserve).max(120.0);
+
+        ScrollArea::vertical()
+            .id_salt("t3_active_thread_scroll")
+            .max_height(scroll_h)
+            .stick_to_bottom(true)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(16.0);
+                ui.vertical_centered(|ui| {
+                    let lane_w = ui.available_width().min(720.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(lane_w, 10.0),
+                        Layout::top_down(Align::LEFT),
+                        |ui| {
+                            for msg in &self.messages {
+                                if msg.content.starts_with("Tool results:\n") {
+                                    continue;
+                                }
+                                draw_message_card(ui, msg);
+                                ui.add_space(10.0);
+                            }
+
+                            if !self.tools.is_empty() {
+                                ui.add_space(2.0);
+                                let mut open_diff_idx = None;
+                                for tool in self.tools.iter().rev().take(6).rev() {
+                                    let diff_idx =
+                                        self.diffs.iter().position(|(_, d)| !d.is_empty());
+                                    if draw_tool_pill(ui, tool, diff_idx.is_some()) {
+                                        open_diff_idx = diff_idx;
+                                    }
+                                    ui.add_space(4.0);
+                                }
+                                if let Some(idx) = open_diff_idx {
+                                    self.selected_diff = idx;
+                                    self.show_inspector = true;
+                                    self.inspector_tab = InspectorTab::Diffs;
+                                }
+                                ui.add_space(6.0);
+                            }
+
+                            if !self.streaming_reasoning.is_empty() {
+                                egui::Frame::NONE
+                                    .fill(BG_SIDEBAR)
+                                    .corner_radius(CornerRadius::same(10))
+                                    .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                                    .inner_margin(Margin::same(10))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new("Thinking…")
+                                                .size(11.0)
+                                                .strong()
+                                                .color(SERIKA_VIOLET_LIGHT),
+                                        );
+                                        ui.label(
+                                            RichText::new(&self.streaming_reasoning)
+                                                .size(12.0)
+                                                .color(TEXT_MUTED),
+                                        );
+                                    });
+                                ui.add_space(8.0);
+                            }
+
+                            if !self.streaming_reply.is_empty() {
+                                egui::Frame::NONE
+                                    .fill(BG_CARD)
+                                    .corner_radius(CornerRadius::same(12))
+                                    .stroke(Stroke::new(1.0, SERIKA_VIOLET.gamma_multiply(0.5)))
+                                    .inner_margin(Margin::same(14))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            let (mr, _) = ui.allocate_exact_size(
+                                                Vec2::splat(12.0),
+                                                Sense::hover(),
+                                            );
+                                            paint_icon(
+                                                ui.painter(),
+                                                mr,
+                                                Icon::SerikaMark,
+                                                SERIKA_VIOLET_LIGHT,
+                                            );
+                                            ui.label(
+                                                RichText::new("Serika")
+                                                    .size(11.5)
+                                                    .strong()
+                                                    .color(SERIKA_VIOLET_LIGHT),
+                                            );
+                                        });
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(&self.streaming_reply)
+                                                .size(13.0)
+                                                .color(TEXT_PRIMARY),
+                                        );
+                                    });
+                            }
+                        },
+                    );
+                });
+                ui.add_space(12.0);
+            });
+
+        // Bottom Docked Composer Lane
+        ui.vertical_centered(|ui| {
+            let lane_w = ui.available_width().min(720.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(lane_w, 10.0),
+                Layout::top_down(Align::LEFT),
+                |ui| {
+                    self.draw_composer_card(ui, false);
+                },
+            );
+        });
+    }
+
+    fn draw_composer_card(&mut self, ui: &mut egui::Ui, is_hero: bool) {
+        let border_col = if self.running {
+            SERIKA_VIOLET
+        } else if is_hero {
+            BORDER_STRONG
+        } else {
+            BORDER_SUBTLE
+        };
+
+        egui::Frame::NONE
+            .fill(BG_CARD)
+            .corner_radius(CornerRadius::same(14))
+            .stroke(Stroke::new(1.0, border_col))
+            .inner_margin(Margin::same(12))
+            .show(ui, |ui| {
+                let rows = if is_hero { 3 } else { 2 };
+                let resp = ui.add(
+                    TextEdit::multiline(&mut self.prompt)
+                        .desired_rows(rows)
+                        .desired_width(f32::INFINITY)
+                        .frame(egui::Frame::NONE)
+                        .font(FontId::proportional(13.5))
+                        .hint_text(
+                            "Ask anything, inspect files, or run tests… (Ctrl+Enter to send)",
+                        ),
+                );
+                if resp.has_focus()
+                    && ui.input(|i| i.key_pressed(Key::Enter) && i.modifiers.command)
+                {
+                    self.send_prompt();
+                }
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                // T3 Composer Footer Controls
+                ui.horizontal(|ui| {
+                    // 1. Provider & Model Selector
+                    let current_kind = ProviderKind::from_model_id(&self.selected_model);
+                    let display_model = self
+                        .provider_models
+                        .iter()
+                        .chain(self.catalog.all())
+                        .find(|m| m.id == self.selected_model)
+                        .map(|m| format!("{} · {}", current_kind.badge(), m.name))
+                        .unwrap_or_else(|| {
+                            format!("{} · {}", current_kind.badge(), self.selected_model)
+                        });
+
+                    egui::ComboBox::from_id_salt(if is_hero {
+                        "hero_model_combo"
+                    } else {
+                        "dock_model_combo"
+                    })
+                    .width(220.0)
+                    .selected_text(RichText::new(display_model).size(11.5).color(TEXT_PRIMARY))
+                    .show_ui(ui, |ui| {
+                        ui.label(
+                            RichText::new("LOCAL HARNESS (NO API REQUIRED)")
+                                .size(10.0)
+                                .strong()
+                                .color(EMERALD),
+                        );
+                        for m in self
+                            .provider_models
+                            .iter()
+                            .filter(|m| m.provider.as_deref() == Some("local"))
+                        {
+                            ui.selectable_value(
+                                &mut self.selected_model,
+                                m.id.clone(),
+                                format!("{} (No API)", m.name),
+                            );
+                        }
+                        ui.separator();
+                        ui.label(
+                            RichText::new("OPTIONAL BYOK CLOUD APIS")
+                                .size(10.0)
+                                .strong()
+                                .color(SERIKA_VIOLET_LIGHT),
+                        );
+                        for m in self
+                            .provider_models
+                            .iter()
+                            .filter(|m| m.provider.as_deref() != Some("local"))
+                        {
+                            let p = m.provider.as_deref().unwrap_or("api").to_uppercase();
+                            ui.selectable_value(
+                                &mut self.selected_model,
+                                m.id.clone(),
+                                format!("{p} · {}", m.name),
+                            );
+                        }
+                        if self.catalog.all().next().is_some() {
+                            ui.separator();
+                            ui.label(
+                                RichText::new("SERIKA CLOUD")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(TEXT_DIM),
+                            );
+                            for m in self.catalog.all() {
+                                ui.selectable_value(
+                                    &mut self.selected_model,
+                                    m.id.clone(),
+                                    format!("SERIKA · {}", m.name),
+                                );
+                            }
+                        }
+                    });
+
+                    // 2. Build / Plan Mode Toggle Pill (like T3 Code)
+                    let (mode_label, mode_col) = match self.composer_mode {
+                        ComposerMode::Build => ("Build", SERIKA_VIOLET_LIGHT),
+                        ComposerMode::Plan => ("Plan", AMBER),
+                    };
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(mode_label).size(11.5).strong().color(mode_col),
+                            )
+                            .fill(BG_INPUT)
+                            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                            .corner_radius(CornerRadius::same(7)),
+                        )
+                        .on_hover_text("Toggle between Build (execute edits) and Plan (read-only architecture plan)")
+                        .clicked()
+                    {
+                        self.composer_mode = match self.composer_mode {
+                            ComposerMode::Build => ComposerMode::Plan,
+                            ComposerMode::Plan => ComposerMode::Build,
+                        };
+                    }
+
+                    // 3. Permission Selector Pill
+                    egui::ComboBox::from_id_salt(if is_hero {
+                        "hero_perm_combo"
+                    } else {
+                        "dock_perm_combo"
+                    })
+                    .width(102.0)
+                    .selected_text(
+                        RichText::new(self.permission.as_str())
+                            .size(11.5)
+                            .color(TEXT_MUTED),
+                    )
+                    .show_ui(ui, |ui| {
+                        for mode in [
+                            PermissionMode::ReadOnly,
+                            PermissionMode::Standard,
+                            PermissionMode::Restricted,
+                            PermissionMode::Full,
+                        ] {
+                            ui.selectable_value(&mut self.permission, mode, mode.as_str());
+                        }
+                    });
+
+                    // 4. Right-aligned Send / Stop Button
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if self.running {
+                            let stop_btn = ui.add_sized(
+                                [78.0, 28.0],
+                                egui::Button::new(
+                                    RichText::new("   Stop")
+                                        .size(12.0)
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(ROSE)
+                                .corner_radius(CornerRadius::same(8)),
+                            );
+                            let icon_r = Rect::from_center_size(
+                                Pos2::new(stop_btn.rect.left() + 18.0, stop_btn.rect.center().y),
+                                Vec2::splat(11.0),
+                            );
+                            paint_icon(ui.painter(), icon_r, Icon::Stop, Color32::WHITE);
+                            if stop_btn.clicked() {
+                                if let Some(cancel) = &self.cancel {
+                                    cancel.cancel();
+                                }
+                            }
+                        } else {
+                            let can_send = !self.prompt.trim().is_empty();
+                            let fill = if can_send {
+                                SERIKA_VIOLET
+                            } else {
+                                Color32::from_rgb(48, 38, 76)
+                            };
+                            let send_btn = ui.add_sized(
+                                [82.0, 28.0],
+                                egui::Button::new(
+                                    RichText::new("Send   ")
+                                        .size(12.0)
+                                        .strong()
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(fill)
+                                .corner_radius(CornerRadius::same(8)),
+                            );
+                            let icon_r = Rect::from_center_size(
+                                Pos2::new(send_btn.rect.right() - 18.0, send_btn.rect.center().y),
+                                Vec2::splat(12.0),
+                            );
+                            paint_icon(ui.painter(), icon_r, Icon::Send, Color32::WHITE);
+                            if send_btn.clicked() && can_send {
+                                self.send_prompt();
+                            }
+                        }
+                    });
+                });
+            });
+    }
+
+    fn draw_inspector(&mut self, root_ui: &mut egui::Ui) {
+        egui::Panel::right("t3_inspector")
+            .resizable(true)
+            .default_size(340.0)
+            .size_range(280.0..=520.0)
+            .frame(
+                egui::Frame::NONE
+                    .fill(BG_SIDEBAR)
+                    .inner_margin(Margin::same(12))
+                    .stroke(Stroke::new(1.0, BORDER_SUBTLE)),
+            )
+            .show(root_ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (tab, label) in [
+                        (InspectorTab::Git, "Source Control"),
+                        (InspectorTab::Diffs, "Diffs"),
+                        (InspectorTab::Activity, "Activity"),
+                    ] {
+                        let active = self.inspector_tab == tab;
+                        let fill = if active { SERIKA_VIOLET } else { BG_CARD };
+                        let col = if active { Color32::WHITE } else { TEXT_MUTED };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(label).size(11.5).strong().color(col),
+                                )
+                                .fill(fill)
+                                .corner_radius(CornerRadius::same(6)),
+                            )
+                            .clicked()
+                        {
+                            self.inspector_tab = tab;
+                        }
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if icon_button(ui, Icon::Close, "Close Inspector (Ctrl+B)", false).clicked()
+                        {
+                            self.show_inspector = false;
+                        }
+                    });
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+
+                match self.inspector_tab {
+                    InspectorTab::Git => self.draw_git_tab(ui),
+                    InspectorTab::Diffs => self.draw_diffs_tab(ui),
+                    InspectorTab::Activity => self.draw_activity_tab(ui),
+                }
+            });
+    }
+
+    fn draw_git_tab(&mut self, ui: &mut egui::Ui) {
         if !self.git.is_repo {
-            ui.label("Current directory is not a Git repository.");
-            if ui.button("↻ Check Again").clicked() {
-                self.refresh_git(ctx);
+            ui.label(
+                RichText::new("Current folder is not a Git repository.")
+                    .size(12.5)
+                    .color(TEXT_MUTED),
+            );
+            ui.add_space(6.0);
+            if pill_icon_button(ui, Icon::Refresh, "Refresh", false).clicked() {
+                self.refresh_git_async();
             }
             return;
         }
 
-        // Branch & Sync Bar
-        egui::Frame::new()
-            .fill(egui::Color32::from_rgb(20, 21, 28))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 40, 52)))
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::same(8))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("⎇ {}", self.git.branch))
-                            .strong()
-                            .color(egui::Color32::from_rgb(16, 185, 129)),
-                    );
-                    if self.git.ahead > 0 || self.git.behind > 0 {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "↑{} ↓{}",
-                                self.git.ahead, self.git.behind
-                            ))
-                            .small()
-                            .color(egui::Color32::from_rgb(245, 158, 11)),
-                        );
+        ui.horizontal(|ui| {
+            let (gr, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+            paint_icon(ui.painter(), gr, Icon::GitBranch, SERIKA_VIOLET_LIGHT);
+            egui::ComboBox::from_id_salt("git_branch_combo")
+                .width(150.0)
+                .selected_text(
+                    RichText::new(&self.git.branch)
+                        .size(12.0)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                )
+                .show_ui(ui, |ui| {
+                    let mut switch = None;
+                    for b in &self.git.branches {
+                        if ui.selectable_label(b == &self.git.branch, b).clicked() {
+                            switch = Some(b.clone());
+                        }
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("↻").on_hover_text("Refresh Git status").clicked() {
-                            self.refresh_git(ctx);
-                        }
-                        if ui.small_button("↑ Push").clicked() {
-                            self.spawn_git_op(ctx, "Pushed to remote", |root| async move {
-                                gitinfo::push(&root).await
-                            });
-                        }
-                        if ui.small_button("↓ Pull").clicked() {
-                            self.spawn_git_op(ctx, "Pulled from remote", |root| async move {
-                                gitinfo::pull(&root).await
-                            });
-                        }
-                    });
-                });
-
-                // Branch switcher & new branch / worktree
-                if !self.git.branches.is_empty() {
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Switch:").small().weak());
-                        let current = self.git.branch.clone();
-                        let branches = self.git.branches.clone();
-                        egui::ComboBox::from_id_salt("git_branch_combo")
-                            .selected_text(egui::RichText::new(&current).small())
-                            .show_ui(ui, |ui| {
-                                for b in branches {
-                                    if ui.selectable_label(b == current, &b).clicked()
-                                        && b != current
-                                    {
-                                        let target = b.clone();
-                                        self.spawn_git_op(
-                                            ctx,
-                                            &format!("Switched to {target}"),
-                                            move |root| async move {
-                                                gitinfo::checkout_branch(&root, &target, false).await
-                                            },
-                                        );
-                                    }
-                                }
-                            });
-                    });
-                }
-
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.git_new_branch)
-                            .hint_text("New branch / worktree name…")
-                            .desired_width(180.0),
-                    );
-                    if ui.small_button("+ Branch").clicked()
-                        && !self.git_new_branch.trim().is_empty()
-                    {
-                        let name = self.git_new_branch.trim().to_string();
-                        self.git_new_branch.clear();
-                        self.spawn_git_op(
-                            ctx,
-                            &format!("Created branch {name}"),
-                            move |root| async move {
-                                gitinfo::checkout_branch(&root, &name, true).await
-                            },
-                        );
-                    }
-                    if ui
-                        .small_button("⑂ Worktree")
-                        .on_hover_text("Create an isolated git worktree and move this thread to it")
-                        .clicked()
-                    {
-                        self.isolate_in_worktree(ctx);
+                    if let Some(target) = switch {
+                        let proj = self.project.clone();
+                        let tx = self.tx.clone();
+                        self.tokio.spawn(async move {
+                            let res = gitinfo::checkout_branch(&proj, &target, false)
+                                .await
+                                .map(|_| format!("Switched to {target}"))
+                                .map_err(|e| e.to_string());
+                            let _ = tx.send(UiNotice::GitActionDone(res));
+                        });
                     }
                 });
-            });
+
+            if icon_button(ui, Icon::Refresh, "Refresh Git", false).clicked() {
+                self.refresh_git_async();
+            }
+        });
 
         ui.add_space(8.0);
 
-        // Commit Composer
-        egui::Frame::new()
-            .fill(egui::Color32::from_rgb(20, 21, 28))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 40, 52)))
-            .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::same(8))
+        // Commit Box
+        egui::Frame::NONE
+            .fill(BG_CARD)
+            .corner_radius(CornerRadius::same(8))
+            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+            .inner_margin(Margin::same(8))
             .show(ui, |ui| {
                 ui.add(
-                    egui::TextEdit::multiline(&mut self.git_commit_msg)
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("Commit message (e.g. feat: add worktree isolation)…"),
+                    TextEdit::singleline(&mut self.commit_message)
+                        .hint_text("Commit message…")
+                        .desired_width(f32::INFINITY),
                 );
-                ui.add_space(4.0);
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let has_msg = !self.git_commit_msg.trim().is_empty();
-                    let commit_btn = egui::Button::new(
-                        egui::RichText::new("✓ Commit Staged")
-                            .small()
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(egui::Color32::from_rgb(225, 29, 72));
-                    if ui.add_enabled(has_msg, commit_btn).clicked() {
-                        let msg = self.git_commit_msg.trim().to_string();
-                        self.git_commit_msg.clear();
-                        self.spawn_git_op(ctx, "Committed staged changes", move |root| async move {
-                            gitinfo::commit_staged(&root, &msg).await
-                        });
-                    }
                     if ui
-                        .add_enabled(
-                            has_msg,
-                            egui::Button::new(egui::RichText::new("✓ Stage All & Commit").small()),
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Stage All").size(11.0).color(TEXT_PRIMARY),
+                            )
+                            .fill(BG_INPUT)
+                            .corner_radius(CornerRadius::same(6)),
                         )
                         .clicked()
                     {
-                        let msg = self.git_commit_msg.trim().to_string();
-                        self.git_commit_msg.clear();
-                        self.spawn_git_op(ctx, "Committed all changes", move |root| async move {
-                            gitinfo::commit_all(&root, &msg).await
+                        let proj = self.project.clone();
+                        let tx = self.tx.clone();
+                        self.tokio.spawn(async move {
+                            let res = gitinfo::stage_all(&proj)
+                                .await
+                                .map(|_| "Staged all changes".into())
+                                .map_err(|e| e.to_string());
+                            let _ = tx.send(UiNotice::GitActionDone(res));
                         });
                     }
-                });
-            });
-
-        ui.add_space(8.0);
-
-        // Staged & Unstaged Changes
-        let entries = self.git.entries.clone();
-        let staged: Vec<_> = entries.iter().filter(|e| e.staged).cloned().collect();
-        let unstaged: Vec<_> = entries
-            .iter()
-            .filter(|e| e.has_unstaged_changes())
-            .cloned()
-            .collect();
-
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("STAGED CHANGES ({})", staged.len()))
-                    .size(11.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(16, 185, 129)),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if !staged.is_empty() && ui.small_button("Unstage All").clicked() {
-                    self.spawn_git_op(ctx, "Unstaged all files", |root| async move {
-                        gitinfo::unstage_all(&root).await
-                    });
-                }
-            });
-        });
-        for item in &staged {
-            ui.horizontal(|ui| {
-                ui.colored_label(egui::Color32::from_rgb(16, 185, 129), item.badge());
-                if ui
-                    .selectable_label(false, egui::RichText::new(&item.path).monospace().size(12.0))
-                    .on_hover_text("Click to inspect staged diff")
-                    .clicked()
-                {
-                    self.open_git_file_diff(ctx, &item.path, true);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let path = item.path.clone();
-                    if ui.small_button("−").on_hover_text("Unstage file").clicked() {
-                        self.spawn_git_op(ctx, "Unstaged file", move |root| async move {
-                            gitinfo::unstage_file(&root, &path).await
-                        });
-                    }
-                });
-            });
-        }
-
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("WORKING TREE ({})", unstaged.len()))
-                    .size(11.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(245, 158, 11)),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if !unstaged.is_empty() && ui.small_button("Stage All").clicked() {
-                    self.spawn_git_op(ctx, "Staged all files", |root| async move {
-                        gitinfo::stage_all(&root).await
-                    });
-                }
-            });
-        });
-        if unstaged.is_empty() && staged.is_empty() {
-            ui.label(egui::RichText::new("✓ Working tree is clean").small().weak());
-        }
-        for item in &unstaged {
-            ui.horizontal(|ui| {
-                ui.colored_label(egui::Color32::from_rgb(245, 158, 11), item.badge());
-                if ui
-                    .selectable_label(false, egui::RichText::new(&item.path).monospace().size(12.0))
-                    .on_hover_text("Click to inspect working diff")
-                    .clicked()
-                {
-                    self.open_git_file_diff(ctx, &item.path, false);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let path_stage = item.path.clone();
-                    if ui.small_button("+").on_hover_text("Stage file").clicked() {
-                        self.spawn_git_op(ctx, "Staged file", move |root| async move {
-                            gitinfo::stage_file(&root, &path_stage).await
-                        });
-                    }
-                    let path_discard = item.path.clone();
-                    let untracked = item.untracked;
                     if ui
-                        .small_button("↺")
-                        .on_hover_text("Discard changes in file")
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Commit")
+                                    .size(11.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(SERIKA_VIOLET)
+                            .corner_radius(CornerRadius::same(6)),
+                        )
                         .clicked()
+                        && !self.commit_message.trim().is_empty()
                     {
-                        self.spawn_git_op(ctx, "Discarded file changes", move |root| async move {
-                            gitinfo::discard_file(&root, &path_discard, untracked).await
+                        let proj = self.project.clone();
+                        let msg = self.commit_message.trim().to_string();
+                        self.commit_message.clear();
+                        let tx = self.tx.clone();
+                        self.tokio.spawn(async move {
+                            let res = gitinfo::commit_all(&proj, &msg)
+                                .await
+                                .map_err(|e| e.to_string());
+                            let _ = tx.send(UiNotice::GitActionDone(res));
                         });
                     }
                 });
             });
-        }
 
-        // Worktrees section
-        if self.git.worktrees.len() > 1 {
-            ui.add_space(10.0);
-            ui.label(
-                egui::RichText::new("ISOLATED WORKTREES")
-                    .size(11.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(168, 85, 247)),
-            );
-            let wts = self.git.worktrees.clone();
-            for wt in wts {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(format!("⑂ {}", wt.branch))
-                            .small()
-                            .strong(),
-                    );
-                    if ui
-                        .small_button("Open")
-                        .on_hover_text(&wt.path)
-                        .clicked()
-                    {
-                        self.project = wt.path;
-                        self.reload_sessions();
-                        self.refresh_git(ctx);
-                    }
-                });
-            }
-        }
+        ui.add_space(10.0);
+        ui.label(
+            RichText::new(format!("WORKING TREE ({})", self.git.entries.len()))
+                .size(10.5)
+                .strong()
+                .color(TEXT_DIM),
+        );
+        ui.add_space(4.0);
 
-        // Commit log section
-        if !self.git.commits.is_empty() {
-            ui.add_space(10.0);
-            ui.label(
-                egui::RichText::new("RECENT COMMITS")
-                    .size(11.0)
-                    .strong()
-                    .color(egui::Color32::from_rgb(130, 134, 150)),
-            );
-            for commit in &self.git.commits {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(&commit.sha)
-                            .monospace()
-                            .size(11.5)
-                            .color(egui::Color32::from_rgb(244, 63, 94)),
-                    );
-                    ui.label(egui::RichText::new(&commit.subject).size(12.0));
-                });
-                ui.label(
-                    egui::RichText::new(format!("  {} · {}", commit.author, commit.relative_time))
-                        .size(10.5)
-                        .weak(),
-                );
-            }
-        }
-    }
-
-    fn spawn_git_op<F, Fut>(&mut self, ctx: &egui::Context, label: &str, op: F)
-    where
-        F: FnOnce(PathBuf) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = serika_runtime::Result<String>> + Send + 'static,
-    {
-        let root = PathBuf::from(&self.project);
-        let tx = self.app_tx.clone();
-        let egui_ctx = ctx.clone();
-        let label = label.to_string();
-        self.rt.spawn(async move {
-            let outcome = op(root.clone()).await;
-            let notice = match outcome {
-                Ok(out) if out == "(no output)" => label,
-                Ok(out) => format!("{label}: {}", out.lines().next().unwrap_or("")),
-                Err(err) => format!("Git error: {err}"),
-            };
-            let snapshot = gitinfo::snapshot(&root).await.unwrap_or_default();
-            let _ = tx.send(AppMsg::GitActionDone { notice, snapshot });
-            egui_ctx.request_repaint();
-        });
-    }
-
-    fn open_git_file_diff(&mut self, ctx: &egui::Context, path: &str, staged: bool) {
-        let root = PathBuf::from(&self.project);
-        let path_owned = path.to_string();
-        let tx = self.app_tx.clone();
-        let egui_ctx = ctx.clone();
-        self.rt.spawn(async move {
-            let diff = gitinfo::file_diff(&root, &path_owned, staged)
-                .await
-                .unwrap_or_default();
-            let title = format!(
-                "{} ({})",
-                path_owned,
-                if staged { "staged" } else { "working tree" }
-            );
-            let _ = tx.send(AppMsg::FileDiffLoaded { title, diff });
-            egui_ctx.request_repaint();
-        });
-    }
-
-    fn diff_view(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.diff_scope, DiffScope::Session, "Turn Edits");
-            ui.selectable_value(&mut self.diff_scope, DiffScope::Unstaged, "Unstaged");
-            ui.selectable_value(&mut self.diff_scope, DiffScope::Staged, "Staged");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.selectable_value(&mut self.diff_view_mode, DiffViewMode::Split, "Split");
-                ui.selectable_value(&mut self.diff_view_mode, DiffViewMode::Unified, "Unified");
-            });
-        });
-        ui.separator();
-
-        let active_diff: &str = match self.diff_scope {
-            DiffScope::Session => {
-                if self.diffs.is_empty() {
-                    ui.label(
-                        egui::RichText::new("No agent file edits in this session turn yet.")
-                            .small()
-                            .weak(),
-                    );
-                    return;
+        ScrollArea::vertical()
+            .id_salt("git_entries_scroll")
+            .max_height(240.0)
+            .show(ui, |ui| {
+                if self.git.entries.is_empty() {
+                    ui.label(RichText::new("Working tree is clean.").size(11.5).color(EMERALD));
                 }
-                let names: Vec<String> = self.diffs.iter().map(|d| d.path.clone()).collect();
-                egui::ComboBox::from_id_salt("diff-file")
-                    .selected_text(names.get(self.diff_index).cloned().unwrap_or_default())
-                    .show_ui(ui, |ui| {
-                        for (index, name) in names.iter().enumerate() {
-                            ui.selectable_value(&mut self.diff_index, index, name);
-                        }
-                    });
-                self.diffs
-                    .get(self.diff_index)
-                    .map(|d| d.diff.as_str())
-                    .unwrap_or("")
-            }
-            DiffScope::Unstaged => {
-                if !self.custom_diff_text.is_empty() {
+                let entries = self.git.entries.clone();
+                for entry in entries {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&self.custom_diff_title).small().strong());
-                        if ui.small_button("Show All Unstaged").clicked() {
-                            self.custom_diff_text.clear();
+                        let col = if entry.staged { EMERALD } else { AMBER };
+                        ui.label(
+                            RichText::new(entry.badge())
+                                .monospace()
+                                .size(11.0)
+                                .strong()
+                                .color(col),
+                        );
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(&entry.path).size(11.5).color(TEXT_PRIMARY),
+                                )
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
+                            let proj = self.project.clone();
+                            let path = entry.path.clone();
+                            let staged = entry.staged;
+                            let tx = self.tx.clone();
+                            self.tokio.spawn(async move {
+                                if let Ok(d) = gitinfo::file_diff(&proj, &path, staged).await {
+                                    let _ = tx.send(UiNotice::DiffLoaded((path, d)));
+                                }
+                            });
                         }
                     });
                 }
-                if !self.custom_diff_text.is_empty() {
-                    &self.custom_diff_text
-                } else {
-                    &self.git.unstaged_diff
-                }
-            }
-            DiffScope::Staged => &self.git.staged_diff,
-        };
+            });
 
-        if active_diff.trim().is_empty() {
-            ui.label(egui::RichText::new("No diff lines in this scope.").small().weak());
+        ui.add_space(10.0);
+        ui.collapsing(
+            RichText::new(format!("Worktrees ({})", self.git.worktrees.len()))
+                .size(11.5)
+                .color(TEXT_MUTED),
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        TextEdit::singleline(&mut self.worktree_branch_input)
+                            .hint_text("feat/agent-branch")
+                            .desired_width(150.0),
+                    );
+                    if ui.button("Isolate").clicked()
+                        && !self.worktree_branch_input.trim().is_empty()
+                    {
+                        if let Some(core) = &self.core {
+                            let base = core.paths.data_dir.join("worktrees");
+                            let branch = self.worktree_branch_input.trim().to_string();
+                            self.worktree_branch_input.clear();
+                            let proj = self.project.clone();
+                            let tx = self.tx.clone();
+                            self.tokio.spawn(async move {
+                                let res = gitinfo::create_worktree(&proj, &base, &branch)
+                                    .await
+                                    .map_err(|e| e.to_string());
+                                let _ = tx.send(UiNotice::WorktreeCreated(res));
+                            });
+                        }
+                    }
+                });
+            },
+        );
+    }
+
+    fn draw_diffs_tab(&mut self, ui: &mut egui::Ui) {
+        if self.diffs.is_empty() {
+            ui.label(
+                RichText::new("No diffs recorded in this thread yet.")
+                    .size(12.0)
+                    .color(TEXT_DIM),
+            );
             return;
         }
-
-        match self.diff_view_mode {
-            DiffViewMode::Unified => render_unified_diff(ui, active_diff),
-            DiffViewMode::Split => render_split_diff(ui, active_diff),
+        ui.horizontal_wrapped(|ui| {
+            for (idx, (path, _)) in self.diffs.iter().enumerate() {
+                let active = idx == self.selected_diff;
+                let fill = if active { SERIKA_VIOLET } else { BG_CARD };
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new(path).size(11.0).color(TEXT_PRIMARY))
+                            .fill(fill)
+                            .corner_radius(CornerRadius::same(6)),
+                    )
+                    .clicked()
+                {
+                    self.selected_diff = idx;
+                }
+            }
+        });
+        ui.separator();
+        if let Some((_, diff)) = self.diffs.get(self.selected_diff) {
+            ScrollArea::vertical()
+                .id_salt("inspector_diff_scroll")
+                .show(ui, |ui| {
+                    for line in diff.lines() {
+                        let color = if line.starts_with('+') {
+                            EMERALD
+                        } else if line.starts_with('-') {
+                            ROSE
+                        } else if line.starts_with("@@") {
+                            SERIKA_VIOLET_LIGHT
+                        } else {
+                            TEXT_MUTED
+                        };
+                        ui.label(RichText::new(line).monospace().size(11.5).color(color));
+                    }
+                });
         }
     }
 
-    fn settings_window(&mut self, ctx: &egui::Context) {
+    fn draw_activity_tab(&mut self, ui: &mut egui::Ui) {
+        if self.tools.is_empty() {
+            ui.label(
+                RichText::new("No tool executions in this thread yet.")
+                    .size(12.0)
+                    .color(TEXT_DIM),
+            );
+            return;
+        }
+        ScrollArea::vertical()
+            .id_salt("inspector_activity_scroll")
+            .show(ui, |ui| {
+                for tool in self.tools.iter().rev() {
+                    egui::Frame::NONE
+                        .fill(BG_CARD)
+                        .corner_radius(CornerRadius::same(8))
+                        .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                        .inner_margin(Margin::same(8))
+                        .show(ui, |ui| {
+                            let c = if tool.ok { EMERALD } else { ROSE };
+                            ui.label(
+                                RichText::new(&tool.name)
+                                    .monospace()
+                                    .size(11.5)
+                                    .strong()
+                                    .color(c),
+                            );
+                            ui.label(
+                                RichText::new(&tool.output)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(TEXT_MUTED),
+                            );
+                        });
+                    ui.add_space(6.0);
+                }
+            });
+    }
+
+    // =========================================================================
+    // Modals: Providers & API Keys, Settings, Command Palette, Approvals
+    // =========================================================================
+    fn draw_providers_modal(&mut self, ctx: &egui::Context) {
+        if !self.show_providers {
+            return;
+        }
+        let mut open = self.show_providers;
+        let style = ctx.style_of(Theme::Dark);
+        egui::Window::new("Providers & Optional API Keys")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(500.0)
+            .frame(
+                egui::Frame::window(&style)
+                    .fill(BG_CARD)
+                    .stroke(Stroke::new(1.0, BORDER_STRONG))
+                    .corner_radius(CornerRadius::same(14))
+                    .inner_margin(Margin::same(16)),
+            )
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("1. Local Harnesses (Default · Zero API Key Required)")
+                        .strong()
+                        .size(13.0)
+                        .color(EMERALD),
+                );
+                ui.label(
+                    RichText::new(
+                        "Just like T3 Code, Serika Code works out-of-the-box without requiring any API key.",
+                    )
+                    .size(11.5)
+                    .color(TEXT_MUTED),
+                );
+                ui.add_space(6.0);
+                for h in &self.local_harnesses {
+                    ui.horizontal(|ui| {
+                        let col = if h.available { EMERALD } else { TEXT_DIM };
+                        let status = if h.available { "READY" } else { "NOT FOUND" };
+                        ui.label(RichText::new(status).monospace().size(10.5).strong().color(col));
+                        if ui
+                            .selectable_label(self.selected_model == h.id, &h.name)
+                            .clicked()
+                            && h.available
+                        {
+                            self.selected_model = h.id.clone();
+                        }
+                        ui.label(RichText::new(&h.description).size(11.0).color(TEXT_DIM));
+                    });
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.label(
+                    RichText::new("2. Optional BYOK APIs (Claude, OpenAI & Gemini)")
+                        .strong()
+                        .size(13.0)
+                        .color(SERIKA_VIOLET_LIGHT),
+                );
+                ui.label(
+                    RichText::new(
+                        "Optionally add your own API keys to use Claude, OpenAI, or Gemini directly.",
+                    )
+                    .size(11.5)
+                    .color(TEXT_MUTED),
+                );
+                ui.add_space(8.0);
+
+                ui.label(
+                    RichText::new("Anthropic Claude API Key (optional)")
+                        .size(11.5)
+                        .color(TEXT_MUTED),
+                );
+                ui.add(
+                    TextEdit::singleline(&mut self.anthropic_key_input)
+                        .password(true)
+                        .hint_text("sk-ant-… (or set ANTHROPIC_API_KEY)")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(6.0);
+
+                ui.label(
+                    RichText::new("OpenAI API Key (optional)")
+                        .size(11.5)
+                        .color(TEXT_MUTED),
+                );
+                ui.add(
+                    TextEdit::singleline(&mut self.openai_key_input)
+                        .password(true)
+                        .hint_text("sk-… (or set OPENAI_API_KEY)")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(6.0);
+
+                ui.label(
+                    RichText::new("Google Gemini API Key (optional)")
+                        .size(11.5)
+                        .color(TEXT_MUTED),
+                );
+                ui.add(
+                    TextEdit::singleline(&mut self.gemini_key_input)
+                        .password(true)
+                        .hint_text("AIza… (or set GEMINI_API_KEY)")
+                        .desired_width(f32::INFINITY),
+                );
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Save Providers & Keys")
+                                    .size(12.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(SERIKA_VIOLET)
+                            .corner_radius(CornerRadius::same(8)),
+                        )
+                        .clicked()
+                    {
+                        self.save_providers_and_settings();
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.collapsing(
+                    RichText::new("Optional: Serika Cloud Account")
+                        .size(12.0)
+                        .color(TEXT_MUTED),
+                    |ui| {
+                        if let Some(session) = self.session.clone() {
+                            ui.label(format!(
+                                "Signed in as {} ({})",
+                                session.username, session.email
+                            ));
+                            if ui.button("Sign out").clicked() {
+                                if let Some(core) = &self.core {
+                                    let _ = core.secrets.clear();
+                                }
+                                self.session = None;
+                            }
+                        } else {
+                            ui.add(
+                                TextEdit::singleline(&mut self.email_input)
+                                    .hint_text("Email")
+                                    .desired_width(f32::INFINITY),
+                            );
+                            ui.add(
+                                TextEdit::singleline(&mut self.password_input)
+                                    .password(true)
+                                    .hint_text("Password")
+                                    .desired_width(f32::INFINITY),
+                            );
+                            if ui.button("Sign in to Serika Cloud").clicked() {
+                                if let Some(core) = self.core.clone() {
+                                    let email = self.email_input.trim().to_string();
+                                    let password = self.password_input.clone();
+                                    let tx = self.tx.clone();
+                                    self.tokio.spawn(async move {
+                                        let res = core
+                                            .client
+                                            .login_password(&email, &password, None)
+                                            .await
+                                            .map_err(|e| e.to_string());
+                                        let _ = tx.send(UiNotice::LoggedIn(res));
+                                    });
+                                }
+                            }
+                            if !self.auth_notice.is_empty() {
+                                ui.label(
+                                    RichText::new(&self.auth_notice)
+                                        .size(11.0)
+                                        .color(SERIKA_VIOLET_LIGHT),
+                                );
+                            }
+                        }
+                    },
+                );
+            });
+        self.show_providers = open;
+    }
+
+    fn draw_settings_modal(&mut self, ctx: &egui::Context) {
         if !self.show_settings {
             return;
         }
         let mut open = self.show_settings;
-        let mut trigger_update = false;
-        let mut trigger_check = false;
-        let mut trigger_setup = false;
-
+        let style = ctx.style_of(Theme::Dark);
         egui::Window::new("Settings & System Setup")
             .open(&mut open)
+            .collapsible(false)
             .resizable(false)
+            .default_width(460.0)
+            .frame(
+                egui::Frame::window(&style)
+                    .fill(BG_CARD)
+                    .stroke(Stroke::new(1.0, BORDER_STRONG))
+                    .corner_radius(CornerRadius::same(14))
+                    .inner_margin(Margin::same(16)),
+            )
             .show(ctx, |ui| {
-                ui.label(egui::RichText::new("Default Model").strong());
-                if !self.model_labels.is_empty() {
-                    egui::ComboBox::from_id_salt("settings_model")
-                        .selected_text(
-                            self.model_labels
-                                .get(self.model_index)
-                                .cloned()
-                                .unwrap_or_default(),
+                ui.checkbox(
+                    &mut self.auto_approve_session,
+                    "Auto-approve file edits and shell commands in this session",
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Re-run System Setup & Shortcuts")
+                                    .size(12.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(SERIKA_VIOLET)
+                            .corner_radius(CornerRadius::same(8)),
                         )
-                        .show_ui(ui, |ui| {
-                            for (index, label) in self.model_labels.iter().enumerate() {
-                                ui.selectable_value(&mut self.model_index, index, label);
-                            }
-                        });
-                }
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("Permission Mode").strong());
-                for (mode, label) in [
-                    (PermissionMode::ReadOnly, "Read only (no writes or commands)"),
-                    (PermissionMode::Standard, "Standard (ask before edits & shell)"),
-                    (PermissionMode::Restricted, "Restricted (workspace edits allowed, ask for shell)"),
-                    (PermissionMode::Full, "Full access (autonomous inside workspace)"),
-                ] {
-                    ui.radio_value(&mut self.permission, mode, label);
-                }
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label("Command timeout (s):");
-                    ui.add(egui::TextEdit::singleline(&mut self.timeout).desired_width(64.0));
-                    ui.label("Retention (days):");
-                    ui.add(egui::TextEdit::singleline(&mut self.retention).desired_width(64.0));
-                });
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label("Theme:");
-                    if ui.button("T3 Obsidian").clicked() {
-                        apply_theme(ctx, "dark");
+                        .clicked()
+                    {
+                        if let Some(core) = self.core.clone() {
+                            let tx = self.tx.clone();
+                            self.tokio.spawn(async move {
+                                let res = tokio::task::spawn_blocking(move || {
+                                    setup::install_system(&core.paths, &SetupOptions::default())
+                                        .map(|r| r.render())
+                                        .map_err(|e| e.to_string())
+                                })
+                                .await
+                                .unwrap_or_else(|e| Err(e.to_string()));
+                                let _ = tx.send(UiNotice::SetupDone(res));
+                            });
+                        }
                     }
-                    if ui.button("Daylight").clicked() {
-                        apply_theme(ctx, "light");
-                    }
-                });
-                ui.separator();
-                ui.label(egui::RichText::new("Updater & System Installation").strong());
-                ui.horizontal(|ui| {
                     if ui.button("Check for Updates").clicked() {
-                        trigger_check = true;
-                    }
-                    if ui.button("Self-Update Now").clicked() {
-                        trigger_update = true;
-                    }
-                    if ui.button("Run System Setup (PATH & Shortcuts)").clicked() {
-                        trigger_setup = true;
+                        self.check_updates_async();
                     }
                 });
-                ui.add_space(6.0);
-                if ui
-                    .button(egui::RichText::new("Save Configuration").strong())
-                    .clicked()
-                {
-                    self.persist_settings(ctx);
+                if !self.setup_status.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(&self.setup_status)
+                            .monospace()
+                            .size(11.0)
+                            .color(TEXT_MUTED),
+                    );
                 }
             });
         self.show_settings = open;
-        if trigger_check {
-            self.check_updates(ctx, true);
-        }
-        if trigger_update {
-            self.trigger_self_update(ctx);
-        }
-        if trigger_setup {
-            self.trigger_system_setup(ctx);
-        }
     }
 
-    fn command_palette_window(&mut self, ctx: &egui::Context) {
+    fn draw_palette_modal(&mut self, ctx: &egui::Context) {
         if !self.show_palette {
             return;
         }
         let mut open = self.show_palette;
-        let mut chosen_action: Option<&str> = None;
-
-        egui::Window::new("⌘K Command Palette")
+        let style = ctx.style_of(Theme::Dark);
+        egui::Window::new("Command Palette")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 64.0))
-            .fixed_size(egui::vec2(460.0, 320.0))
+            .default_width(440.0)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 80.0])
+            .frame(
+                egui::Frame::window(&style)
+                    .fill(BG_CARD)
+                    .stroke(Stroke::new(1.0, SERIKA_VIOLET))
+                    .corner_radius(CornerRadius::same(12))
+                    .inner_margin(Margin::same(12)),
+            )
             .show(ctx, |ui| {
                 let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.palette_query)
-                        .hint_text("Type a command (e.g. worktree, commit, update, setup, theme)…")
+                    TextEdit::singleline(&mut self.palette_query)
+                        .hint_text("Type a command…")
                         .desired_width(f32::INFINITY),
                 );
                 resp.request_focus();
-                ui.separator();
-
-                let q = self.palette_query.trim().to_ascii_lowercase();
-                let commands = [
-                    ("new_thread", "+ Start New Thread in Current Project (Ctrl+N)"),
-                    ("scratch_thread", "✦ Start New Scratch Thread (No Project Needed)"),
-                    ("turn_into_project", "📁 Turn Scratch Thread into Project…"),
-                    ("isolate_worktree", "⑂ Isolate Thread in Dedicated Git Worktree"),
-                    ("refresh_git", "↻ Refresh Git Status & Commit Log"),
-                    ("stage_all", "+ Git: Stage All Changes"),
-                    ("toggle_split", "◫ Diff: Toggle Unified / Split Side-by-Side View"),
-                    ("check_updates", "⬆ Check for Serika Code Updates"),
-                    ("run_setup", "⬇ Install Serika Code to System PATH & Shortcuts"),
-                    ("open_settings", "⚙ Open Settings"),
-                    ("open_account", "👤 Open Serika Account & Usage"),
-                ];
-
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (id, label) in commands {
-                        if !q.is_empty() && !label.to_ascii_lowercase().contains(&q) {
-                            continue;
-                        }
-                        if ui
-                            .selectable_label(false, egui::RichText::new(label).size(13.5))
-                            .clicked()
-                        {
-                            chosen_action = Some(id);
+                ui.add_space(6.0);
+                let q = self.palette_query.to_ascii_lowercase();
+                for (id, label) in [
+                    ("new", "New Thread (Ctrl+N)"),
+                    ("folder", "Open Project Folder…"),
+                    ("scratch", "Switch to Scratch Workspace"),
+                    (
+                        "providers",
+                        "Configure Providers & Optional API Keys (OpenAI / Gemini / Claude)",
+                    ),
+                    ("inspector", "Toggle Git & Diffs Inspector (Ctrl+B)"),
+                    ("update", "Check for Updates"),
+                ] {
+                    if !q.is_empty() && !label.to_ascii_lowercase().contains(&q) {
+                        continue;
+                    }
+                    if ui
+                        .add_sized(
+                            [ui.available_width(), 28.0],
+                            egui::Button::new(RichText::new(label).size(12.0).color(TEXT_PRIMARY))
+                                .fill(BG_INPUT)
+                                .corner_radius(CornerRadius::same(6)),
+                        )
+                        .clicked()
+                    {
+                        self.show_palette = false;
+                        self.palette_query.clear();
+                        match id {
+                            "new" => self.new_thread(),
+                            "folder" => {
+                                if let Some(f) = rfd::FileDialog::new().pick_folder() {
+                                    self.switch_project(f);
+                                }
+                            }
+                            "scratch" => {
+                                if let Some(core) = &self.core {
+                                    let s = core.paths.scratch_dir();
+                                    let _ = std::fs::create_dir_all(&s);
+                                    self.switch_project(s);
+                                }
+                            }
+                            "providers" => self.show_providers = true,
+                            "inspector" => self.show_inspector = !self.show_inspector,
+                            "update" => self.check_updates_async(),
+                            _ => {}
                         }
                     }
-                });
+                }
             });
-
-        self.show_palette = open;
-        if let Some(cmd) = chosen_action {
+        if !open {
             self.show_palette = false;
-            match cmd {
-                "new_thread" => self.new_thread(false, ctx),
-                "scratch_thread" => self.new_thread(true, ctx),
-                "turn_into_project" => self.turn_into_project(ctx),
-                "isolate_worktree" => self.isolate_in_worktree(ctx),
-                "refresh_git" => self.refresh_git(ctx),
-                "stage_all" => {
-                    self.spawn_git_op(ctx, "Staged all files", |root| async move {
-                        gitinfo::stage_all(&root).await
-                    });
-                }
-                "toggle_split" => {
-                    self.diff_view_mode = match self.diff_view_mode {
-                        DiffViewMode::Unified => DiffViewMode::Split,
-                        DiffViewMode::Split => DiffViewMode::Unified,
-                    };
-                    self.show_inspector = true;
-                    self.right = RightTab::Diff;
-                }
-                "check_updates" => self.check_updates(ctx, true),
-                "run_setup" => self.trigger_system_setup(ctx),
-                "open_settings" => self.show_settings = true,
-                "open_account" => self.show_account = true,
-                _ => {}
-            }
         }
     }
 
-    fn persist_settings(&mut self, ctx: &egui::Context) {
-        let mut config = self.core.config.clone();
-        config.permission = self.permission;
-        config.model = self.model_ids.get(self.model_index).cloned();
-        if let Ok(timeout) = self.timeout.parse() {
-            config.command_timeout_secs = timeout;
-        }
-        if let Ok(days) = self.retention.parse() {
-            config.session_retention_days = days;
-        }
-        config.theme = if ctx.global_style().visuals.dark_mode {
-            "dark"
-        } else {
-            "light"
-        }
-        .into();
-        if let Err(err) = config.save(&self.core.paths.config_file) {
-            self.status = err.to_string();
-        } else {
-            self.status = "Settings saved.".into();
-        }
-    }
-
-    fn account_window(&mut self, ctx: &egui::Context) {
-        if !self.show_account {
-            return;
-        }
-        let mut open = self.show_account;
-        egui::Window::new("Serika Account")
-            .open(&mut open)
+    fn draw_approval_modal(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_approval.clone() else { return };
+        let mut choice = None;
+        let style = ctx.style_of(Theme::Dark);
+        egui::Window::new("Approve Tool Execution")
+            .collapsible(false)
             .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .frame(
+                egui::Frame::window(&style)
+                    .fill(BG_CARD)
+                    .stroke(Stroke::new(1.5, SERIKA_VIOLET))
+                    .corner_radius(CornerRadius::same(14))
+                    .inner_margin(Margin::same(16)),
+            )
             .show(ctx, |ui| {
-                ui.label(egui::RichText::new(&self.account).strong());
-                if let Some(usage) = &self.usage {
-                    ui.label(usage.summary_line());
-                }
-                ui.separator();
-                ui.label("Email");
-                ui.text_edit_singleline(&mut self.login_email);
-                ui.label("Password");
-                ui.add(egui::TextEdit::singleline(&mut self.login_password).password(true));
-                ui.label("2FA Code (optional)");
-                ui.text_edit_singleline(&mut self.login_code);
-                ui.horizontal(|ui| {
-                    if ui.button("Sign in").clicked() {
-                        self.do_login();
-                    }
-                    if ui.button("Send Email Magic Link").clicked() {
-                        self.do_magic_request();
-                    }
-                    if ui.button("Sign out").clicked() {
-                        self.do_logout();
-                    }
-                });
-                ui.separator();
-                ui.label("Magic-link token");
-                ui.text_edit_singleline(&mut self.login_magic);
-                if ui.button("Use magic-link token").clicked() {
-                    self.do_magic_consume();
-                }
-                if !self.login_note.is_empty() {
-                    ui.label(&self.login_note);
-                }
-            });
-        self.show_account = open;
-    }
-
-    fn do_login(&mut self) {
-        let core = self.core.clone();
-        let tx = self.events_tx.clone();
-        let email = self.login_email.clone();
-        let mut password = self.login_password.clone();
-        let code = {
-            let code = self.login_code.trim().to_string();
-            if code.is_empty() { None } else { Some(code) }
-        };
-        self.login_password.clear();
-        self.rt.spawn(async move {
-            let outcome = core.login_password(&email, &password, code.as_deref()).await;
-            password.zeroize();
-            report_login(outcome, &tx);
-        });
-    }
-
-    fn do_magic_request(&mut self) {
-        let core = self.core.clone();
-        let tx = self.events_tx.clone();
-        let email = self.login_email.clone();
-        self.rt.spawn(async move {
-            match core.request_magic_link(&email).await {
-                Ok(message) => {
-                    let _ = tx.send(AgentEvent::Status(message));
-                }
-                Err(err) => {
-                    let _ = tx.send(AgentEvent::Failed {
-                        message: err.to_string(),
-                    });
-                }
-            }
-        });
-    }
-
-    fn do_magic_consume(&mut self) {
-        let core = self.core.clone();
-        let tx = self.events_tx.clone();
-        let token = self.login_magic.trim().to_string();
-        let code = {
-            let code = self.login_code.trim().to_string();
-            if code.is_empty() { None } else { Some(code) }
-        };
-        self.rt.spawn(async move {
-            report_login(core.consume_magic_link(&token, code.as_deref()).await, &tx);
-        });
-    }
-
-    fn do_logout(&mut self) {
-        let core = self.core.clone();
-        let tx = self.events_tx.clone();
-        self.rt.spawn(async move {
-            match core.logout().await {
-                Ok(()) => {
-                    let _ = tx.send(AgentEvent::Status("signed out".into()));
-                }
-                Err(err) => {
-                    let _ = tx.send(AgentEvent::Failed {
-                        message: err.to_string(),
-                    });
-                }
-            }
-        });
-        self.account = "Not signed in".into();
-    }
-}
-
-fn report_login(outcome: serika_runtime::Result<LoginOutcome>, tx: &UnboundedSender<AgentEvent>) {
-    match outcome {
-        Ok(LoginOutcome::SignedIn(session)) => {
-            let _ = tx.send(AgentEvent::Status(format!(
-                "signed in as {}",
-                session.username
-            )));
-        }
-        Ok(LoginOutcome::NeedsSecondFactor { message }) => {
-            let _ = tx.send(AgentEvent::Status(message));
-        }
-        Err(err) => {
-            let _ = tx.send(AgentEvent::Failed {
-                message: err.to_string(),
-            });
-        }
-    }
-}
-
-fn message_card(ui: &mut egui::Ui, role: &str, raw: &str, segments: &[MessageSegment]) {
-    let (badge, fill, border, badge_color) = match role {
-        "user" => (
-            "YOU",
-            egui::Color32::from_rgb(28, 22, 34),
-            egui::Color32::from_rgb(88, 36, 62),
-            egui::Color32::from_rgb(251, 113, 133),
-        ),
-        "error" => (
-            "ERROR",
-            egui::Color32::from_rgb(46, 20, 24),
-            egui::Color32::from_rgb(185, 28, 28),
-            egui::Color32::from_rgb(252, 165, 165),
-        ),
-        _ => (
-            "SERIKA",
-            egui::Color32::from_rgb(20, 21, 28),
-            egui::Color32::from_rgb(38, 40, 54),
-            egui::Color32::from_rgb(168, 85, 247),
-        ),
-    };
-    ui.add_space(8.0);
-    egui::Frame::new()
-        .fill(fill)
-        .stroke(egui::Stroke::new(1.0, border))
-        .inner_margin(egui::Margin::same(12))
-        .corner_radius(egui::CornerRadius::same(9))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(badge)
-                        .size(10.5)
+                    RichText::new(&pending.title)
                         .strong()
-                        .color(badge_color),
+                        .size(14.0)
+                        .color(TEXT_PRIMARY),
                 );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Copy").clicked() {
-                        ui.ctx().copy_text(raw.to_string());
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(&pending.detail)
+                        .monospace()
+                        .size(12.0)
+                        .color(TEXT_MUTED),
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Approve")
+                                    .size(12.0)
+                                    .strong()
+                                    .color(Color32::WHITE),
+                            )
+                            .fill(EMERALD)
+                            .corner_radius(CornerRadius::same(8)),
+                        )
+                        .clicked()
+                    {
+                        choice = Some(true);
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Deny").size(12.0).strong().color(Color32::WHITE),
+                            )
+                            .fill(ROSE)
+                            .corner_radius(CornerRadius::same(8)),
+                        )
+                        .clicked()
+                    {
+                        choice = Some(false);
                     }
                 });
+            });
+        if let Some(approved) = choice {
+            if let Some(req) = self.pending_approval.take() {
+                if let Some(core) = &self.core {
+                    core.approvals.resolve(&req.id, approved);
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// Helper Components & Theme Setup
+// =============================================================================
+
+/// Prevent starting in `C:\Users\...\AppData\Local\Programs\Serika Code\bin` when launched from a shortcut.
+fn choose_initial_workspace(core: &Option<Arc<Runtime>>, recents: &[PathBuf]) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd_str = cwd.to_string_lossy().to_ascii_lowercase();
+    let is_install_or_system_dir = cwd_str.contains("programs\\serika code")
+        || cwd_str.contains("appdata\\local")
+        || cwd_str.ends_with("\\bin")
+        || cwd_str.contains("windows\\system32");
+
+    if !is_install_or_system_dir && cwd.join(".git").exists() {
+        return cwd;
+    }
+    if let Some(first_recent) = recents.first() {
+        return first_recent.clone();
+    }
+    if !is_install_or_system_dir {
+        return cwd;
+    }
+    if let Some(c) = core {
+        let scratch = c.paths.scratch_dir();
+        let _ = std::fs::create_dir_all(&scratch);
+        return scratch;
+    }
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or(cwd)
+}
+
+fn workspace_display_name(project: &Path, core: &Option<Arc<Runtime>>) -> String {
+    if let Some(c) = core {
+        if project == c.paths.scratch_dir() {
+            return "Scratch".to_string();
+        }
+    }
+    project
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Workspace")
+        .to_string()
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    }
+}
+
+fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip: &str, primary: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+    let fill = if primary {
+        if resp.hovered() {
+            SERIKA_VIOLET_HOVER
+        } else {
+            SERIKA_VIOLET
+        }
+    } else if resp.hovered() {
+        BG_CARD_HOVER
+    } else {
+        BG_CARD
+    };
+    let fg = if primary {
+        Color32::WHITE
+    } else if resp.hovered() {
+        TEXT_PRIMARY
+    } else {
+        TEXT_MUTED
+    };
+    ui.painter().rect_filled(rect, 6.0, fill);
+    if !primary {
+        ui.painter()
+            .rect_stroke(rect, 6.0, Stroke::new(1.0, BORDER_SUBTLE), StrokeKind::Inside);
+    }
+    paint_icon(ui.painter(), rect.shrink(5.0), icon, fg);
+    resp.on_hover_text(tooltip)
+}
+
+fn pill_icon_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    active: bool,
+) -> egui::Response {
+    let fill = if active { SERIKA_VIOLET_SOFT } else { BG_CARD };
+    let stroke_col = if active { SERIKA_VIOLET } else { BORDER_SUBTLE };
+    let fg = if active {
+        SERIKA_VIOLET_LIGHT
+    } else {
+        TEXT_MUTED
+    };
+    let btn = ui.add(
+        egui::Button::new(RichText::new(format!("    {label}")).size(11.0).color(fg))
+            .fill(fill)
+            .stroke(Stroke::new(1.0, stroke_col))
+            .corner_radius(CornerRadius::same(6)),
+    );
+    let ir = Rect::from_center_size(
+        Pos2::new(btn.rect.left() + 11.0, btn.rect.center().y),
+        Vec2::splat(11.0),
+    );
+    paint_icon(ui.painter(), ir, icon, fg);
+    btn
+}
+
+fn starter_chip(ui: &mut egui::Ui, icon: Icon, label: &str) -> egui::Response {
+    let btn = ui.add(
+        egui::Button::new(
+            RichText::new(format!("     {label}"))
+                .size(11.5)
+                .color(TEXT_MUTED),
+        )
+        .fill(BG_CARD)
+        .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+        .corner_radius(CornerRadius::same(20)),
+    );
+    let ir = Rect::from_center_size(
+        Pos2::new(btn.rect.left() + 13.0, btn.rect.center().y),
+        Vec2::splat(11.0),
+    );
+    paint_icon(ui.painter(), ir, icon, SERIKA_VIOLET_LIGHT);
+    btn
+}
+
+fn draw_thread_row(ui: &mut egui::Ui, item: &SessionSummary, is_active: bool) -> (bool, bool) {
+    let mut clicked = false;
+    let mut deleted = false;
+    let desired = Vec2::new(ui.available_width(), 34.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+
+    let fill = if is_active {
+        BG_ACTIVE_ROW
+    } else if resp.hovered() {
+        BG_CARD_HOVER
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter().rect_filled(rect, 7.0, fill);
+    if is_active {
+        let bar = Rect::from_min_size(
+            Pos2::new(rect.left(), rect.top() + 6.0),
+            Vec2::new(3.0, rect.height() - 12.0),
+        );
+        ui.painter().rect_filled(bar, 2.0, SERIKA_VIOLET);
+    }
+
+    let title_col = if is_active || resp.hovered() {
+        TEXT_PRIMARY
+    } else {
+        TEXT_MUTED
+    };
+    let text_pos = Pos2::new(rect.left() + 10.0, rect.center().y - 7.0);
+    let clipped_title: String = item.title.chars().take(28).collect();
+    ui.painter().text(
+        text_pos,
+        egui::Align2::LEFT_TOP,
+        clipped_title,
+        FontId::proportional(12.0),
+        title_col,
+    );
+
+    if resp.hovered() {
+        let del_rect = Rect::from_center_size(
+            Pos2::new(rect.right() - 14.0, rect.center().y),
+            Vec2::splat(16.0),
+        );
+        let del_resp = ui.interact(del_rect, ui.scope_id().with(&item.id), Sense::click());
+        paint_icon(
+            ui.painter(),
+            del_rect.shrink(3.5),
+            Icon::Close,
+            if del_resp.hovered() { ROSE } else { TEXT_DIM },
+        );
+        if del_resp.clicked() {
+            deleted = true;
+        }
+    }
+
+    if resp.clicked() && !deleted {
+        clicked = true;
+    }
+    (clicked, deleted)
+}
+
+fn draw_message_card(ui: &mut egui::Ui, msg: &StoredMessage) {
+    let is_user = msg.role == "user";
+    let fill = if is_user { BG_INPUT } else { BG_CARD };
+    let border = if is_user {
+        SERIKA_VIOLET.gamma_multiply(0.38)
+    } else {
+        BORDER_SUBTLE
+    };
+    let badge_text = if is_user { "You" } else { "Serika" };
+    let badge_col = if is_user {
+        SERIKA_VIOLET_LIGHT
+    } else {
+        TEXT_PRIMARY
+    };
+
+    egui::Frame::NONE
+        .fill(fill)
+        .corner_radius(CornerRadius::same(12))
+        .stroke(Stroke::new(1.0, border))
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if !is_user {
+                    let (mr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    paint_icon(ui.painter(), mr, Icon::SerikaMark, SERIKA_VIOLET_LIGHT);
+                }
+                ui.label(RichText::new(badge_text).size(11.5).strong().color(badge_col));
             });
             ui.add_space(4.0);
-            for segment in segments {
-                match segment {
-                    MessageSegment::Text(text) => {
-                        ui.label(egui::RichText::new(text).size(14.5));
-                    }
-                    MessageSegment::Code { lang, code } => {
-                        ui.add_space(4.0);
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_rgb(12, 13, 18))
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                egui::Color32::from_rgb(36, 38, 50),
-                            ))
-                            .corner_radius(egui::CornerRadius::same(6))
-                            .inner_margin(egui::Margin::same(8))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    let tag = if lang.is_empty() { "code" } else { lang.as_str() };
-                                    ui.label(
-                                        egui::RichText::new(tag)
-                                            .size(11.0)
-                                            .monospace()
-                                            .color(egui::Color32::from_rgb(140, 145, 165)),
-                                    );
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if ui.small_button("Copy snippet").clicked() {
-                                                ui.ctx().copy_text(code.clone());
-                                            }
-                                        },
-                                    );
-                                });
-                                ui.label(
-                                    egui::RichText::new(code)
-                                        .monospace()
-                                        .size(12.5)
-                                        .color(egui::Color32::from_rgb(226, 232, 240)),
-                                );
-                            });
-                        ui.add_space(4.0);
-                    }
-                }
-            }
+            ui.label(RichText::new(&msg.content).size(13.0).color(TEXT_PRIMARY));
         });
 }
 
-fn parse_segments(text: &str) -> Vec<MessageSegment> {
-    let mut segments = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("```") {
-        let before = rest[..start].trim();
-        if !before.is_empty() {
-            segments.push(MessageSegment::Text(before.to_string()));
-        }
-        let after = &rest[start + 3..];
-        if let Some(end) = after.find("```") {
-            let block = &after[..end];
-            let (lang, code) = match block.find('\n') {
-                Some(nl) => (block[..nl].trim().to_string(), block[nl + 1..].trim_end().to_string()),
-                None => (String::new(), block.trim_end().to_string()),
-            };
-            segments.push(MessageSegment::Code { lang, code });
-            rest = &after[end + 3..];
-        } else {
-            segments.push(MessageSegment::Text(rest.trim().to_string()));
-            return segments;
-        }
-    }
-    let tail = rest.trim();
-    if !tail.is_empty() {
-        segments.push(MessageSegment::Text(tail.to_string()));
-    }
-    segments
-}
-
-fn render_unified_diff(ui: &mut egui::Ui, diff: &str) {
-    for line in diff.lines() {
-        let (color, bg) = if line.starts_with('+') && !line.starts_with("+++") {
-            (
-                egui::Color32::from_rgb(110, 231, 183),
-                egui::Color32::from_rgb(14, 38, 28),
-            )
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            (
-                egui::Color32::from_rgb(252, 165, 165),
-                egui::Color32::from_rgb(46, 18, 24),
-            )
-        } else if line.starts_with("@@") {
-            (
-                egui::Color32::from_rgb(196, 181, 253),
-                egui::Color32::from_rgb(28, 22, 44),
-            )
-        } else {
-            (
-                egui::Color32::from_rgb(176, 180, 196),
-                egui::Color32::TRANSPARENT,
-            )
-        };
-        egui::Frame::new()
-            .fill(bg)
-            .inner_margin(egui::Margin::symmetric(4, 1))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(egui::RichText::new(line).monospace().size(11.5).color(color));
+fn draw_tool_pill(ui: &mut egui::Ui, tool: &ToolRun, has_diff: bool) -> bool {
+    let mut view_diff = false;
+    egui::Frame::NONE
+        .fill(BG_SIDEBAR)
+        .corner_radius(CornerRadius::same(8))
+        .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+        .inner_margin(Margin::symmetric(10, 5))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let col = if tool.ok { EMERALD } else { ROSE };
+                let (cr, _) = ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
+                paint_icon(
+                    ui.painter(),
+                    cr,
+                    if tool.ok { Icon::Check } else { Icon::Close },
+                    col,
+                );
+                ui.label(
+                    RichText::new(&tool.name)
+                        .monospace()
+                        .size(11.5)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+                let preview: String = tool
+                    .arguments
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(55)
+                    .collect();
+                ui.label(RichText::new(preview).monospace().size(11.0).color(TEXT_DIM));
+                if has_diff && (tool.name.contains("file") || tool.name.contains("patch")) {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("View diff")
+                                        .size(10.5)
+                                        .color(SERIKA_VIOLET_LIGHT),
+                                )
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
+                            view_diff = true;
+                        }
+                    });
+                }
             });
-    }
+        });
+    view_diff
 }
 
-fn render_split_diff(ui: &mut egui::Ui, diff: &str) {
-    let mut left_lines = Vec::new();
-    let mut right_lines = Vec::new();
-    for line in diff.lines() {
-        if line.starts_with("---") || line.starts_with("+++") {
-            continue;
-        }
-        if line.starts_with("@@") {
-            left_lines.push((line, egui::Color32::from_rgb(196, 181, 253)));
-            right_lines.push((line, egui::Color32::from_rgb(196, 181, 253)));
-        } else if line.starts_with('-') {
-            left_lines.push((line, egui::Color32::from_rgb(252, 165, 165)));
-        } else if line.starts_with('+') {
-            right_lines.push((line, egui::Color32::from_rgb(110, 231, 183)));
-        } else {
-            left_lines.push((line, egui::Color32::from_rgb(165, 170, 186)));
-            right_lines.push((line, egui::Color32::from_rgb(165, 170, 186)));
+fn install_system_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    let ui_candidates = [
+        r"C:\Windows\Fonts\segoeui.ttf",
+        "/System/Library/Fonts/SFNS.ttf",
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ];
+    for path in ui_candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts
+                .font_data
+                .insert("system_ui".into(), FontData::from_owned(bytes).into());
+            if let Some(fam) = fonts.families.get_mut(&FontFamily::Proportional) {
+                fam.insert(0, "system_ui".into());
+            }
+            break;
         }
     }
-    ui.columns(2, |cols| {
-        cols[0].label(egui::RichText::new("BEFORE").size(10.0).weak());
-        for (line, color) in &left_lines {
-            cols[0].label(egui::RichText::new(*line).monospace().size(11.0).color(*color));
+
+    let mono_candidates = [
+        r"C:\Windows\Fonts\CascadiaCode.ttf",
+        r"C:\Windows\Fonts\consola.ttf",
+        "/System/Library/Fonts/SFNSMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    ];
+    for path in mono_candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts
+                .font_data
+                .insert("system_mono".into(), FontData::from_owned(bytes).into());
+            if let Some(fam) = fonts.families.get_mut(&FontFamily::Monospace) {
+                fam.insert(0, "system_mono".into());
+            }
+            break;
         }
-        cols[1].label(egui::RichText::new("AFTER").size(10.0).weak());
-        for (line, color) in &right_lines {
-            cols[1].label(egui::RichText::new(*line).monospace().size(11.0).color(*color));
-        }
-    });
+    }
+    ctx.set_fonts(fonts);
 }
 
-fn strip_tools(text: &str) -> String {
-    let (visible, calls) = serika_runtime::protocol::extract_tool_calls(text);
-    if calls.is_empty() {
-        text.to_string()
-    } else if visible.is_empty() {
-        format!("{} tool step(s)", calls.len())
-    } else {
-        visible
-    }
-}
+fn apply_serika_theme(ctx: &egui::Context) {
+    ctx.set_theme(Theme::Dark);
+    let mut style = (*ctx.style_of(Theme::Dark)).clone();
+    style.spacing.item_spacing = Vec2::new(8.0, 6.0);
+    style.spacing.button_padding = Vec2::new(10.0, 5.0);
+    style.text_styles.insert(
+        TextStyle::Heading,
+        FontId::new(22.0, FontFamily::Proportional),
+    );
+    style
+        .text_styles
+        .insert(TextStyle::Body, FontId::new(13.0, FontFamily::Proportional));
+    style.text_styles.insert(
+        TextStyle::Button,
+        FontId::new(12.0, FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        TextStyle::Monospace,
+        FontId::new(12.0, FontFamily::Monospace),
+    );
 
-fn apply_theme(ctx: &egui::Context, theme: &str) {
-    let dark = theme != "light";
-    let mut visuals = if dark {
-        egui::Visuals::dark()
-    } else {
-        egui::Visuals::light()
-    };
-    if dark {
-        // T3 Code carbon-obsidian palette with rose-violet highlights
-        visuals.window_fill = egui::Color32::from_rgb(13, 14, 19);
-        visuals.panel_fill = egui::Color32::from_rgb(15, 16, 22);
-        visuals.extreme_bg_color = egui::Color32::from_rgb(9, 10, 14);
-        visuals.faint_bg_color = egui::Color32::from_rgb(24, 25, 34);
-        visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(18, 19, 26);
-        visuals.widgets.noninteractive.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(36, 38, 50));
-        visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(28, 30, 40);
-        visuals.widgets.inactive.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(46, 48, 64));
-        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(42, 44, 58);
-        visuals.widgets.hovered.bg_stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(225, 29, 72));
-        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(225, 29, 72);
-        visuals.selection.bg_fill = egui::Color32::from_rgb(159, 18, 57);
-        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(251, 113, 133));
-        visuals.hyperlink_color = egui::Color32::from_rgb(251, 113, 133);
-        visuals.override_text_color = Some(egui::Color32::from_rgb(236, 238, 245));
-    }
-    ctx.set_visuals(visuals);
-    ctx.all_styles_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        style.spacing.button_padding = egui::vec2(8.0, 4.0);
-        style.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(14.5));
-        style.text_styles.insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
-        style.text_styles.insert(egui::TextStyle::Heading, egui::FontId::proportional(19.0));
-        style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
-        style.text_styles.insert(egui::TextStyle::Monospace, egui::FontId::monospace(12.5));
-    });
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = BG_DEEP;
+    visuals.window_fill = BG_CARD;
+    visuals.extreme_bg_color = BG_INPUT;
+    visuals.faint_bg_color = BG_SIDEBAR;
+    visuals.override_text_color = Some(TEXT_PRIMARY);
+    visuals.selection.bg_fill = SERIKA_VIOLET;
+    visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+
+    visuals.widgets.noninteractive.bg_fill = BG_CARD;
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER_SUBTLE);
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(8);
+
+    visuals.widgets.inactive.bg_fill = BG_INPUT;
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER_SUBTLE);
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
+
+    visuals.widgets.hovered.bg_fill = BG_CARD_HOVER;
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, SERIKA_VIOLET);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+    visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
+
+    visuals.widgets.active.bg_fill = SERIKA_VIOLET;
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, SERIKA_VIOLET_LIGHT);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+    visuals.widgets.active.corner_radius = CornerRadius::same(8);
+
+    style.visuals = visuals;
+    ctx.set_style_of(Theme::Dark, style);
 }

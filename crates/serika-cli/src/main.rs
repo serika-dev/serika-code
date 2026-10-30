@@ -553,17 +553,25 @@ async fn finish_factor(
 }
 
 async fn models(runtime: &Runtime) -> serika_runtime::Result<i32> {
-    let catalog = runtime.models().await?;
-    println!("free");
-    for model in &catalog.free {
+    let harnesses = serika_runtime::providers::detect_local_harnesses();
+    let builtins = serika_runtime::providers::builtin_provider_models(&harnesses);
+    println!("local harnesses (no API required)");
+    for model in builtins.iter().filter(|m| m.provider.as_deref() == Some("local")) {
         print_model(model);
     }
-    println!("\npremium");
-    for model in &catalog.premium {
+    println!("\noptional APIs (OpenAI, Claude, Gemini)");
+    for model in builtins.iter().filter(|m| m.provider.as_deref() != Some("local")) {
         print_model(model);
     }
-    if let Some(default) = catalog.default_coding_model() {
-        println!("\ndefault for new sessions: {default}");
+    if let Ok(catalog) = runtime.models().await {
+        println!("\nserika cloud (free)");
+        for model in &catalog.free {
+            print_model(model);
+        }
+        println!("\nserika cloud (premium)");
+        for model in &catalog.premium {
+            print_model(model);
+        }
     }
     Ok(0)
 }

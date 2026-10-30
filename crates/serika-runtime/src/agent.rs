@@ -72,7 +72,7 @@ impl Runtime {
             );
             let (history, message) = pack_history(&stored, &instructions, self.config.max_context_chars);
             let reply = self
-                .complete(&model, &message, &history, &request.cancel, &request.events)
+                .complete(&project, &model, &message, &history, &request.cancel, &request.events)
                 .await?;
             self.sessions.append_message(&session_id, "assistant", &reply)?;
             let (visible, calls) = extract_tool_calls(&reply);
@@ -175,21 +175,105 @@ impl Runtime {
         if let Some(model) = self.config.model.clone().filter(|model| !model.is_empty()) {
             return Ok(model);
         }
-        let catalog = self.client.models().await?;
-        catalog
-            .default_coding_model()
-            .ok_or_else(|| Error::msg("Serika returned no chat models"))
+        // If no Serika session is signed in and we are on the default API URL, prefer optional BYOK keys or API-free Local Harness!
+        let has_serika_session = self.secrets.load().ok().flatten().is_some();
+        if !has_serika_session && self.config.api_base_url == crate::config::DEFAULT_API_BASE {
+            if self.config.resolve_anthropic_key().is_some() {
+                return Ok("claude/claude-sonnet-4-20250514".to_string());
+            }
+            if self.config.resolve_openai_key().is_some() {
+                return Ok("openai/gpt-4.1".to_string());
+            }
+            if self.config.resolve_gemini_key().is_some() {
+                return Ok("gemini/gemini-2.5-pro".to_string());
+            }
+            return Ok("local/workspace".to_string());
+        }
+        match self.client.models().await {
+            Ok(catalog) => catalog
+                .default_coding_model()
+                .ok_or_else(|| Error::msg("Serika returned no chat models")),
+            Err(_) if !has_serika_session => Ok("local/workspace".to_string()),
+            Err(err) => Err(err),
+        }
     }
 
     async fn complete(
         &self,
+        project: &std::path::Path,
         model: &str,
         message: &str,
         history: &[ChatTurn],
         cancel: &CancellationToken,
         events: &EventSender,
     ) -> Result<String> {
-        let mut session = self.secrets.load()?.ok_or(Error::AuthRequired)?;
+        use crate::providers::{
+            complete_anthropic, complete_gemini, complete_local, complete_openai, ProviderKind,
+        };
+
+        match ProviderKind::from_model_id(model) {
+            ProviderKind::Local => {
+                return complete_local(model, project, message, history, cancel, |chunk| {
+                    emit(events, AgentEvent::MessageChunk { text: chunk.to_string() })
+                })
+                .await;
+            }
+            ProviderKind::OpenAi => {
+                return complete_openai(
+                    self.client.http(),
+                    &self.config,
+                    model,
+                    message,
+                    history,
+                    cancel,
+                    |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
+                    |chunk| emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() }),
+                )
+                .await;
+            }
+            ProviderKind::Anthropic => {
+                return complete_anthropic(
+                    self.client.http(),
+                    &self.config,
+                    model,
+                    message,
+                    history,
+                    cancel,
+                    |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
+                    |chunk| emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() }),
+                )
+                .await;
+            }
+            ProviderKind::Gemini => {
+                return complete_gemini(
+                    self.client.http(),
+                    &self.config,
+                    model,
+                    message,
+                    history,
+                    cancel,
+                    |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
+                )
+                .await;
+            }
+            ProviderKind::Serika => {}
+        }
+
+        let Some(mut session) = self.secrets.load()? else {
+            // If pointing at default API and not signed in, fall back to API-free local workspace agent
+            if self.config.api_base_url == crate::config::DEFAULT_API_BASE {
+                return complete_local(
+                    "local/workspace",
+                    project,
+                    message,
+                    history,
+                    cancel,
+                    |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
+                )
+                .await;
+            }
+            return Err(Error::AuthRequired);
+        };
         let mut refreshed = false;
         loop {
             let result = self

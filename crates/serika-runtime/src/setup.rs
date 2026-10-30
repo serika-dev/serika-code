@@ -244,6 +244,7 @@ fn create_platform_shortcuts(_install_root: &Path, bin_dir: &Path) -> Result<Vec
         let desktop_exe = bin_dir.join("serika-desktop.exe");
         let cli_exe = bin_dir.join("serika.exe");
         let target_exe = if desktop_exe.exists() { &desktop_exe } else { &cli_exe };
+        let default_work_dir = dirs::home_dir().unwrap_or_else(|| bin_dir.to_path_buf());
         if let Some(appdata) = dirs::data_dir() {
             let start_menu = appdata
                 .join("Microsoft")
@@ -252,14 +253,14 @@ fn create_platform_shortcuts(_install_root: &Path, bin_dir: &Path) -> Result<Vec
                 .join("Programs");
             if start_menu.is_dir() {
                 let lnk = start_menu.join("Serika Code.lnk");
-                if create_windows_shortcut(target_exe, &lnk, bin_dir).is_ok() {
+                if create_windows_shortcut(target_exe, &lnk, &default_work_dir).is_ok() {
                     created.push(lnk);
                 }
             }
         }
         if let Some(desktop) = dirs::desktop_dir() {
             let lnk = desktop.join("Serika Code.lnk");
-            if create_windows_shortcut(target_exe, &lnk, bin_dir).is_ok() {
+            if create_windows_shortcut(target_exe, &lnk, &default_work_dir).is_ok() {
                 created.push(lnk);
             }
         }

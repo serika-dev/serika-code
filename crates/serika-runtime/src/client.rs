@@ -49,6 +49,10 @@ impl SerikaClient {
         })
     }
 
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
     pub async fn models(&self) -> Result<ModelCatalog> {
         let value = self.get_json(&self.api("/api/chat/models"), None).await?;
         Ok(serde_json::from_value(value)?)

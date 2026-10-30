@@ -74,6 +74,18 @@ pub struct Config {
     pub max_context_chars: usize,
     #[serde(default = "default_true")]
     pub stream: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini_base_url: Option<String>,
 }
 
 impl Default for Config {
@@ -92,6 +104,12 @@ impl Default for Config {
             theme: default_theme(),
             max_context_chars: default_context_chars(),
             stream: true,
+            openai_api_key: None,
+            anthropic_api_key: None,
+            gemini_api_key: None,
+            openai_base_url: None,
+            anthropic_base_url: None,
+            gemini_base_url: None,
         }
     }
 }
@@ -214,6 +232,27 @@ impl Config {
                     .filter(|part| !part.is_empty())
                     .collect();
             }
+            "openai_api_key" => {
+                self.openai_api_key = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
+            "anthropic_api_key" | "claude_api_key" => {
+                self.anthropic_api_key = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
+            "gemini_api_key" => {
+                self.gemini_api_key = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
             _ => {
                 return Err(Error::msg(format!(
                     "unknown setting \"{key}\". See docs/CONFIGURATION.md"
@@ -221,6 +260,32 @@ impl Config {
             }
         }
         self.validate()
+    }
+
+    pub fn resolve_openai_key(&self) -> Option<String> {
+        std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| self.openai_api_key.clone().filter(|s| !s.trim().is_empty()))
+    }
+
+    pub fn resolve_anthropic_key(&self) -> Option<String> {
+        std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| self.anthropic_api_key.clone().filter(|s| !s.trim().is_empty()))
+    }
+
+    pub fn resolve_gemini_key(&self) -> Option<String> {
+        std::env::var("GEMINI_API_KEY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("GOOGLE_API_KEY")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .or_else(|| self.gemini_api_key.clone().filter(|s| !s.trim().is_empty()))
     }
 }
 
