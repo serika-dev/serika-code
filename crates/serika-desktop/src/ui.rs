@@ -26,24 +26,25 @@ use serika_runtime::{AgentEvent, Runtime, TaskOutcome, TaskRequest};
 // =============================================================================
 // Serika Brand Guidelines Palette (`serika-accounts/app/globals.css` + T3 Code)
 // =============================================================================
-const BG_DEEP: Color32 = Color32::from_rgb(9, 9, 11); // #09090B (--color-bg)
-const BG_SIDEBAR: Color32 = Color32::from_rgb(12, 12, 15); // #0C0C0F (T3 sidebar chrome)
-const BG_CARD: Color32 = Color32::from_rgb(18, 18, 21); // #121215 (--color-bg-card)
-const BG_CARD_HOVER: Color32 = Color32::from_rgb(24, 24, 28); // #18181C (--color-bg-card-hover)
-const BG_INPUT: Color32 = Color32::from_rgb(22, 22, 26); // #16161A (--color-bg-input)
-const BG_ACTIVE_ROW: Color32 = Color32::from_rgb(28, 23, 44); // Subtle Serika violet tint
+const BG_DEEP: Color32 = Color32::from_rgb(12, 12, 14);
+const BG_SIDEBAR: Color32 = Color32::from_rgb(12, 12, 14);
+const BG_CARD: Color32 = Color32::from_rgb(20, 20, 22);
+const BG_CARD_HOVER: Color32 = Color32::from_rgb(28, 28, 32);
+const BG_INPUT: Color32 = Color32::from_rgb(16, 16, 18);
+const BG_ACTIVE_ROW: Color32 = Color32::from_rgb(32, 32, 36);
 
-const BORDER_SUBTLE: Color32 = Color32::from_rgb(34, 34, 41); // rgba(255,255,255,0.08)
-const BORDER_STRONG: Color32 = Color32::from_rgb(52, 52, 64); // rgba(255,255,255,0.15)
+const BORDER_SUBTLE: Color32 = Color32::from_rgb(36, 36, 40);
+const BORDER_STRONG: Color32 = Color32::from_rgb(54, 54, 60);
 
-const TEXT_PRIMARY: Color32 = Color32::from_rgb(244, 244, 245); // #F4F4F5 (--color-text)
-const TEXT_MUTED: Color32 = Color32::from_rgb(161, 161, 170); // #A1A1AA (--color-text-muted)
-const TEXT_DIM: Color32 = Color32::from_rgb(113, 113, 122); // #71717A (--color-text-dim)
+const TEXT_PRIMARY: Color32 = Color32::from_rgb(236, 236, 238);
+const TEXT_MUTED: Color32 = Color32::from_rgb(154, 154, 162);
+const TEXT_DIM: Color32 = Color32::from_rgb(108, 108, 116);
 
-const SERIKA_VIOLET: Color32 = Color32::from_rgb(139, 92, 246); // #8B5CF6 (--color-primary)
-const SERIKA_VIOLET_HOVER: Color32 = Color32::from_rgb(124, 58, 237); // #7C3AED (--color-primary-hover)
-const SERIKA_VIOLET_LIGHT: Color32 = Color32::from_rgb(167, 139, 250); // #A78BFA (--color-secondary)
-const SERIKA_VIOLET_SOFT: Color32 = Color32::from_rgba_premultiplied(28, 20, 48, 255);
+// Kept names so older call sites stay quiet. These are neutral, not a brand purple.
+const SERIKA_VIOLET: Color32 = Color32::from_rgb(236, 236, 238);
+const SERIKA_VIOLET_HOVER: Color32 = Color32::from_rgb(255, 255, 255);
+const SERIKA_VIOLET_LIGHT: Color32 = Color32::from_rgb(196, 196, 204);
+const SERIKA_VIOLET_SOFT: Color32 = Color32::from_rgb(32, 32, 36);
 
 const EMERALD: Color32 = Color32::from_rgb(16, 185, 129); // #10B981 (--color-success)
 const AMBER: Color32 = Color32::from_rgb(245, 158, 11); // #F59E0B (--color-warning)
@@ -882,140 +883,61 @@ impl SerikaApp {
     fn draw_sidebar(&mut self, root_ui: &mut egui::Ui) {
         egui::Panel::left("t3_sidebar")
             .resizable(true)
-            .default_size(252.0)
-            .size_range(210.0..=340.0)
+            .default_size(248.0)
+            .size_range(200.0..=320.0)
             .frame(
                 egui::Frame::NONE
                     .fill(BG_SIDEBAR)
-                    .inner_margin(Margin::same(12))
+                    .inner_margin(Margin::symmetric(10, 12))
                     .stroke(Stroke::new(1.0, BORDER_SUBTLE)),
             )
             .show(root_ui, |ui| {
-                // 1. T3 Brand Header Row
-                ui.horizontal(|ui| {
-                    let (logo_rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-                    ui.painter().rect_filled(logo_rect, 6.0, SERIKA_VIOLET_SOFT);
-                    ui.painter().rect_stroke(
-                        logo_rect,
-                        6.0,
-                        Stroke::new(1.0, SERIKA_VIOLET.gamma_multiply(0.45)),
-                        StrokeKind::Inside,
-                    );
-                    paint_icon(
-                        ui.painter(),
-                        logo_rect.shrink(3.0),
-                        Icon::SerikaMark,
-                        SERIKA_VIOLET_LIGHT,
-                    );
-
-                    ui.add_space(2.0);
-                    ui.label(
-                        RichText::new("Serika")
-                            .strong()
-                            .size(14.5)
-                            .color(TEXT_PRIMARY),
-                    );
-                    ui.label(
-                        RichText::new("Code")
-                            .strong()
-                            .size(14.5)
-                            .color(SERIKA_VIOLET_LIGHT),
-                    );
-                    ui.label(
-                        RichText::new(format!("v{}", serika_runtime::client::VERSION))
-                            .size(10.5)
-                            .color(TEXT_DIM),
-                    );
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icon_button(ui, Icon::Plus, "New Thread (Ctrl+N)", true).clicked() {
-                            self.new_thread();
-                        }
-                        if icon_button(ui, Icon::Folder, "Open Project Folder", false).clicked() {
-                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                self.switch_project(folder);
-                            }
-                        }
-                    });
-                });
-
-                ui.add_space(10.0);
-
-                // 2. Search / Filter Threads Input
-                egui::Frame::NONE
-                    .fill(BG_INPUT)
-                    .corner_radius(CornerRadius::same(8))
-                    .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-                    .inner_margin(Margin::symmetric(8, 5))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let (ir, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
-                            paint_icon(ui.painter(), ir, Icon::Search, TEXT_DIM);
-                            ui.add(
-                                TextEdit::singleline(&mut self.session_filter)
-                                    .hint_text("Filter threads…")
-                                    .frame(egui::Frame::NONE)
-                                    .font(FontId::proportional(12.0))
-                                    .desired_width(f32::INFINITY),
-                            );
-                            if !self.session_filter.is_empty()
-                                && ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new("×").size(12.0).color(TEXT_DIM),
-                                        )
-                                        .frame(false),
-                                    )
-                                    .clicked()
-                            {
-                                self.session_filter.clear();
-                            }
-                        });
-                    });
-
-                ui.add_space(12.0);
-
-                // 3. Active Project Section Header (T3 Project Group style)
                 let project_label = workspace_display_name(&self.project, &self.core);
                 ui.horizontal(|ui| {
-                    let (fr, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
-                    paint_icon(ui.painter(), fr, Icon::Folder, SERIKA_VIOLET_LIGHT);
-                    ui.label(
-                        RichText::new(&project_label)
-                            .strong()
-                            .size(12.0)
-                            .color(TEXT_PRIMARY),
-                    );
-                    if self.git.is_repo && !self.git.branch.is_empty() {
-                        ui.label(
-                            RichText::new(format!("· {}", self.git.branch))
-                                .size(11.0)
-                                .color(TEXT_DIM),
-                        );
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new(&project_label)
+                                    .size(13.0)
+                                    .color(TEXT_PRIMARY),
+                            )
+                            .frame(false),
+                        )
+                        .on_hover_text(self.project.display().to_string())
+                        .clicked()
+                    {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            self.switch_project(folder);
+                        }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
                             .add(
-                                egui::Button::new(
-                                    RichText::new("Scratch").size(10.5).color(TEXT_MUTED),
-                                )
-                                .fill(BG_CARD)
-                                .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-                                .corner_radius(CornerRadius::same(5)),
+                                egui::Button::new(RichText::new("+").size(16.0).color(TEXT_MUTED))
+                                    .frame(false),
                             )
-                            .on_hover_text("Switch to isolated Scratch workspace")
+                            .on_hover_text("New thread")
                             .clicked()
                         {
-                            if let Some(core) = &self.core {
-                                let scratch = core.paths.scratch_dir();
-                                let _ = std::fs::create_dir_all(&scratch);
-                                self.switch_project(scratch);
-                            }
+                            self.new_thread();
                         }
                     });
                 });
-
-                ui.add_space(6.0);
+                if self.git.is_repo && !self.git.branch.is_empty() {
+                    ui.label(
+                        RichText::new(&self.git.branch)
+                            .size(11.0)
+                            .color(TEXT_DIM),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.add(
+                    TextEdit::singleline(&mut self.session_filter)
+                        .hint_text("Search")
+                        .desired_width(f32::INFINITY)
+                        .font(FontId::proportional(12.5)),
+                );
+                ui.add_space(8.0);
 
                 // 4. Thread List
                 let q = self.session_filter.to_ascii_lowercase();
@@ -1070,14 +992,9 @@ impl SerikaApp {
                         }
 
                         if self.recent_projects.len() > 1 {
-                            ui.add_space(12.0);
-                            ui.label(
-                                RichText::new("RECENT WORKSPACES")
-                                    .size(10.0)
-                                    .strong()
-                                    .color(TEXT_DIM),
-                            );
-                            ui.add_space(4.0);
+                            ui.add_space(16.0);
+                            ui.label(RichText::new("Recent").size(11.0).color(TEXT_DIM));
+                            ui.add_space(2.0);
                             let mut switch_to = None;
                             for rp in &self.recent_projects {
                                 if rp == &self.project {
@@ -1110,21 +1027,20 @@ impl SerikaApp {
                 // 5. Sidebar Footer (Provider Pill + Quick Actions)
                 ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
                     ui.horizontal(|ui| {
-                        if pill_icon_button(ui, Icon::Key, "Providers & Keys", self.show_providers)
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        if ui
+                            .add(egui::Button::new(RichText::new("Account").size(12.0).color(TEXT_MUTED)).frame(false))
                             .clicked()
                         {
                             self.show_providers = !self.show_providers;
                         }
-                        if pill_icon_button(ui, Icon::Sliders, "Settings", self.show_settings)
+                        if ui
+                            .add(egui::Button::new(RichText::new("Settings").size(12.0).color(TEXT_MUTED)).frame(false))
                             .clicked()
                         {
                             self.show_settings = !self.show_settings;
                         }
-                        if pill_icon_button(ui, Icon::Refresh, "Updates", false).clicked() {
-                            self.check_updates_async();
-                        }
                     });
-
                     ui.add_space(6.0);
                     let active_provider = ProviderKind::from_model_id(&self.selected_model);
                     let provider_ready = match active_provider {
@@ -1146,23 +1062,12 @@ impl SerikaApp {
                             .is_some(),
                         ProviderKind::Serika => self.session.is_some(),
                     };
-                    let dot_color = if provider_ready { EMERALD } else { AMBER };
-                    ui.horizontal(|ui| {
-                        let (dr, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                        ui.painter().circle_filled(dr.center(), 3.5, dot_color);
-                        ui.label(
-                            RichText::new(active_provider.label())
-                                .size(11.5)
-                                .strong()
-                                .color(TEXT_PRIMARY),
-                        );
-                        ui.label(
-                            RichText::new(format!("· {}", self.status))
-                                .size(11.0)
-                                .color(TEXT_DIM),
-                        );
-                    });
-                    ui.separator();
+                    let who = if provider_ready {
+                        active_provider.label().to_string()
+                    } else {
+                        format!("{} · sign in", active_provider.label())
+                    };
+                    ui.label(RichText::new(who).size(11.5).color(TEXT_DIM));
                 });
             });
     }
@@ -1171,8 +1076,10 @@ impl SerikaApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG_DEEP))
             .show(root_ui, |ui| {
-                // 1. Minimal T3 Top Breadcrumb Bar
-                self.draw_top_header(ui);
+                let is_draft = self.messages.is_empty() && !self.running;
+                if !is_draft {
+                    self.draw_top_header(ui);
+                }
 
                 if let Some(err) = &self.startup_error {
                     ui.add_space(12.0);
@@ -1180,8 +1087,6 @@ impl SerikaApp {
                     return;
                 }
 
-                // 2. Main Canvas: Draft Hero State vs Active Conversation State
-                let is_draft = self.messages.is_empty() && !self.running;
                 if is_draft {
                     self.draw_t3_draft_hero(ui);
                 } else {
@@ -1193,217 +1098,66 @@ impl SerikaApp {
     fn draw_top_header(&mut self, ui: &mut egui::Ui) {
         egui::Frame::NONE
             .fill(BG_DEEP)
-            .inner_margin(Margin::symmetric(18, 9))
-            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+            .inner_margin(Margin::symmetric(28, 10))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let proj_name = workspace_display_name(&self.project, &self.core);
-                    let (fr, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-                    paint_icon(ui.painter(), fr, Icon::Folder, SERIKA_VIOLET_LIGHT);
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new(&proj_name)
-                                    .size(12.5)
-                                    .strong()
-                                    .color(TEXT_PRIMARY),
-                            )
-                            .frame(false),
-                        )
-                        .on_hover_text(format!(
-                            "{}\nClick to change project folder",
-                            self.project.display()
-                        ))
-                        .clicked()
-                    {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.switch_project(folder);
-                        }
-                    }
-
-                    ui.label(RichText::new("/").size(12.5).color(TEXT_DIM));
-
+                    ui.label(RichText::new(proj_name).size(12.0).color(TEXT_DIM));
+                    ui.label(RichText::new("/").size(12.0).color(TEXT_DIM));
                     let thread_title = self
                         .active_session
                         .as_ref()
                         .and_then(|id| self.sessions.iter().find(|s| &s.id == id))
                         .map(|s| s.title.as_str())
                         .unwrap_or("New thread");
-                    ui.label(RichText::new(thread_title).size(12.5).color(TEXT_MUTED));
-
-                    if self.git.is_repo {
-                        ui.add_space(6.0);
-                        egui::Frame::NONE
-                            .fill(BG_CARD)
-                            .corner_radius(CornerRadius::same(6))
-                            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-                            .inner_margin(Margin::symmetric(7, 2))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    let (gr, _) =
-                                        ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
-                                    paint_icon(
-                                        ui.painter(),
-                                        gr,
-                                        Icon::GitBranch,
-                                        SERIKA_VIOLET_LIGHT,
-                                    );
-                                    ui.label(
-                                        RichText::new(&self.git.branch)
-                                            .size(11.0)
-                                            .color(TEXT_MUTED),
-                                    );
-                                    if !self.git.entries.is_empty() {
-                                        ui.label(
-                                            RichText::new(format!("+{}", self.git.entries.len()))
-                                                .size(10.5)
-                                                .strong()
-                                                .color(AMBER),
-                                        );
-                                    }
-                                });
-                            });
+                    ui.label(RichText::new(thread_title).size(12.0).color(TEXT_PRIMARY));
+                    if self.git.is_repo && !self.git.entries.is_empty() {
+                        ui.label(
+                            RichText::new(format!("{} changed", self.git.entries.len()))
+                                .size(12.0)
+                                .color(TEXT_DIM),
+                        );
                     }
-
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let inspector_badge = self.git.entries.len() + self.diffs.len();
-                        let insp_label = if inspector_badge > 0 {
-                            format!("Inspector ({inspector_badge})")
-                        } else {
-                            "Inspector".to_string()
-                        };
-                        if pill_icon_button(ui, Icon::PanelRight, &insp_label, self.show_inspector)
-                            .on_hover_text("Toggle Git & Diffs Inspector (Ctrl+B)")
+                        ui.spacing_mut().item_spacing.x = 14.0;
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new(if self.show_inspector { "Hide" } else { "Changes" })
+                                        .size(12.0)
+                                        .color(TEXT_MUTED),
+                                )
+                                .frame(false),
+                            )
                             .clicked()
                         {
                             self.show_inspector = !self.show_inspector;
-                        }
-
-                        if pill_icon_button(ui, Icon::Search, "Ctrl+K", self.show_palette)
-                            .on_hover_text("Open Command Palette (Ctrl+K)")
-                            .clicked()
-                        {
-                            self.show_palette = !self.show_palette;
                         }
                     });
                 });
             });
     }
 
-    /// T3 Code Draft Hero State: Centered floating Composer card + Context Strip + Compact Pills.
     fn draw_t3_draft_hero(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_size();
-        let top_pad = ((avail.y - 340.0) * 0.36).max(28.0);
-
-        ScrollArea::vertical()
-            .id_salt("t3_draft_hero_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add_space(top_pad);
-                ui.vertical_centered(|ui| {
-                    let lane_w = ui.available_width().min(680.0);
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(lane_w, 10.0),
-                        Layout::top_down(Align::Center),
-                        |ui| {
-                            let glow_center = ui.cursor().min + Vec2::new(lane_w * 0.5, 16.0);
-                            ui.painter().circle_filled(
-                                glow_center,
-                                120.0,
-                                Color32::from_rgba_unmultiplied(139, 92, 246, 10),
-                            );
-
-                            // Hero Brand Pill
-                            egui::Frame::NONE
-                                .fill(SERIKA_VIOLET_SOFT)
-                                .corner_radius(CornerRadius::same(20))
-                                .stroke(Stroke::new(1.0, SERIKA_VIOLET.gamma_multiply(0.45)))
-                                .inner_margin(Margin::symmetric(12, 4))
-                                .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        let (mr, _) = ui
-                                            .allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                                        paint_icon(
-                                            ui.painter(),
-                                            mr,
-                                            Icon::SerikaMark,
-                                            SERIKA_VIOLET_LIGHT,
-                                        );
-                                        ui.label(
-                                            RichText::new(
-                                                "Serika Code · Local & Multi-Provider Harness",
-                                            )
-                                            .size(11.0)
-                                            .strong()
-                                            .color(SERIKA_VIOLET_LIGHT),
-                                        );
-                                    });
-                                });
-
-                            ui.add_space(12.0);
-                            ui.label(
-                                RichText::new("What are we building?")
-                                    .size(26.0)
-                                    .strong()
-                                    .color(TEXT_PRIMARY),
-                            );
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(
-                                    "Works locally with zero API keys · Optional OpenAI, Gemini & Claude APIs",
-                                )
-                                .size(12.5)
-                                .color(TEXT_MUTED),
-                            );
-
-                            ui.add_space(22.0);
-
-                            // T3 Floating Composer Surface
-                            ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
-                                self.draw_composer_card(ui, true);
-                                ui.add_space(8.0);
-                                self.draw_t3_context_strip(ui);
-                            });
-
-                            ui.add_space(18.0);
-
-                            // Compact Horizontal Starter Chips (Zero `Use prompt ▯` bars!)
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-                                for (icon, label, prompt_text) in [
-                                    (
-                                        Icon::Sparkle,
-                                        "Map architecture",
-                                        "Inspect the workspace architecture and summarize the crates, entrypoints, and data flow.",
-                                    ),
-                                    (
-                                        Icon::GitBranch,
-                                        "Review git diffs",
-                                        "Inspect the current git status and uncommitted diffs, and point out any bugs or edge cases.",
-                                    ),
-                                    (
-                                        Icon::Terminal,
-                                        "Run & verify tests",
-                                        "Run the test suite in this workspace and fix any failing tests or warnings.",
-                                    ),
-                                    (
-                                        Icon::Sliders,
-                                        "Performance audit",
-                                        "Audit the codebase for blocking calls, hot-path allocations, or UX bottlenecks.",
-                                    ),
-                                ] {
-                                    if starter_chip(ui, icon, label).clicked() {
-                                        self.prompt = prompt_text.to_string();
-                                        self.send_prompt();
-                                    }
-                                }
-                            });
-                        },
-                    );
-                });
-            });
+        let top_pad = ((avail.y - 180.0) * 0.42).max(24.0);
+        ui.add_space(top_pad);
+        ui.vertical_centered(|ui| {
+            let lane_w = (ui.available_width() - 48.0).clamp(420.0, 720.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(lane_w, 10.0),
+                Layout::top_down(Align::LEFT),
+                |ui| {
+                    let name = workspace_display_name(&self.project, &self.core);
+                    ui.label(RichText::new(name).size(13.0).color(TEXT_DIM));
+                    ui.add_space(10.0);
+                    self.draw_composer_card(ui, true);
+                },
+            );
+        });
     }
 
+    #[allow(dead_code)]
     fn draw_t3_context_strip(&mut self, ui: &mut egui::Ui) {
         let proj_name = workspace_display_name(&self.project, &self.core);
         ui.horizontal(|ui| {
@@ -1526,59 +1280,21 @@ impl SerikaApp {
                             }
 
                             if !self.streaming_reasoning.is_empty() {
-                                egui::Frame::NONE
-                                    .fill(BG_SIDEBAR)
-                                    .corner_radius(CornerRadius::same(10))
-                                    .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-                                    .inner_margin(Margin::same(10))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            RichText::new("Thinking…")
-                                                .size(11.0)
-                                                .strong()
-                                                .color(SERIKA_VIOLET_LIGHT),
-                                        );
-                                        ui.label(
-                                            RichText::new(&self.streaming_reasoning)
-                                                .size(12.0)
-                                                .color(TEXT_MUTED),
-                                        );
-                                    });
-                                ui.add_space(8.0);
+                                ui.label(RichText::new("Thinking").size(12.0).color(TEXT_DIM));
+                                ui.label(
+                                    RichText::new(&self.streaming_reasoning)
+                                        .size(13.0)
+                                        .color(TEXT_MUTED),
+                                );
+                                ui.add_space(12.0);
                             }
 
                             if !self.streaming_reply.is_empty() {
-                                egui::Frame::NONE
-                                    .fill(BG_CARD)
-                                    .corner_radius(CornerRadius::same(12))
-                                    .stroke(Stroke::new(1.0, SERIKA_VIOLET.gamma_multiply(0.5)))
-                                    .inner_margin(Margin::same(14))
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            let (mr, _) = ui.allocate_exact_size(
-                                                Vec2::splat(12.0),
-                                                Sense::hover(),
-                                            );
-                                            paint_icon(
-                                                ui.painter(),
-                                                mr,
-                                                Icon::SerikaMark,
-                                                SERIKA_VIOLET_LIGHT,
-                                            );
-                                            ui.label(
-                                                RichText::new("Serika")
-                                                    .size(11.5)
-                                                    .strong()
-                                                    .color(SERIKA_VIOLET_LIGHT),
-                                            );
-                                        });
-                                        ui.add_space(4.0);
-                                        ui.label(
-                                            RichText::new(&self.streaming_reply)
-                                                .size(13.0)
-                                                .color(TEXT_PRIMARY),
-                                        );
-                                    });
+                                ui.label(
+                                    RichText::new(&self.streaming_reply)
+                                        .size(14.5)
+                                        .color(TEXT_PRIMARY),
+                                );
                             }
                         },
                     );
@@ -1610,9 +1326,9 @@ impl SerikaApp {
 
         egui::Frame::NONE
             .fill(BG_CARD)
-            .corner_radius(CornerRadius::same(14))
+            .corner_radius(CornerRadius::same(12))
             .stroke(Stroke::new(1.0, border_col))
-            .inner_margin(Margin::same(12))
+            .inner_margin(Margin::symmetric(14, 12))
             .show(ui, |ui| {
                 let rows = if is_hero { 3 } else { 2 };
                 let resp = ui.add(
@@ -1620,10 +1336,8 @@ impl SerikaApp {
                         .desired_rows(rows)
                         .desired_width(f32::INFINITY)
                         .frame(egui::Frame::NONE)
-                        .font(FontId::proportional(13.5))
-                        .hint_text(
-                            "Ask anything, inspect files, or run tests… (Ctrl+Enter to send)",
-                        ),
+                        .font(FontId::proportional(15.0))
+                        .hint_text("Ask Serika to change this project"),
                 );
                 if resp.has_focus()
                     && ui.input(|i| i.key_pressed(Key::Enter) && i.modifiers.command)
@@ -1657,12 +1371,7 @@ impl SerikaApp {
                     .width(220.0)
                     .selected_text(RichText::new(display_model).size(11.5).color(TEXT_PRIMARY))
                     .show_ui(ui, |ui| {
-                        ui.label(
-                            RichText::new("LOCAL HARNESS (NO API REQUIRED)")
-                                .size(10.0)
-                                .strong()
-                                .color(EMERALD),
-                        );
+                        ui.label(RichText::new("On this machine").size(11.0).color(TEXT_DIM));
                         for m in self
                             .provider_models
                             .iter()
@@ -1675,12 +1384,7 @@ impl SerikaApp {
                             );
                         }
                         ui.separator();
-                        ui.label(
-                            RichText::new("OPTIONAL BYOK CLOUD APIS")
-                                .size(10.0)
-                                .strong()
-                                .color(SERIKA_VIOLET_LIGHT),
-                        );
+                        ui.label(RichText::new("Your API key").size(11.0).color(TEXT_DIM));
                         for m in self
                             .provider_models
                             .iter()
@@ -1695,12 +1399,7 @@ impl SerikaApp {
                         }
                         if self.catalog.all().next().is_some() {
                             ui.separator();
-                            ui.label(
-                                RichText::new("SERIKA CLOUD")
-                                    .size(10.0)
-                                    .strong()
-                                    .color(TEXT_DIM),
-                            );
+                            ui.label(RichText::new("Serika").size(11.0).color(TEXT_DIM));
                             for m in self.catalog.all() {
                                 ui.selectable_value(
                                     &mut self.selected_model,
@@ -1712,18 +1411,14 @@ impl SerikaApp {
                     });
 
                     // 2. Build / Plan Mode Toggle Pill (like T3 Code)
-                    let (mode_label, mode_col) = match self.composer_mode {
-                        ComposerMode::Build => ("Build", SERIKA_VIOLET_LIGHT),
-                        ComposerMode::Plan => ("Plan", AMBER),
+                    let mode_label = match self.composer_mode {
+                        ComposerMode::Build => "Build",
+                        ComposerMode::Plan => "Plan",
                     };
                     if ui
                         .add(
-                            egui::Button::new(
-                                RichText::new(mode_label).size(11.5).strong().color(mode_col),
-                            )
-                            .fill(BG_INPUT)
-                            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-                            .corner_radius(CornerRadius::same(7)),
+                            egui::Button::new(RichText::new(mode_label).size(12.0).color(TEXT_MUTED))
+                                .frame(false),
                         )
                         .on_hover_text("Toggle between Build (execute edits) and Plan (read-only architecture plan)")
                         .clicked()
@@ -1760,51 +1455,32 @@ impl SerikaApp {
                     // 4. Right-aligned Send / Stop Button
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if self.running {
-                            let stop_btn = ui.add_sized(
-                                [78.0, 28.0],
-                                egui::Button::new(
-                                    RichText::new("   Stop")
-                                        .size(12.0)
-                                        .strong()
-                                        .color(Color32::WHITE),
+                            if ui
+                                .add(
+                                    egui::Button::new(RichText::new("Stop").size(12.5).color(TEXT_PRIMARY))
+                                        .fill(BG_INPUT)
+                                        .corner_radius(CornerRadius::same(8)),
                                 )
-                                .fill(ROSE)
-                                .corner_radius(CornerRadius::same(8)),
-                            );
-                            let icon_r = Rect::from_center_size(
-                                Pos2::new(stop_btn.rect.left() + 18.0, stop_btn.rect.center().y),
-                                Vec2::splat(11.0),
-                            );
-                            paint_icon(ui.painter(), icon_r, Icon::Stop, Color32::WHITE);
-                            if stop_btn.clicked() {
+                                .clicked()
+                            {
                                 if let Some(cancel) = &self.cancel {
                                     cancel.cancel();
                                 }
                             }
                         } else {
                             let can_send = !self.prompt.trim().is_empty();
-                            let fill = if can_send {
-                                SERIKA_VIOLET
-                            } else {
-                                Color32::from_rgb(48, 38, 76)
-                            };
-                            let send_btn = ui.add_sized(
-                                [82.0, 28.0],
-                                egui::Button::new(
-                                    RichText::new("Send   ")
-                                        .size(12.0)
-                                        .strong()
-                                        .color(Color32::WHITE),
+                            let fill = if can_send { TEXT_PRIMARY } else { BG_INPUT };
+                            let ink = if can_send { BG_DEEP } else { TEXT_DIM };
+                            if ui
+                                .add_sized(
+                                    [28.0, 28.0],
+                                    egui::Button::new(RichText::new("↑").size(16.0).color(ink))
+                                        .fill(fill)
+                                        .corner_radius(CornerRadius::same(8)),
                                 )
-                                .fill(fill)
-                                .corner_radius(CornerRadius::same(8)),
-                            );
-                            let icon_r = Rect::from_center_size(
-                                Pos2::new(send_btn.rect.right() - 18.0, send_btn.rect.center().y),
-                                Vec2::splat(12.0),
-                            );
-                            paint_icon(ui.painter(), icon_r, Icon::Send, Color32::WHITE);
-                            if send_btn.clicked() && can_send {
+                                .clicked()
+                                && can_send
+                            {
                                 self.send_prompt();
                             }
                         }
@@ -1832,15 +1508,11 @@ impl SerikaApp {
                         (InspectorTab::Activity, "Activity"),
                     ] {
                         let active = self.inspector_tab == tab;
-                        let fill = if active { SERIKA_VIOLET } else { BG_CARD };
-                        let col = if active { Color32::WHITE } else { TEXT_MUTED };
+                        let col = if active { TEXT_PRIMARY } else { TEXT_DIM };
                         if ui
                             .add(
-                                egui::Button::new(
-                                    RichText::new(label).size(11.5).strong().color(col),
-                                )
-                                .fill(fill)
-                                .corner_radius(CornerRadius::same(6)),
+                                egui::Button::new(RichText::new(label).size(12.5).color(col))
+                                    .frame(false),
                             )
                             .clicked()
                         {
@@ -2698,29 +2370,31 @@ fn draw_thread_row(ui: &mut egui::Ui, item: &SessionSummary, is_active: bool) ->
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(rect, 7.0, fill);
-    if is_active {
-        let bar = Rect::from_min_size(
-            Pos2::new(rect.left(), rect.top() + 6.0),
-            Vec2::new(3.0, rect.height() - 12.0),
-        );
-        ui.painter().rect_filled(bar, 2.0, SERIKA_VIOLET);
-    }
+    ui.painter().rect_filled(rect, 6.0, fill);
 
     let title_col = if is_active || resp.hovered() {
         TEXT_PRIMARY
     } else {
         TEXT_MUTED
     };
-    let text_pos = Pos2::new(rect.left() + 10.0, rect.center().y - 7.0);
-    let clipped_title: String = item.title.chars().take(28).collect();
+    let text_pos = Pos2::new(rect.left() + 8.0, rect.center().y - 7.0);
+    let clipped_title: String = item.title.chars().take(26).collect();
     ui.painter().text(
         text_pos,
         egui::Align2::LEFT_TOP,
         clipped_title,
-        FontId::proportional(12.0),
+        FontId::proportional(13.0),
         title_col,
     );
+    if !resp.hovered() {
+        ui.painter().text(
+            Pos2::new(rect.right() - 8.0, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            short_age(item.updated_at),
+            FontId::proportional(11.0),
+            TEXT_DIM,
+        );
+    }
 
     if resp.hovered() {
         let del_rect = Rect::from_center_size(
@@ -2747,90 +2421,53 @@ fn draw_thread_row(ui: &mut egui::Ui, item: &SessionSummary, is_active: bool) ->
 
 fn draw_message_card(ui: &mut egui::Ui, msg: &StoredMessage) {
     let is_user = msg.role == "user";
-    let fill = if is_user { BG_INPUT } else { BG_CARD };
-    let border = if is_user {
-        SERIKA_VIOLET.gamma_multiply(0.38)
+    ui.add_space(4.0);
+    if is_user {
+        ui.label(RichText::new("You").size(12.0).color(TEXT_DIM));
+        ui.add_space(2.0);
+        ui.label(RichText::new(&msg.content).size(15.0).color(TEXT_PRIMARY));
     } else {
-        BORDER_SUBTLE
-    };
-    let badge_text = if is_user { "You" } else { "Serika" };
-    let badge_col = if is_user {
-        SERIKA_VIOLET_LIGHT
-    } else {
-        TEXT_PRIMARY
-    };
-
-    egui::Frame::NONE
-        .fill(fill)
-        .corner_radius(CornerRadius::same(12))
-        .stroke(Stroke::new(1.0, border))
-        .inner_margin(Margin::same(14))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if !is_user {
-                    let (mr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                    paint_icon(ui.painter(), mr, Icon::SerikaMark, SERIKA_VIOLET_LIGHT);
-                }
-                ui.label(RichText::new(badge_text).size(11.5).strong().color(badge_col));
-            });
-            ui.add_space(4.0);
-            ui.label(RichText::new(&msg.content).size(13.0).color(TEXT_PRIMARY));
-        });
+        ui.label(RichText::new(&msg.content).size(14.5).color(TEXT_PRIMARY));
+    }
+    ui.add_space(10.0);
 }
 
 fn draw_tool_pill(ui: &mut egui::Ui, tool: &ToolRun, has_diff: bool) -> bool {
     let mut view_diff = false;
-    egui::Frame::NONE
-        .fill(BG_SIDEBAR)
-        .corner_radius(CornerRadius::same(8))
-        .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-        .inner_margin(Margin::symmetric(10, 5))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let col = if tool.ok { EMERALD } else { ROSE };
-                let (cr, _) = ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
-                paint_icon(
-                    ui.painter(),
-                    cr,
-                    if tool.ok { Icon::Check } else { Icon::Close },
-                    col,
-                );
-                ui.label(
-                    RichText::new(&tool.name)
-                        .monospace()
-                        .size(11.5)
-                        .strong()
-                        .color(TEXT_PRIMARY),
-                );
-                let preview: String = tool
-                    .arguments
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(55)
-                    .collect();
-                ui.label(RichText::new(preview).monospace().size(11.0).color(TEXT_DIM));
-                if has_diff && (tool.name.contains("file") || tool.name.contains("patch")) {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("View diff")
-                                        .size(10.5)
-                                        .color(SERIKA_VIOLET_LIGHT),
-                                )
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
-                            view_diff = true;
-                        }
-                    });
-                }
-            });
-        });
+    ui.horizontal(|ui| {
+        let mark = if tool.ok { "ok" } else { "failed" };
+        let col = if tool.ok { TEXT_DIM } else { ROSE };
+        ui.label(
+            RichText::new(format!("{}  {mark}", tool.name))
+                .monospace()
+                .size(12.0)
+                .color(col),
+        );
+        if has_diff && (tool.name.contains("file") || tool.name.contains("patch")) && ui
+            .add(egui::Button::new(RichText::new("diff").size(12.0).color(TEXT_MUTED)).frame(false))
+            .clicked()
+        {
+            view_diff = true;
+        }
+    });
     view_diff
+}
+
+fn short_age(updated_at: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(updated_at);
+    let delta = (now - updated_at).max(0);
+    if delta < 60 {
+        "now".into()
+    } else if delta < 3600 {
+        format!("{}m", delta / 60)
+    } else if delta < 86_400 {
+        format!("{}h", delta / 3600)
+    } else {
+        format!("{}d", delta / 86_400)
+    }
 }
 
 fn install_system_fonts(ctx: &egui::Context) {
@@ -2900,27 +2537,27 @@ fn apply_serika_theme(ctx: &egui::Context) {
     visuals.extreme_bg_color = BG_INPUT;
     visuals.faint_bg_color = BG_SIDEBAR;
     visuals.override_text_color = Some(TEXT_PRIMARY);
-    visuals.selection.bg_fill = SERIKA_VIOLET;
-    visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+    visuals.selection.bg_fill = BG_ACTIVE_ROW;
+    visuals.selection.stroke = Stroke::new(1.0, BORDER_STRONG);
 
     visuals.widgets.noninteractive.bg_fill = BG_CARD;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER_SUBTLE);
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
-    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(8);
+    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(6);
 
     visuals.widgets.inactive.bg_fill = BG_INPUT;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER_SUBTLE);
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
+    visuals.widgets.inactive.corner_radius = CornerRadius::same(6);
 
     visuals.widgets.hovered.bg_fill = BG_CARD_HOVER;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, SERIKA_VIOLET);
-    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, BORDER_STRONG);
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
+    visuals.widgets.hovered.corner_radius = CornerRadius::same(6);
 
-    visuals.widgets.active.bg_fill = SERIKA_VIOLET;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, SERIKA_VIOLET_LIGHT);
-    visuals.widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
+    visuals.widgets.active.bg_fill = BG_CARD_HOVER;
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, BORDER_STRONG);
+    visuals.widgets.active.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
     visuals.widgets.active.corner_radius = CornerRadius::same(8);
 
     style.visuals = visuals;
