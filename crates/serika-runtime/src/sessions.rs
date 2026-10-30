@@ -155,6 +155,25 @@ impl SessionStore {
         Ok(())
     }
 
+    pub fn relocate_project(&self, id: &str, project: &Path) -> Result<()> {
+        let now = now_secs();
+        let project = project.to_string_lossy().to_string();
+        let conn = self.lock();
+        let count = conn.execute(
+            "UPDATE sessions SET project_path = ?1, updated_at = ?2 WHERE id = ?3",
+            params![project, now, id],
+        )?;
+        if count == 0 {
+            return Err(Error::msg("session not found"));
+        }
+        conn.execute(
+            "INSERT INTO projects (path, last_opened) VALUES (?1, ?2)
+             ON CONFLICT(path) DO UPDATE SET last_opened = excluded.last_opened",
+            params![project, now],
+        )?;
+        Ok(())
+    }
+
     pub fn delete(&self, id: &str) -> Result<()> {
         let conn = self.lock();
         let count = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;

@@ -1,0 +1,136 @@
+name: Official Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (e.g. v0.1.0)
+        required: false
+        default: v0.1.0
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Release ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (x86_64)
+            os: blacksmith-4vcpu-ubuntu-2404
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - name: macOS (Apple Silicon)
+            os: blacksmith-6vcpu-macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - name: macOS (Intel)
+            os: blacksmith-6vcpu-macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - name: Windows (x86_64)
+            os: blacksmith-4vcpu-windows-2025
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        if: startsWith(matrix.os, 'blacksmith-4vcpu-ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libssl-dev \
+            libdbus-1-dev \
+            libx11-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libgl1-mesa-dev \
+            libgtk-3-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Run workspace tests
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: cargo test --workspace --locked
+
+      - name: Build release binaries
+        run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+
+      - name: Package Unix archive
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          mkdir -p dist staging
+          cp target/${{ matrix.target }}/release/serika staging/
+          cp target/${{ matrix.target }}/release/serika-desktop staging/
+          cp install.sh README.md LICENSE staging/
+          tar -C staging -czf dist/serika-code-${{ matrix.target }}.tar.gz .
+
+      - name: Package Windows archive
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist, staging | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/serika.exe" staging/
+          Copy-Item "target/${{ matrix.target }}/release/serika-desktop.exe" staging/
+          Copy-Item "install.ps1", "README.md", "LICENSE" staging/
+          Compress-Archive -Path "staging/*" -DestinationPath "dist/serika-code-${{ matrix.target }}.zip" -Force
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: build
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all release packages
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS and include installer scripts
+        run: |
+          cp install.sh install.ps1 artifacts/
+          cd artifacts
+          sha256sum serika-code-* install.sh install.ps1 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name != 'main' && github.ref_name || inputs.tag }}
+          generate_release_notes: true
+          prerelease: false
+          make_latest: true
+          files: |
+            artifacts/serika-code-*
+            artifacts/install.sh
+            artifacts/install.ps1
+            artifacts/SHA256SUMS

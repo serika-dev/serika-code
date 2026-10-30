@@ -53,10 +53,19 @@ impl AppPaths {
         std::fs::create_dir_all(&self.data_dir)?;
         std::fs::create_dir_all(&self.logs_dir)?;
         std::fs::create_dir_all(&self.cache_dir)?;
+        std::fs::create_dir_all(self.scratch_dir())?;
         if let Some(parent) = self.config_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
         Ok(())
+    }
+
+    pub fn scratch_dir(&self) -> PathBuf {
+        self.data_dir.join("scratch")
+    }
+
+    pub fn worktrees_dir(&self) -> PathBuf {
+        self.data_dir.join("worktrees")
     }
 }
 

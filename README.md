@@ -22,13 +22,34 @@ Serika Code runs natively on **Windows**, **Linux** (X11 and Wayland), and **mac
 - **Desktop (`serika-desktop`)**: Native window and OpenGL (`glow`) renderer via `eframe`/`winit` across Win32, X11, Wayland, and Cocoa/AppKit.
 - **CLI (`serika`)**: Headless native binary with no GUI dependency.
 
-## Install and build
+## Quick Install
+
+### Linux & macOS (Bash)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/serika-dev/serika-code/main/install.sh | bash
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/serika-dev/serika-code/main/install.ps1 | iex
+```
+
+### Local Setup, Self-Update & Build
 
 See [docs/BUILDING.md](docs/BUILDING.md).
 
 ```bash
 cargo build --release
 cargo test --workspace
+
+# Register binaries in user PATH and create desktop/application shortcuts:
+serika setup
+
+# Check for or install the latest release with SHA-256 verification:
+serika update --check
+serika update
 ```
 
 ## Use
@@ -38,6 +59,8 @@ serika auth login
 serika doctor
 serika models
 serika usage
+serika git status
+serika desktop
 serika "Explain how this project is built"
 ```
 

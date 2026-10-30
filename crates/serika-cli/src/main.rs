@@ -69,9 +69,84 @@ enum Commands {
         ask: bool,
         focus: Vec<String>,
     },
+    /// Inspect and manage Git version control, branches, and isolated worktrees.
+    Git {
+        #[command(subcommand)]
+        action: GitCommand,
+    },
+    /// Check for updates or self-update Serika Code binaries from GitHub releases.
+    Update {
+        /// Only check if a newer release is available without installing.
+        #[arg(long)]
+        check: bool,
+        /// Force reinstall even if the current version matches.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Install Serika Code into the user PATH, create desktop shortcuts, or uninstall.
+    Setup {
+        /// Custom installation prefix directory.
+        #[arg(long)]
+        prefix: Option<PathBuf>,
+        /// Do not modify the user PATH environment variable.
+        #[arg(long)]
+        no_path: bool,
+        /// Do not create Start Menu / Desktop / Application shortcuts.
+        #[arg(long)]
+        no_shortcuts: bool,
+        /// Uninstall Serika Code binaries and shortcuts.
+        #[arg(long)]
+        uninstall: bool,
+        /// When uninstalling, also remove saved configuration and session database.
+        #[arg(long)]
+        purge: bool,
+    },
+    /// Launch the Serika Code desktop app.
+    Desktop,
     /// A task written directly after `serika`.
     #[command(external_subcommand)]
     Task(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum GitCommand {
+    /// Show structured repository branch, ahead/behind, and working tree status.
+    Status,
+    /// List local branches.
+    Branches,
+    /// Switch to a branch (or create one with `-b`).
+    Checkout {
+        branch: String,
+        #[arg(short = 'b', long)]
+        create: bool,
+    },
+    /// Stage a file or `--all` modified/untracked files.
+    Stage {
+        path: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Unstage a file or `--all` staged files.
+    Unstage {
+        path: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Commit staged changes (or `--all` modified files).
+    Commit {
+        #[arg(short, long)]
+        message: String,
+        #[arg(short, long)]
+        all: bool,
+    },
+    /// Create an isolated git worktree for a branch.
+    Worktree {
+        branch: String,
+    },
+    /// Push current branch to remote.
+    Push,
+    /// Pull latest changes (`--ff-only`).
+    Pull,
 }
 
 #[derive(Subcommand)]
@@ -150,6 +225,16 @@ async fn dispatch(runtime: Runtime, cli: Cli) -> serika_runtime::Result<i32> {
         }
         Some(Commands::Sessions { action }) => sessions(&runtime, &project, action),
         Some(Commands::Review { ask, focus }) => review(&runtime, &project, ask, &focus, cli.model, cli.yes).await,
+        Some(Commands::Git { action }) => git_cmd(&runtime, &project, action).await,
+        Some(Commands::Update { check, force }) => update_cmd(check, force).await,
+        Some(Commands::Setup {
+            prefix,
+            no_path,
+            no_shortcuts,
+            uninstall,
+            purge,
+        }) => setup_cmd(&runtime, prefix, no_path, no_shortcuts, uninstall, purge),
+        Some(Commands::Desktop) => launch_desktop(&project),
     }
 }
 
@@ -589,6 +674,194 @@ async fn review(
         format!("Review the current git diff with this focus: {}. Do not edit files.", focus.join(" "))
     };
     run_once(runtime, project, &focus, model, Some(PermissionMode::ReadOnly), yes, None).await
+}
+
+async fn git_cmd(
+    runtime: &Runtime,
+    project: &PathBuf,
+    action: GitCommand,
+) -> serika_runtime::Result<i32> {
+    use serika_runtime::gitinfo;
+    match action {
+        GitCommand::Status => {
+            let snap = gitinfo::snapshot(project).await?;
+            if !snap.is_repo {
+                println!("{} is not a git repository", project.display());
+                return Ok(1);
+            }
+            println!(
+                "branch: {}  (ahead {}, behind {})",
+                snap.branch, snap.ahead, snap.behind
+            );
+            if snap.entries.is_empty() {
+                println!("working tree clean");
+            } else {
+                for entry in &snap.entries {
+                    let state = if entry.staged && entry.has_unstaged_changes() {
+                        "staged+modified"
+                    } else if entry.staged {
+                        "staged"
+                    } else if entry.untracked {
+                        "untracked"
+                    } else {
+                        "modified"
+                    };
+                    println!("  [{}] {:<15} {}", entry.badge(), state, entry.path);
+                }
+            }
+            Ok(0)
+        }
+        GitCommand::Branches => {
+            let snap = gitinfo::snapshot(project).await?;
+            for b in snap.branches {
+                let mark = if b == snap.branch { "*" } else { " " };
+                println!("{mark} {b}");
+            }
+            Ok(0)
+        }
+        GitCommand::Checkout { branch, create } => {
+            let out = gitinfo::checkout_branch(project, &branch, create).await?;
+            println!("{out}");
+            Ok(0)
+        }
+        GitCommand::Stage { path, all } => {
+            let out = if all {
+                gitinfo::stage_all(project).await?
+            } else if let Some(path) = path {
+                gitinfo::stage_file(project, &path).await?
+            } else {
+                return Err(Error::msg("pass a file path or --all"));
+            };
+            println!("{out}");
+            Ok(0)
+        }
+        GitCommand::Unstage { path, all } => {
+            let out = if all {
+                gitinfo::unstage_all(project).await?
+            } else if let Some(path) = path {
+                gitinfo::unstage_file(project, &path).await?
+            } else {
+                return Err(Error::msg("pass a file path or --all"));
+            };
+            println!("{out}");
+            Ok(0)
+        }
+        GitCommand::Commit { message, all } => {
+            let out = if all {
+                gitinfo::commit_all(project, &message).await?
+            } else {
+                gitinfo::commit_staged(project, &message).await?
+            };
+            println!("{out}");
+            Ok(0)
+        }
+        GitCommand::Worktree { branch } => {
+            let wt = gitinfo::create_worktree(project, &runtime.paths.worktrees_dir(), &branch).await?;
+            println!("created worktree at {}", wt.display());
+            Ok(0)
+        }
+        GitCommand::Push => {
+            let out = gitinfo::push(project).await?;
+            println!("{out}");
+            Ok(0)
+        }
+        GitCommand::Pull => {
+            let out = gitinfo::pull(project).await?;
+            println!("{out}");
+            Ok(0)
+        }
+    }
+}
+
+async fn update_cmd(check: bool, force: bool) -> serika_runtime::Result<i32> {
+    let info = serika_runtime::updater::check_for_update().await?;
+    println!("current version : {}", info.current_version);
+    println!("latest version  : {} ({})", info.latest_version, info.tag_name);
+    if !info.notes.trim().is_empty() {
+        println!("notes           : {}", info.notes.lines().next().unwrap_or(""));
+    }
+    if check {
+        if info.update_available {
+            println!("update available: run `serika update` to install {}", info.tag_name);
+        } else {
+            println!("up to date");
+        }
+        return Ok(0);
+    }
+    if !info.update_available && !force {
+        println!("Serika Code {} is already up to date.", info.current_version);
+        return Ok(0);
+    }
+    println!("downloading {}...", info.asset_name);
+    let outcome = serika_runtime::updater::install_update(&info, None, force).await?;
+    println!(
+        "updated {} -> {} in {} ({}){}",
+        outcome.previous_version,
+        outcome.installed_version,
+        outcome.install_dir.display(),
+        outcome.updated_binaries.join(", "),
+        if outcome.sha256_verified {
+            " [SHA-256 verified]"
+        } else {
+            ""
+        }
+    );
+    Ok(0)
+}
+
+fn setup_cmd(
+    runtime: &Runtime,
+    prefix: Option<PathBuf>,
+    no_path: bool,
+    no_shortcuts: bool,
+    uninstall: bool,
+    purge: bool,
+) -> serika_runtime::Result<i32> {
+    if uninstall {
+        let removed = serika_runtime::setup::uninstall_system(
+            &runtime.paths,
+            prefix.as_deref(),
+            purge,
+        )?;
+        if removed.is_empty() {
+            println!("nothing to remove");
+        } else {
+            for item in removed {
+                println!("removed {item}");
+            }
+        }
+        return Ok(0);
+    }
+    let report = serika_runtime::setup::install_system(
+        &runtime.paths,
+        &serika_runtime::setup::SetupOptions {
+            prefix,
+            add_to_path: !no_path,
+            create_shortcuts: !no_shortcuts,
+        },
+    )?;
+    print!("{}", report.render());
+    Ok(0)
+}
+
+fn launch_desktop(project: &PathBuf) -> serika_runtime::Result<i32> {
+    let bin_name = if cfg!(windows) {
+        "serika-desktop.exe"
+    } else {
+        "serika-desktop"
+    };
+    let candidate = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|dir| dir.join(bin_name)))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from(bin_name));
+
+    std::process::Command::new(candidate)
+        .current_dir(project)
+        .spawn()
+        .map_err(|err| Error::msg(format!("could not start serika-desktop: {err}")))?;
+    println!("started Serika Code desktop in {}", project.display());
+    Ok(0)
 }
 
 fn exit_error(err: Error) -> ! {

@@ -23,6 +23,17 @@ serika sessions rename <id> <title>
 serika sessions delete <id>
 serika review                  git status and diff, no model call
 serika review --ask            read-only review by the agent
+serika git status              structured branch, ahead/behind, and working tree status
+serika git branches            list local branches
+serika git checkout <branch>   switch branch (or create with -b)
+serika git stage <path|--all>  stage file(s)
+serika git unstage <path|--all>
+serika git commit -m "<msg>"   commit staged changes (or --all)
+serika git worktree <branch>   create an isolated git worktree for a branch
+serika git push / pull         sync with remote
+serika update [--check]        check for or install latest GitHub release
+serika setup [--uninstall]     install binaries to PATH and create system shortcuts
+serika desktop                 launch the native desktop app
 ```
 
 Global flags, placed before the command:

@@ -26,6 +26,7 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn open() -> Result<Self> {
+        crate::updater::cleanup_old_binaries();
         let paths = AppPaths::resolve()?;
         paths.ensure()?;
         let mut config = Config::load_or_create(&paths)?;

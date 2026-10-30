@@ -23,8 +23,10 @@ pub mod paths;
 pub mod permissions;
 pub mod protocol;
 pub mod sessions;
+pub mod setup;
 pub mod shell;
 pub mod tools;
+pub mod updater;
 pub mod workspace;
 
 #[cfg(test)]
