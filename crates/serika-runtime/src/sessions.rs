@@ -18,9 +18,15 @@ pub struct SessionSummary {
 
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
+    pub id: i64,
     pub role: String,
     pub content: String,
     pub created_at: i64,
+}
+
+pub struct RewindOutcome {
+    pub prompt: String,
+    pub restored_files: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +90,17 @@ impl SessionStore {
                 path TEXT PRIMARY KEY,
                 last_opened INTEGER NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                message_id INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                existed INTEGER NOT NULL,
+                content BLOB,
+                UNIQUE(session_id, message_id, path)
+             );
              CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id);
+             CREATE INDEX IF NOT EXISTS snapshots_session ON snapshots(session_id, message_id);
              CREATE INDEX IF NOT EXISTS tool_runs_session ON tool_runs(session_id);
              CREATE INDEX IF NOT EXISTS changes_session ON changes(session_id);
              CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated_at);",
@@ -286,32 +302,129 @@ impl SessionStore {
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Error::from)
     }
 
-    pub fn append_message(&self, session_id: &str, role: &str, content: &str) -> Result<()> {
+    pub fn append_message(&self, session_id: &str, role: &str, content: &str) -> Result<i64> {
         let conn = self.lock();
         conn.execute(
             "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![session_id, role, content, now_secs()],
         )?;
+        let id = conn.last_insert_rowid();
         conn.execute(
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
             params![now_secs(), session_id],
         )?;
-        Ok(())
+        Ok(id)
     }
 
     pub fn messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT role, content, created_at FROM messages WHERE session_id = ?1 ORDER BY id ASC",
+            "SELECT id, role, content, created_at FROM messages WHERE session_id = ?1 ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
             Ok(StoredMessage {
-                role: row.get(0)?,
-                content: row.get(1)?,
-                created_at: row.get(2)?,
+                id: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                created_at: row.get(3)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Error::from)
+    }
+
+    /// Keep the first copy of a file for this user turn. Later edits in the same turn do not overwrite it.
+    pub fn save_snapshot(
+        &self,
+        session_id: &str,
+        message_id: i64,
+        path: &str,
+        existed: bool,
+        content: &[u8],
+    ) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO snapshots (session_id, message_id, path, existed, content)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, message_id, path, existed as i32, content],
+        )?;
+        Ok(())
+    }
+
+    /// Drop this user turn and everything after it, and put edited files back.
+    pub fn rewind(&self, session_id: &str, message_id: i64) -> Result<RewindOutcome> {
+        let conn = self.lock();
+        let (role, prompt, created_at): (String, String, i64) = conn
+            .query_row(
+                "SELECT role, content, created_at FROM messages WHERE session_id = ?1 AND id = ?2",
+                params![session_id, message_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|_| Error::msg("that message is not in this session"))?;
+        if role != "user" {
+            return Err(Error::msg("rewind starts from a message you sent"));
+        }
+        let project: String = conn.query_row(
+            "SELECT project_path FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?;
+        let root = Path::new(&project);
+        let mut stmt = conn.prepare(
+            "SELECT path, existed, content FROM snapshots
+             WHERE session_id = ?1 AND message_id >= ?2
+               AND message_id = (
+                 SELECT MIN(message_id) FROM snapshots AS older
+                 WHERE older.session_id = snapshots.session_id
+                   AND older.path = snapshots.path
+                   AND older.message_id >= ?2
+               )",
+        )?;
+        let rows = stmt.query_map(params![session_id, message_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? != 0,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+        let files = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        let mut restored = 0usize;
+        for (rel, existed, content) in files {
+            let full = crate::workspace::resolve_inside(root, &rel)?;
+            if existed {
+                if let Some(parent) = full.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&full, content)?;
+            } else if full.is_file() {
+                std::fs::remove_file(&full)?;
+            }
+            restored += 1;
+        }
+        conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1 AND id >= ?2",
+            params![session_id, message_id],
+        )?;
+        conn.execute(
+            "DELETE FROM snapshots WHERE session_id = ?1 AND message_id >= ?2",
+            params![session_id, message_id],
+        )?;
+        conn.execute(
+            "DELETE FROM tool_runs WHERE session_id = ?1 AND created_at >= ?2",
+            params![session_id, created_at],
+        )?;
+        conn.execute(
+            "DELETE FROM changes WHERE session_id = ?1 AND created_at >= ?2",
+            params![session_id, created_at],
+        )?;
+        conn.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            params![now_secs(), session_id],
+        )?;
+        Ok(RewindOutcome {
+            prompt,
+            restored_files: restored,
+        })
     }
 
     pub fn record_tool(
@@ -387,6 +500,15 @@ mod tests {
         reopened.rename("s1", "Renamed").unwrap();
         assert_eq!(reopened.get("s1").unwrap().unwrap().title, "Renamed");
         assert_eq!(reopened.tool_runs("s1").unwrap().len(), 1);
+        let turn = reopened.append_message("s1", "user", "change it").unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "two").unwrap();
+        reopened.save_snapshot("s1", turn, "a.txt", true, b"one").unwrap();
+        let outcome = reopened.rewind("s1", turn).unwrap();
+        assert_eq!(outcome.prompt, "change it");
+        assert_eq!(outcome.restored_files, 1);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one");
+        assert!(reopened.messages("s1").unwrap().iter().all(|message| message.id < turn));
         reopened.delete("s1").unwrap();
         assert!(reopened.messages("s1").unwrap().is_empty());
         assert!(reopened.tool_runs("s1").unwrap().is_empty());

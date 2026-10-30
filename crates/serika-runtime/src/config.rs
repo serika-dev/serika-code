@@ -86,6 +86,12 @@ pub struct Config {
     pub anthropic_base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_model: Option<String>,
 }
 
 impl Default for Config {
@@ -110,6 +116,9 @@ impl Default for Config {
             openai_base_url: None,
             anthropic_base_url: None,
             gemini_base_url: None,
+            ollama_base_url: None,
+            local_base_url: None,
+            local_model: None,
         }
     }
 }
@@ -248,6 +257,27 @@ impl Config {
             }
             "gemini_api_key" => {
                 self.gemini_api_key = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
+            "ollama_base_url" => {
+                self.ollama_base_url = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
+            "local_base_url" => {
+                self.local_base_url = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
+            "local_model" => {
+                self.local_model = if value.trim().is_empty() {
                     None
                 } else {
                     Some(value.trim().to_string())

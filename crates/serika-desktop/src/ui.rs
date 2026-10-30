@@ -16,7 +16,8 @@ use serika_runtime::gitinfo::{self, GitRepoSnapshot};
 use serika_runtime::model::{AccountProfile, ChatModel, ModelCatalog, UsageSnapshot};
 use serika_runtime::permissions::PermissionMode;
 use serika_runtime::providers::{
-    builtin_provider_models, detect_local_harnesses, LocalHarness, ProviderKind,
+    builtin_provider_models, detect_local_harnesses, discover_all_models, LocalHarness,
+    ProviderDiscoveryReport, ProviderKind, DEFAULT_LOCAL_SERVER_BASE, DEFAULT_OLLAMA_BASE,
 };
 use serika_runtime::sessions::{SessionSummary, StoredMessage, ToolRun};
 use serika_runtime::setup::{self, SetupOptions};
@@ -40,11 +41,10 @@ const TEXT_PRIMARY: Color32 = Color32::from_rgb(236, 236, 238);
 const TEXT_MUTED: Color32 = Color32::from_rgb(154, 154, 162);
 const TEXT_DIM: Color32 = Color32::from_rgb(108, 108, 116);
 
-// Kept names so older call sites stay quiet. These are neutral, not a brand purple.
-const SERIKA_VIOLET: Color32 = Color32::from_rgb(236, 236, 238);
-const SERIKA_VIOLET_HOVER: Color32 = Color32::from_rgb(255, 255, 255);
-const SERIKA_VIOLET_LIGHT: Color32 = Color32::from_rgb(196, 196, 204);
-const SERIKA_VIOLET_SOFT: Color32 = Color32::from_rgb(32, 32, 36);
+const SERIKA_VIOLET: Color32 = Color32::from_rgb(139, 92, 246); // #8B5CF6 (--color-primary)
+const SERIKA_VIOLET_HOVER: Color32 = Color32::from_rgb(124, 58, 237); // #7C3AED (--color-primary-hover)
+const SERIKA_VIOLET_LIGHT: Color32 = Color32::from_rgb(167, 139, 250); // #A78BFA (--color-secondary)
+const SERIKA_VIOLET_SOFT: Color32 = Color32::from_rgb(28, 20, 48);
 
 const EMERALD: Color32 = Color32::from_rgb(16, 185, 129); // #10B981 (--color-success)
 const AMBER: Color32 = Color32::from_rgb(245, 158, 11); // #F59E0B (--color-warning)
@@ -53,6 +53,7 @@ const ROSE: Color32 = Color32::from_rgb(244, 63, 94); // #F43F5E (--color-danger
 // =============================================================================
 // Custom Anti-Aliased Vector Icon Renderer (Zero Missing Glyph `▯` Boxes!)
 // =============================================================================
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 enum Icon {
     SerikaMark,
@@ -269,6 +270,7 @@ pub fn launch(smoke: bool) {
 }
 
 enum UiNotice {
+    ModelsDiscovered(ProviderDiscoveryReport),
     Catalog(Result<ModelCatalog, String>),
     Account(Result<(AccountProfile, UsageSnapshot), String>),
     LoggedIn(Result<LoginOutcome, String>),
@@ -334,9 +336,15 @@ struct SerikaApp {
     status: String,
     running: bool,
 
-    // Providers, Harnesses & Optional APIs
+    // Providers, Harnesses & Live API Endpoints
     local_harnesses: Vec<LocalHarness>,
     provider_models: Vec<ChatModel>,
+    discovery_report: ProviderDiscoveryReport,
+    discovering_models: bool,
+    model_search_input: String,
+    local_model_input: String,
+    ollama_base_input: String,
+    local_base_input: String,
     catalog: ModelCatalog,
     openai_key_input: String,
     anthropic_key_input: String,
@@ -398,20 +406,20 @@ impl SerikaApp {
         let selected_model = core
             .as_ref()
             .and_then(|c| c.config.model.clone())
-            .unwrap_or_else(|| {
-                if let Some(c) = &core {
-                    if c.config.resolve_anthropic_key().is_some() {
-                        return "claude/claude-sonnet-4-20250514".to_string();
-                    }
-                    if c.config.resolve_openai_key().is_some() {
-                        return "openai/gpt-4.1".to_string();
-                    }
-                    if c.config.resolve_gemini_key().is_some() {
-                        return "gemini/gemini-2.5-pro".to_string();
-                    }
-                }
-                "local/workspace".to_string()
-            });
+            .unwrap_or_else(|| "local/workspace".to_string());
+
+        let local_model_input = core
+            .as_ref()
+            .and_then(|c| c.config.local_model.clone())
+            .unwrap_or_default();
+        let ollama_base_input = core
+            .as_ref()
+            .and_then(|c| c.config.ollama_base_url.clone())
+            .unwrap_or_else(|| DEFAULT_OLLAMA_BASE.to_string());
+        let local_base_input = core
+            .as_ref()
+            .and_then(|c| c.config.local_base_url.clone())
+            .unwrap_or_else(|| DEFAULT_LOCAL_SERVER_BASE.to_string());
 
         let session = core.as_ref().and_then(|c| c.secrets.load().ok().flatten());
         let recent_projects = core
@@ -484,6 +492,12 @@ impl SerikaApp {
             running: false,
             local_harnesses,
             provider_models,
+            discovery_report: ProviderDiscoveryReport::default(),
+            discovering_models: false,
+            model_search_input: String::new(),
+            local_model_input,
+            ollama_base_input,
+            local_base_input,
             catalog: ModelCatalog::default(),
             openai_key_input,
             anthropic_key_input,
@@ -517,6 +531,16 @@ impl SerikaApp {
 
     fn refresh_remote(&mut self) {
         let Some(core) = self.core.clone() else { return };
+        self.discovering_models = true;
+        {
+            let tx = self.tx.clone();
+            let core_disc = core.clone();
+            self.tokio.spawn(async move {
+                let report =
+                    discover_all_models(core_disc.client.http(), &core_disc.config).await;
+                let _ = tx.send(UiNotice::ModelsDiscovered(report));
+            });
+        }
         if self.session.is_some() {
             let tx = self.tx.clone();
             let core_models = core.clone();
@@ -653,6 +677,27 @@ impl SerikaApp {
     fn drain_channels(&mut self) {
         while let Ok(notice) = self.rx.try_recv() {
             match notice {
+                UiNotice::ModelsDiscovered(report) => {
+                    self.discovering_models = false;
+                    self.provider_models = report.models.clone();
+                    // If user hadn't explicitly saved a model and we discovered live API or local LLM models, keep selection valid
+                    if self
+                        .core
+                        .as_ref()
+                        .and_then(|c| c.config.model.as_ref())
+                        .is_none()
+                        && self.selected_model == "local/workspace"
+                    {
+                        if let Some(first_api) = self
+                            .provider_models
+                            .iter()
+                            .find(|m| m.provider.as_deref() != Some("local"))
+                        {
+                            self.selected_model = first_api.id.clone();
+                        }
+                    }
+                    self.discovery_report = report;
+                }
                 UiNotice::Catalog(Ok(catalog)) => {
                     self.catalog = catalog;
                 }
@@ -812,6 +857,9 @@ impl SerikaApp {
             } else {
                 Some(self.selected_model.clone())
             };
+            config.local_model = non_empty(&self.local_model_input);
+            config.ollama_base_url = non_empty(&self.ollama_base_input);
+            config.local_base_url = non_empty(&self.local_base_input);
             config.openai_api_key = non_empty(&self.openai_key_input);
             config.anthropic_api_key = non_empty(&self.anthropic_key_input);
             config.gemini_api_key = non_empty(&self.gemini_key_input);
@@ -827,8 +875,8 @@ impl SerikaApp {
                         self.core = Some(Arc::new(reopened));
                     }
                     self.local_harnesses = detect_local_harnesses();
-                    self.provider_models = builtin_provider_models(&self.local_harnesses);
-                    self.status = "Saved providers & configuration".into();
+                    self.status = "Saved providers & fetching live /models…".into();
+                    self.refresh_remote();
                 }
                 Err(err) => self.status = format!("Save error: {err}"),
             }
@@ -1351,7 +1399,7 @@ impl SerikaApp {
 
                 // T3 Composer Footer Controls
                 ui.horizontal(|ui| {
-                    // 1. Provider & Model Selector
+                    // 1. Live Provider & Model Selector (Populated from API /models & Local Discovery)
                     let current_kind = ProviderKind::from_model_id(&self.selected_model);
                     let display_model = self
                         .provider_models
@@ -1363,44 +1411,145 @@ impl SerikaApp {
                             format!("{} · {}", current_kind.badge(), self.selected_model)
                         });
 
+                    let mut trigger_refresh = false;
+                    let mut open_providers_modal = false;
+
                     egui::ComboBox::from_id_salt(if is_hero {
                         "hero_model_combo"
                     } else {
                         "dock_model_combo"
                     })
-                    .width(220.0)
+                    .width(235.0)
                     .selected_text(RichText::new(display_model).size(11.5).color(TEXT_PRIMARY))
                     .show_ui(ui, |ui| {
-                        ui.label(RichText::new("On this machine").size(11.0).color(TEXT_DIM));
+                        ui.set_min_width(340.0);
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                TextEdit::singleline(&mut self.model_search_input)
+                                    .hint_text("Filter or type any model ID…")
+                                    .desired_width(230.0),
+                            );
+                            let refresh_txt = if self.discovering_models {
+                                "Syncing…"
+                            } else {
+                                "Refresh"
+                            };
+                            if ui.button(refresh_txt).clicked() {
+                                trigger_refresh = true;
+                            }
+                        });
+
+                        let q = self.model_search_input.trim().to_ascii_lowercase();
+                        if !q.is_empty() {
+                            let custom_id = self.model_search_input.trim().to_string();
+                            if ui
+                                .selectable_label(
+                                    self.selected_model == custom_id,
+                                    RichText::new(format!("Use model ID: {custom_id}"))
+                                        .strong()
+                                        .color(SERIKA_VIOLET_LIGHT),
+                                )
+                                .clicked()
+                            {
+                                self.selected_model = custom_id;
+                            }
+                            ui.separator();
+                        }
+
+                        // Group 1: Local Workspace & Local Models (Ollama /api/tags, Local Server /v1/models, Local CLIs)
+                        ui.label(
+                            RichText::new("LOCAL WORKSPACE & LOCAL ENGINES (NO API KEY)")
+                                .size(10.0)
+                                .strong()
+                                .color(EMERALD),
+                        );
                         for m in self
                             .provider_models
                             .iter()
                             .filter(|m| m.provider.as_deref() == Some("local"))
                         {
-                            ui.selectable_value(
+                            if !q.is_empty()
+                                && !m.name.to_ascii_lowercase().contains(&q)
+                                && !m.id.to_ascii_lowercase().contains(&q)
+                            {
+                                continue;
+                            }
+                            let resp = ui.selectable_value(
                                 &mut self.selected_model,
                                 m.id.clone(),
-                                format!("{} (No API)", m.name),
+                                &m.name,
                             );
+                            if let Some(desc) = &m.description {
+                                resp.on_hover_text(desc);
+                            }
                         }
+
                         ui.separator();
-                        ui.label(RichText::new("Your API key").size(11.0).color(TEXT_DIM));
-                        for m in self
+
+                        // Group 2: Live Cloud API Models (fetched from /v1/models & /v1beta/models)
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("LIVE API ENDPOINTS (CLAUDE · OPENAI · GEMINI)")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(SERIKA_VIOLET_LIGHT),
+                            );
+                            if ui
+                                .small_button("Configure Keys…")
+                                .clicked()
+                            {
+                                open_providers_modal = true;
+                            }
+                        });
+
+                        let api_models: Vec<&ChatModel> = self
                             .provider_models
                             .iter()
                             .filter(|m| m.provider.as_deref() != Some("local"))
-                        {
-                            let p = m.provider.as_deref().unwrap_or("api").to_uppercase();
-                            ui.selectable_value(
-                                &mut self.selected_model,
-                                m.id.clone(),
-                                format!("{p} · {}", m.name),
+                            .filter(|m| {
+                                q.is_empty()
+                                    || m.name.to_ascii_lowercase().contains(&q)
+                                    || m.id.to_ascii_lowercase().contains(&q)
+                            })
+                            .collect();
+
+                        if api_models.is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    "Add an OpenAI, Claude, or Gemini key in Providers & Keys to list live /models.",
+                                )
+                                .size(11.0)
+                                .color(TEXT_DIM),
                             );
+                        } else {
+                            for m in api_models {
+                                let p = m.provider.as_deref().unwrap_or("api").to_uppercase();
+                                let resp = ui.selectable_value(
+                                    &mut self.selected_model,
+                                    m.id.clone(),
+                                    format!("{p} · {}", m.name),
+                                );
+                                if let Some(desc) = &m.description {
+                                    resp.on_hover_text(desc);
+                                }
+                            }
                         }
+
                         if self.catalog.all().next().is_some() {
                             ui.separator();
-                            ui.label(RichText::new("Serika").size(11.0).color(TEXT_DIM));
+                            ui.label(
+                                RichText::new("SERIKA CLOUD (/api/chat/models)")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(TEXT_DIM),
+                            );
                             for m in self.catalog.all() {
+                                if !q.is_empty()
+                                    && !m.name.to_ascii_lowercase().contains(&q)
+                                    && !m.id.to_ascii_lowercase().contains(&q)
+                                {
+                                    continue;
+                                }
                                 ui.selectable_value(
                                     &mut self.selected_model,
                                     m.id.clone(),
@@ -1410,15 +1559,105 @@ impl SerikaApp {
                         }
                     });
 
+                    if trigger_refresh {
+                        self.refresh_remote();
+                    }
+                    if open_providers_modal {
+                        self.show_providers = true;
+                    }
+
+                    // 1b. Local Workspace / Local CLI Model Selector Pill!
+                    // When in Local Workspace or Local CLI mode, let the user pick which model the local workspace/CLI uses!
+                    if current_kind == ProviderKind::Local {
+                        let local_sub_label = if self.local_model_input.trim().is_empty() {
+                            "Model: Auto".to_string()
+                        } else {
+                            format!("Model: {}", self.local_model_input.trim())
+                        };
+                        let mut save_local_sub = false;
+                        egui::ComboBox::from_id_salt(if is_hero {
+                            "hero_local_submodel_combo"
+                        } else {
+                            "dock_local_submodel_combo"
+                        })
+                        .width(152.0)
+                        .selected_text(
+                            RichText::new(local_sub_label)
+                                .size(11.0)
+                                .color(SERIKA_VIOLET_LIGHT),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.set_min_width(270.0);
+                            ui.label(
+                                RichText::new("LOCAL WORKSPACE / CLI MODEL")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(EMERALD),
+                            );
+                            ui.horizontal(|ui| {
+                                let r = ui.add(
+                                    TextEdit::singleline(&mut self.local_model_input)
+                                        .hint_text("e.g. ollama:qwen2.5-coder or sonnet")
+                                        .desired_width(195.0),
+                                );
+                                if r.lost_focus() || ui.button("Apply").clicked() {
+                                    save_local_sub = true;
+                                }
+                            });
+                            ui.separator();
+                            if ui
+                                .selectable_label(
+                                    self.local_model_input.trim().is_empty(),
+                                    "Auto (Built-in Workspace Engine)",
+                                )
+                                .clicked()
+                            {
+                                self.local_model_input.clear();
+                                save_local_sub = true;
+                            }
+
+                            // List all discovered Ollama, Local Server & OpenCode models so user can bind them to Local Workspace!
+                            for m in self.provider_models.iter().filter(|m| {
+                                m.id.starts_with("local/ollama:")
+                                    || m.id.starts_with("local/server:")
+                                    || m.id.starts_with("cli/opencode:")
+                            }) {
+                                let short_val = m
+                                    .id
+                                    .strip_prefix("local/")
+                                    .or_else(|| m.id.strip_prefix("cli/opencode:"))
+                                    .unwrap_or(&m.id)
+                                    .to_string();
+                                if ui
+                                    .selectable_label(
+                                        self.local_model_input.trim() == short_val,
+                                        &m.name,
+                                    )
+                                    .clicked()
+                                {
+                                    self.local_model_input = short_val;
+                                    save_local_sub = true;
+                                }
+                            }
+                        });
+                        if save_local_sub {
+                            self.save_providers_and_settings();
+                        }
+                    }
+
                     // 2. Build / Plan Mode Toggle Pill (like T3 Code)
-                    let mode_label = match self.composer_mode {
-                        ComposerMode::Build => "Build",
-                        ComposerMode::Plan => "Plan",
+                    let (mode_label, mode_col) = match self.composer_mode {
+                        ComposerMode::Build => ("Build", SERIKA_VIOLET_LIGHT),
+                        ComposerMode::Plan => ("Plan", AMBER),
                     };
                     if ui
                         .add(
-                            egui::Button::new(RichText::new(mode_label).size(12.0).color(TEXT_MUTED))
-                                .frame(false),
+                            egui::Button::new(
+                                RichText::new(mode_label).size(11.5).strong().color(mode_col),
+                            )
+                            .fill(BG_INPUT)
+                            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                            .corner_radius(CornerRadius::same(7)),
                         )
                         .on_hover_text("Toggle between Build (execute edits) and Plan (read-only architecture plan)")
                         .clicked()
@@ -1831,11 +2070,11 @@ impl SerikaApp {
         }
         let mut open = self.show_providers;
         let style = ctx.style_of(Theme::Dark);
-        egui::Window::new("Providers & Optional API Keys")
+        egui::Window::new("Providers & Live Model Endpoints")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(500.0)
+            .default_width(540.0)
             .frame(
                 egui::Frame::window(&style)
                     .fill(BG_CARD)
@@ -1844,49 +2083,126 @@ impl SerikaApp {
                     .inner_margin(Margin::same(16)),
             )
             .show(ctx, |ui| {
+                // Top Live Endpoint Discovery Status Bar
+                ui.horizontal(|ui| {
+                    let rep = &self.discovery_report;
+                    ui.label(
+                        RichText::new(format!(
+                            "Discovered — Local: {} · Claude: {} · OpenAI: {} · Gemini: {}",
+                            rep.local_count,
+                            rep.anthropic_count,
+                            rep.openai_count,
+                            rep.gemini_count
+                        ))
+                        .size(11.5)
+                        .strong()
+                        .color(SERIKA_VIOLET_LIGHT),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let btn_label = if self.discovering_models {
+                            "Fetching /models…"
+                        } else {
+                            "Refresh All Endpoints"
+                        };
+                        if ui.button(btn_label).clicked() {
+                            self.refresh_remote();
+                        }
+                    });
+                });
+                for err in &self.discovery_report.errors {
+                    ui.label(RichText::new(err).size(11.0).color(AMBER));
+                }
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+
                 ui.label(
-                    RichText::new("1. Local Harnesses (Default · Zero API Key Required)")
+                    RichText::new("1. Local Workspace & Local Model Endpoints (No API Key Required)")
                         .strong()
                         .size(13.0)
                         .color(EMERALD),
                 );
                 ui.label(
                     RichText::new(
-                        "Just like T3 Code, Serika Code works out-of-the-box without requiring any API key.",
+                        "Select a local workspace profile, discovered Ollama / Local Server model, or pass a custom model to your local CLI.",
                     )
                     .size(11.5)
                     .color(TEXT_MUTED),
                 );
                 ui.add_space(6.0);
-                for h in &self.local_harnesses {
-                    ui.horizontal(|ui| {
-                        let col = if h.available { EMERALD } else { TEXT_DIM };
-                        let status = if h.available { "READY" } else { "NOT FOUND" };
-                        ui.label(RichText::new(status).monospace().size(10.5).strong().color(col));
-                        if ui
-                            .selectable_label(self.selected_model == h.id, &h.name)
-                            .clicked()
-                            && h.available
-                        {
-                            self.selected_model = h.id.clone();
-                        }
-                        ui.label(RichText::new(&h.description).size(11.0).color(TEXT_DIM));
-                    });
-                }
 
-                ui.add_space(12.0);
+                ScrollArea::vertical()
+                    .id_salt("providers_local_models_scroll")
+                    .max_height(135.0)
+                    .show(ui, |ui| {
+                        for m in self
+                            .provider_models
+                            .iter()
+                            .filter(|m| m.provider.as_deref() == Some("local"))
+                        {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("LOCAL")
+                                        .monospace()
+                                        .size(10.0)
+                                        .strong()
+                                        .color(EMERALD),
+                                );
+                                if ui
+                                    .selectable_label(self.selected_model == m.id, &m.name)
+                                    .clicked()
+                                {
+                                    self.selected_model = m.id.clone();
+                                }
+                                if let Some(desc) = &m.description {
+                                    ui.label(RichText::new(desc).size(10.5).color(TEXT_DIM));
+                                }
+                            });
+                        }
+                    });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Local Workspace / CLI Model:")
+                            .size(11.5)
+                            .color(TEXT_MUTED),
+                    );
+                    ui.add(
+                        TextEdit::singleline(&mut self.local_model_input)
+                            .hint_text("auto, ollama:qwen2.5-coder, server:llama-3.3, sonnet…")
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Ollama URL:").size(11.0).color(TEXT_DIM));
+                    ui.add(
+                        TextEdit::singleline(&mut self.ollama_base_input)
+                            .hint_text(DEFAULT_OLLAMA_BASE)
+                            .desired_width(175.0),
+                    );
+                    ui.label(RichText::new("Local Server:").size(11.0).color(TEXT_DIM));
+                    ui.add(
+                        TextEdit::singleline(&mut self.local_base_input)
+                            .hint_text(DEFAULT_LOCAL_SERVER_BASE)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+
+                ui.add_space(10.0);
                 ui.separator();
                 ui.add_space(8.0);
 
                 ui.label(
-                    RichText::new("2. Optional BYOK APIs (Claude, OpenAI & Gemini)")
+                    RichText::new("2. Optional Cloud APIs (Fetched Live from Provider /models Endpoints)")
                         .strong()
                         .size(13.0)
                         .color(SERIKA_VIOLET_LIGHT),
                 );
                 ui.label(
                     RichText::new(
-                        "Optionally add your own API keys to use Claude, OpenAI, or Gemini directly.",
+                        "No hardcoded model lists: adding an API key queries GET /v1/models or GET /v1beta/models live.",
                     )
                     .size(11.5)
                     .color(TEXT_MUTED),
@@ -1894,9 +2210,12 @@ impl SerikaApp {
                 ui.add_space(8.0);
 
                 ui.label(
-                    RichText::new("Anthropic Claude API Key (optional)")
-                        .size(11.5)
-                        .color(TEXT_MUTED),
+                    RichText::new(format!(
+                        "Anthropic Claude API Key (GET /v1/models · {} live models)",
+                        self.discovery_report.anthropic_count
+                    ))
+                    .size(11.5)
+                    .color(TEXT_MUTED),
                 );
                 ui.add(
                     TextEdit::singleline(&mut self.anthropic_key_input)
@@ -1907,9 +2226,12 @@ impl SerikaApp {
                 ui.add_space(6.0);
 
                 ui.label(
-                    RichText::new("OpenAI API Key (optional)")
-                        .size(11.5)
-                        .color(TEXT_MUTED),
+                    RichText::new(format!(
+                        "OpenAI API Key (GET /v1/models · {} live models)",
+                        self.discovery_report.openai_count
+                    ))
+                    .size(11.5)
+                    .color(TEXT_MUTED),
                 );
                 ui.add(
                     TextEdit::singleline(&mut self.openai_key_input)
@@ -1920,9 +2242,12 @@ impl SerikaApp {
                 ui.add_space(6.0);
 
                 ui.label(
-                    RichText::new("Google Gemini API Key (optional)")
-                        .size(11.5)
-                        .color(TEXT_MUTED),
+                    RichText::new(format!(
+                        "Google Gemini API Key (GET /v1beta/models · {} live models)",
+                        self.discovery_report.gemini_count
+                    ))
+                    .size(11.5)
+                    .color(TEXT_MUTED),
                 );
                 ui.add(
                     TextEdit::singleline(&mut self.gemini_key_input)
@@ -1936,7 +2261,7 @@ impl SerikaApp {
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("Save Providers & Keys")
+                                RichText::new("Save & Fetch Live /models")
                                     .size(12.0)
                                     .strong()
                                     .color(Color32::WHITE),
@@ -1952,7 +2277,7 @@ impl SerikaApp {
 
                 ui.add_space(10.0);
                 ui.collapsing(
-                    RichText::new("Optional: Serika Cloud Account")
+                    RichText::new("Optional: Serika Cloud Account (/api/chat/models)")
                         .size(12.0)
                         .color(TEXT_MUTED),
                     |ui| {
@@ -2338,6 +2663,7 @@ fn pill_icon_button(
     btn
 }
 
+#[allow(dead_code)]
 fn starter_chip(ui: &mut egui::Ui, icon: Icon, label: &str) -> egui::Response {
     let btn = ui.add(
         egui::Button::new(

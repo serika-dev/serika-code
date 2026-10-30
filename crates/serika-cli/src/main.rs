@@ -553,15 +553,27 @@ async fn finish_factor(
 }
 
 async fn models(runtime: &Runtime) -> serika_runtime::Result<i32> {
-    let harnesses = serika_runtime::providers::detect_local_harnesses();
-    let builtins = serika_runtime::providers::builtin_provider_models(&harnesses);
-    println!("local harnesses (no API required)");
-    for model in builtins.iter().filter(|m| m.provider.as_deref() == Some("local")) {
+    let report =
+        serika_runtime::providers::discover_all_models(runtime.client.http(), &runtime.config)
+            .await;
+    println!("local workspace & local models (no API required)");
+    for model in report
+        .models
+        .iter()
+        .filter(|m| m.provider.as_deref() == Some("local"))
+    {
         print_model(model);
     }
-    println!("\noptional APIs (OpenAI, Claude, Gemini)");
-    for model in builtins.iter().filter(|m| m.provider.as_deref() != Some("local")) {
-        print_model(model);
+    let api_models: Vec<_> = report
+        .models
+        .iter()
+        .filter(|m| m.provider.as_deref() != Some("local"))
+        .collect();
+    if !api_models.is_empty() {
+        println!("\nlive provider API models (OpenAI, Claude, Gemini)");
+        for model in api_models {
+            print_model(model);
+        }
     }
     if let Ok(catalog) = runtime.models().await {
         println!("\nserika cloud (free)");

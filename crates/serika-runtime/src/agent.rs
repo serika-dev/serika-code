@@ -52,7 +52,7 @@ impl Runtime {
         let session_id = self.open_session(&project, &request, &model, permission)?;
         emit(&request.events, AgentEvent::Started { session_id: session_id.clone() });
         emit(&request.events, AgentEvent::Status(format!("model {model} · {permission}")));
-        self.sessions.append_message(&session_id, "user", request.prompt.trim())?;
+        let turn_id = self.sessions.append_message(&session_id, "user", request.prompt.trim())?;
 
         let mut changed = Vec::new();
         let files = context::snapshot(&project, &exclusions).unwrap_or_default();
@@ -104,6 +104,17 @@ impl Runtime {
                 if request.cancel.is_cancelled() {
                     emit(&request.events, AgentEvent::Cancelled);
                     return Err(Error::Cancelled);
+                }
+                for path in checkpoint_paths(&call) {
+                    let Ok(full) = crate::workspace::resolve_inside(&project, &path) else {
+                        continue;
+                    };
+                    let (existed, bytes) = if full.is_file() {
+                        (true, std::fs::read(&full).unwrap_or_default())
+                    } else {
+                        (false, Vec::new())
+                    };
+                    let _ = self.sessions.save_snapshot(&session_id, turn_id, &path, existed, &bytes);
                 }
                 let outcome = tools::execute(&call, &ctx).await;
                 if outcome.output == "cancelled" {
@@ -175,17 +186,24 @@ impl Runtime {
         if let Some(model) = self.config.model.clone().filter(|model| !model.is_empty()) {
             return Ok(model);
         }
-        // If no Serika session is signed in and we are on the default API URL, prefer optional BYOK keys or API-free Local Harness!
+        // If no Serika session is signed in and we are on the default API URL, query live provider endpoints or use Local Workspace!
         let has_serika_session = self.secrets.load().ok().flatten().is_some();
         if !has_serika_session && self.config.api_base_url == crate::config::DEFAULT_API_BASE {
-            if self.config.resolve_anthropic_key().is_some() {
-                return Ok("claude/claude-sonnet-4-20250514".to_string());
+            let report =
+                crate::providers::discover_all_models(self.client.http(), &self.config).await;
+            if let Some(first_api) = report
+                .models
+                .iter()
+                .find(|m| m.provider.as_deref() != Some("local"))
+            {
+                return Ok(first_api.id.clone());
             }
-            if self.config.resolve_openai_key().is_some() {
-                return Ok("openai/gpt-4.1".to_string());
-            }
-            if self.config.resolve_gemini_key().is_some() {
-                return Ok("gemini/gemini-2.5-pro".to_string());
+            if let Some(first_local_llm) = report
+                .models
+                .iter()
+                .find(|m| m.id.starts_with("local/ollama:") || m.id.starts_with("local/server:"))
+            {
+                return Ok(first_local_llm.id.clone());
             }
             return Ok("local/workspace".to_string());
         }
@@ -213,9 +231,17 @@ impl Runtime {
 
         match ProviderKind::from_model_id(model) {
             ProviderKind::Local => {
-                return complete_local(model, project, message, history, cancel, |chunk| {
-                    emit(events, AgentEvent::MessageChunk { text: chunk.to_string() })
-                })
+                return complete_local(
+                    self.client.http(),
+                    &self.config,
+                    model,
+                    project,
+                    message,
+                    history,
+                    cancel,
+                    |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
+                    |chunk| emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() }),
+                )
                 .await;
             }
             ProviderKind::OpenAi => {
@@ -263,12 +289,15 @@ impl Runtime {
             // If pointing at default API and not signed in, fall back to API-free local workspace agent
             if self.config.api_base_url == crate::config::DEFAULT_API_BASE {
                 return complete_local(
+                    self.client.http(),
+                    &self.config,
                     "local/workspace",
                     project,
                     message,
                     history,
                     cancel,
                     |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
+                    |chunk| emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() }),
                 )
                 .await;
             }
@@ -341,6 +370,30 @@ fn format_result(name: &str, outcome: &ToolOutcome) -> String {
         if outcome.ok { "ok" } else { "failed" },
         clip_chars(&outcome.output, 12_000)
     )
+}
+
+fn checkpoint_paths(call: &crate::protocol::ToolCall) -> Vec<String> {
+    let mut paths = Vec::new();
+    for key in ["path", "from", "to"] {
+        if let Some(path) = call.arguments.get(key).and_then(|value| value.as_str()) {
+            if !path.is_empty() {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    if call.name == "apply_patch" {
+        if let Some(patch) = call.arguments.get("patch").and_then(|value| value.as_str()) {
+            for line in patch.lines() {
+                if let Some(rest) = line.strip_prefix("+++ b/") {
+                    let path = rest.trim();
+                    if !path.is_empty() && path != "/dev/null" {
+                        paths.push(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+    paths
 }
 
 fn title_from(prompt: &str) -> String {
