@@ -1,0 +1,17 @@
+/target
+/CONTINUE.md
+/PROMPT.md
+**/*.rs.bk
+**/*.pdb
+.serika/
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+config.local.json
+*.db
+*.db-journal
+*.log
+.DS_Store
+Thumbs.db

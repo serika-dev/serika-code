@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/serika-runtime",
+    "crates/serika-cli",
+    "crates/serika-desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Serika"]
+publish = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 16
+opt-level = 3
+strip = "symbols"

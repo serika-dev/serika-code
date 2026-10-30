@@ -1,0 +1,15 @@
+{
+  "api_base_url": "https://api.serika.dev",
+  "accounts_base_url": "https://accounts.serika.dev",
+  "model": null,
+  "permission": "standard",
+  "command_timeout_secs": 120,
+  "max_tool_rounds": 12,
+  "session_retention_days": 90,
+  "log_level": "info",
+  "context_exclusions": ["node_modules", "target", "dist", "build", ".git", "vendor", "__pycache__", ".next", "coverage"],
+  "max_read_bytes": 200000,
+  "theme": "dark",
+  "max_context_chars": 60000,
+  "stream": true
+}
