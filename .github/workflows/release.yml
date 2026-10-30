@@ -131,7 +131,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist, staging | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/serika.exe" staging/
           Copy-Item "target/${{ matrix.target }}/release/serika-desktop.exe" staging/
-          Copy-Item "install.ps1", "README.md", "LICENSE" staging/
+          Copy-Item "install.ps1", "install.cmd", "README.md", "LICENSE" staging/
           $archive = "serika-code-${{ matrix.target }}.zip"
           Compress-Archive -Path "staging/*" -DestinationPath "dist/$archive" -Force
           $hash = (Get-FileHash -Algorithm SHA256 "dist/$archive").Hash.ToLower()

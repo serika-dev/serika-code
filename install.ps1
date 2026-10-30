@@ -24,6 +24,14 @@ function Install-FromDir([string]$SourceDir) {
     }
 }
 
+$adjacentExe = Join-Path $PSScriptRoot "serika.exe"
+if (-not $FromSource -and (Test-Path $adjacentExe)) {
+    Write-Host "==> Installing Serika Code from extracted release folder..." -ForegroundColor Cyan
+    Get-ChildItem -Path $PSScriptRoot -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
+    Install-FromDir $PSScriptRoot
+    return
+}
+
 $localRelease = Join-Path $PSScriptRoot "target\release\serika.exe"
 if (-not $FromSource -and (Test-Path $localRelease)) {
     Write-Host "==> Installing Serika Code from local release build..." -ForegroundColor Cyan
