@@ -80,6 +80,12 @@ impl Runtime {
             request.prompt.trim(),
             crate::attachments::to_json(&attachments).as_deref(),
         )?;
+        if let Ok(stored) = self.sessions.messages(&session_id) {
+            if let Some(from) = crate::handoff::previous_model(&stored, turn_id).filter(|m| *m != model) {
+                let messages = stored.iter().filter(|m| m.id < turn_id).count();
+                emit(&request.events, AgentEvent::Handoff { from, to: model.clone(), messages });
+            }
+        }
 
         let mut changed = Vec::new();
         let files = context::snapshot(&project, &exclusions).unwrap_or_default();
@@ -316,6 +322,9 @@ impl Runtime {
                 ));
             }
             self.sessions.touch(id)?;
+            if existing.model_id != model {
+                self.sessions.set_model(id, model)?;
+            }
             return Ok(id.clone());
         }
         let id = Uuid::new_v4().simple().to_string();

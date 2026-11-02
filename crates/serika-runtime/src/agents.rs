@@ -770,32 +770,6 @@ fn first_line(text: &str) -> String {
     clip(text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim(), 240)
 }
 
-/// The conversation before `current` as plain text, newest turns kept when it is long.
-fn transcript(messages: &[crate::sessions::StoredMessage], current: i64) -> String {
-    const BUDGET: usize = 16_000;
-    let mut parts: Vec<String> = Vec::new();
-    let mut used = 0;
-    for message in messages.iter().rev() {
-        if message.id >= current || crate::sessions::is_tool_result(&message.role, &message.content) {
-            continue;
-        }
-        let (text, _) = crate::protocol::extract_tool_calls(&message.content);
-        let text = text.trim();
-        if text.is_empty() {
-            continue;
-        }
-        let who = if message.role == "user" { "User" } else { "Assistant" };
-        let entry = format!("{who}: {}", clip(text, 2_000));
-        used += entry.len();
-        if used > BUDGET {
-            break;
-        }
-        parts.push(entry);
-    }
-    parts.reverse();
-    parts.join("\n\n")
-}
-
 fn content_text(content: &Value) -> String {
     match content {
         Value::String(text) => text.clone(),
@@ -944,23 +918,25 @@ impl Runtime {
             .and_then(|a| std::path::Path::new(&a.path).parent().map(|p| p.to_path_buf()));
         let resume = self.sessions.provider_session(&session_id, agent.key())?;
         let effort = self.effort_for(agent, &config, model);
-        // Without the provider's own session (first run on this provider, or after a rewind,
-        // fork, or deleted turn) the earlier turns travel along as text.
-        let prompt_text = match resume {
-            Some(_) => prompt_text,
-            None => {
-                let earlier = self
-                    .sessions
-                    .messages(&session_id)
-                    .map(|messages| transcript(&messages, turn_id))
-                    .unwrap_or_default();
-                if earlier.is_empty() {
-                    prompt_text
-                } else {
-                    format!("Earlier in this conversation:\n\n{earlier}\n\n---\n\n{prompt_text}")
-                }
-            }
+        // Without its own session (first run on this provider, or after a rewind, fork, or
+        // deleted turn) the provider gets the conversation as a handoff. A resumed session only
+        // gets what other models said since it last ran.
+        let stored = self.sessions.messages(&session_id).unwrap_or_default();
+        let after = match &resume {
+            None => 0,
+            Some(_) => self.sessions.provider_synced(&session_id, agent.key())?.unwrap_or(turn_id),
         };
+        let handoff = crate::handoff::build(&stored, after, turn_id, crate::handoff::BUDGET);
+        if handoff.messages > 0 {
+            let from = crate::handoff::previous_model(&stored, turn_id).unwrap_or_default();
+            if from != model {
+                emit(
+                    &request.events,
+                    AgentEvent::Handoff { from, to: model.to_string(), messages: handoff.messages },
+                );
+            }
+        }
+        let prompt_text = crate::handoff::wrap(&handoff, resume.is_none(), &prompt_text);
 
         let mut command = command_for(&binary);
         match agent {
@@ -1141,6 +1117,9 @@ impl Runtime {
                 Some(state.reasoning.trim()),
             )?;
         }
+        // Everything up to here is in the provider's own transcript now.
+        let last = self.sessions.last_message_id(session_id)?;
+        self.sessions.set_provider_synced(session_id, agent.key(), last)?;
         Ok(())
     }
 

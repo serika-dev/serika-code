@@ -391,8 +391,11 @@ fn render_event(
             summary,
         } => renderer.tool_finished(&id, &name, ok, &summary),
         AgentEvent::FileChanged(diff) => renderer.file_changed(&diff.path, &diff.diff),
-        AgentEvent::UsageUpdated(usage) => renderer.usage(usage.summary_line()),
+        AgentEvent::UsageUpdated(usage) => renderer.usage(tui::usage_brief(&usage)),
         AgentEvent::Browser { frame } => renderer.set_status(&format!("Browsing {}", frame.url)),
+        AgentEvent::Handoff { from, to, messages } => {
+            renderer.handoff(&tui::pretty_model(&from), &tui::pretty_model(&to), messages)
+        }
         AgentEvent::ProviderUsage { usage, .. } => {
             if let Some(message) = usage.message {
                 renderer.set_status(&message);

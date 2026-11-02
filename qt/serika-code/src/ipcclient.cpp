@@ -408,6 +408,19 @@ void IpcClient::handleEvent(const QJsonObject &obj) {
     } else if (event == QLatin1String("browser")) {
         applyFrame(obj);
         emit browserActivity();
+    } else if (event == QLatin1String("handoff")) {
+        // Show where the chat moved to another model, just above the reply it is writing.
+        Turn marker;
+        marker.role = QStringLiteral("switch");
+        marker.switchFrom = obj.value(QStringLiteral("from")).toString();
+        marker.switchTo = obj.value(QStringLiteral("to")).toString();
+        marker.content = QString::number(obj.value(QStringLiteral("messages")).toInt());
+        int row = -1;
+        Turn *reply = m_turns.lastAssistant(&row);
+        if (reply && reply->streaming)
+            m_turns.insert(row, marker);
+        else
+            m_turns.append(marker);
     } else if (event == QLatin1String("providerUsage")) {
         const QString provider = obj.value(QStringLiteral("provider")).toString();
         for (QVariant &row : m_providers) {
@@ -452,6 +465,7 @@ void IpcClient::handleEvent(const QJsonObject &obj) {
 void IpcClient::beginAssistantTurn() {
     Turn turn;
     turn.role = QStringLiteral("assistant");
+    turn.model = m_selectedModel;
     turn.streaming = true;
     m_turns.append(turn);
 }
@@ -596,6 +610,47 @@ void IpcClient::applyDictionary(const QJsonObject &result) {
     m_strings = result.value(QStringLiteral("strings")).toObject().toVariantMap();
     m_locales = result.value(QStringLiteral("locales")).toArray().toVariantList();
     emit stringsChanged();
+}
+
+QString IpcClient::modelName(const QString &id) const {
+    if (id.isEmpty())
+        return {};
+    const auto scan = [&id](const QVariantList &rows) -> QString {
+        for (const QVariant &row : rows) {
+            const QVariantMap map = row.toMap();
+            if (map.value(QStringLiteral("id")).toString() == id)
+                return map.value(QStringLiteral("name")).toString();
+        }
+        return {};
+    };
+    QString name = scan(m_freeModels);
+    if (name.isEmpty())
+        name = scan(m_premiumModels);
+    for (const QVariant &provider : m_providers) {
+        if (!name.isEmpty())
+            break;
+        const QVariantMap map = provider.toMap();
+        name = scan(map.value(QStringLiteral("models")).toList());
+        if (name.startsWith(QLatin1String("Default")))
+            name = map.value(QStringLiteral("name")).toString();
+    }
+    if (!name.isEmpty())
+        return name;
+    // claude-code/sonnet → Claude Code · sonnet
+    if (id.startsWith(QLatin1String("claude-code/")))
+        return QStringLiteral("Claude Code · ") + id.mid(12);
+    if (id.startsWith(QLatin1String("codex/")))
+        return QStringLiteral("Codex · ") + id.mid(6);
+    return id.section(QLatin1Char('/'), -1);
+}
+
+QString IpcClient::lastReplyModel() const {
+    const QList<Turn> &turns = m_turns.turns();
+    for (int i = int(turns.size()) - 1; i >= 0; --i) {
+        if (turns[i].role == QLatin1String("assistant") && !turns[i].model.isEmpty())
+            return turns[i].model;
+    }
+    return {};
 }
 
 QString IpcClient::selectedModelName() const {
@@ -1251,7 +1306,20 @@ void IpcClient::loadDemo() {
                         "- **Live `/models`** now queries every provider you have a key for, then merges the Serika catalog.\n\n"
                         "```rust\npub async fn discover_all_models(http: &Client, cfg: &Config) -> Report {\n"
                         "    let (ollama, openai, claude) = tokio::join!(\n        fetch_ollama(http, cfg),\n        fetch_openai(http, cfg),\n        fetch_anthropic(http, cfg),\n    );\n"
-                        "    Report::merge(ollama, openai, claude)\n}\n```\n\nAll tests pass.")}});
+                        "    Report::merge(ollama, openai, claude)\n}\n```\n\nAll tests pass.")},
+        {QStringLiteral("model"), QStringLiteral("z-ai/glm-5.3-flash")}});
+    // The chat then moved to Claude Code mid-conversation.
+    turns.append(QVariantMap{{QStringLiteral("role"), QStringLiteral("user")},
+                             {QStringLiteral("content"), QStringLiteral("Now review that change for edge cases.")}});
+    turns.append(QVariantMap{{QStringLiteral("role"), QStringLiteral("switch")},
+                             {QStringLiteral("from"), QStringLiteral("z-ai/glm-5.3-flash")},
+                             {QStringLiteral("to"), QStringLiteral("claude-code/opus")},
+                             {QStringLiteral("content"), QStringLiteral("4")}});
+    turns.append(QVariantMap{{QStringLiteral("role"), QStringLiteral("assistant")},
+                             {QStringLiteral("model"), QStringLiteral("claude-code/opus")},
+                             {QStringLiteral("content"),
+                              QStringLiteral("Two edge cases worth handling:\n\n1. A provider that times out should not block the others; `join!` already runs them together, but each fetch needs its own timeout.\n"
+                                             "2. Duplicate model ids from different providers should keep the provider prefix so the picker can tell them apart.")}});
     m_turns.replaceAll(turns);
     m_activeSession = QStringLiteral("a");
     emit activeSessionChanged();

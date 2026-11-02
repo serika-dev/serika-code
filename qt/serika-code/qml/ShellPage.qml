@@ -424,6 +424,7 @@ Item {
     Shortcut { sequence: "Ctrl+B"; onActivated: shell.togglePanel("changes") }
     Shortcut { sequence: "Ctrl+Shift+B"; onActivated: shell.togglePanel("browser") }
     Shortcut { sequence: "Ctrl+,"; onActivated: shell.openSettings("general") }
+    Shortcut { sequence: "Ctrl+Shift+M"; onActivated: header.openModels() }
     Shortcut { sequence: "Ctrl+/"; onActivated: shortcuts.open() }
 
     Component.onCompleted: Qt.callLater(function () {

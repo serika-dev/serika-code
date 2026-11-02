@@ -12,8 +12,17 @@ Item {
     required property var tools
     required property bool streaming
     required property var attachments
+    required property string replyModel
+    required property string switchFrom
+    required property string switchTo
 
     readonly property bool isUser: turn === "user"
+    readonly property bool isSwitch: turn === "switch"
+    function providerOf(id) {
+        if (id.indexOf("claude-code/") === 0) return "claude"
+        if (id.indexOf("codex/") === 0) return "codex"
+        return "serika"
+    }
     readonly property real laneWidth: Math.min(width - 48, Theme.laneMax)
     readonly property bool waiting: streaming && content.length === 0 && reasoning.length === 0 && tools.length === 0
     readonly property bool hovered: hover.hovered || menu.opened
@@ -22,7 +31,36 @@ Item {
     property bool confirmDelete: false
 
     width: ListView.view ? ListView.view.width : 600
-    implicitHeight: lane.implicitHeight + (index === 0 ? 8 : 22)
+    implicitHeight: isSwitch ? switchRow.implicitHeight + 28 : lane.implicitHeight + (index === 0 ? 8 : 22)
+
+    // Where the chat moved to another model
+    RowLayout {
+        id: switchRow
+        visible: item.isSwitch
+        x: (item.width - width) / 2
+        y: 20
+        width: item.laneWidth
+        spacing: 10
+        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.borderSubtle }
+        ProviderLogo { provider: item.providerOf(item.switchFrom); size: 14; opacity: 0.7 }
+        Icon { name: "arrow-right"; size: 12; color: Theme.textDim }
+        ProviderLogo { provider: item.providerOf(item.switchTo); size: 14 }
+        Text {
+            text: Format.tr(item.dict, "SwitchedTo", "Switched to {to}", { to: ipc.modelName(item.switchTo) })
+            color: Theme.textSecondary
+            font.family: Theme.sans
+            font.pixelSize: 12
+            font.weight: Font.Medium
+        }
+        Text {
+            visible: Number(item.content) > 0
+            text: "· " + Format.tr(item.dict, "HandedOver", "{n} earlier messages handed over", { n: item.content })
+            color: Theme.textDim
+            font.family: Theme.sans
+            font.pixelSize: 12
+        }
+        Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.borderSubtle }
+    }
 
     HoverHandler { id: hover }
     TapHandler {
@@ -99,6 +137,7 @@ Item {
 
     Item {
         id: lane
+        visible: !item.isSwitch
         x: (item.width - width) / 2
         y: index === 0 ? 0 : 22
         width: item.laneWidth
@@ -239,6 +278,21 @@ Item {
             Row {
                 visible: !item.streaming && (item.content.length > 0 || item.tools.length > 0)
                 spacing: 2
+                // Which model wrote this reply
+                Row {
+                    visible: item.replyModel.length > 0
+                    anchors.verticalCenter: parent.verticalCenter
+                    rightPadding: 6
+                    spacing: 5
+                    ProviderLogo { anchors.verticalCenter: parent.verticalCenter; provider: item.providerOf(item.replyModel); size: 13 }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: ipc.modelName(item.replyModel)
+                        color: Theme.textDim
+                        font.family: Theme.sans
+                        font.pixelSize: 12
+                    }
+                }
                 ActionButton {
                     id: copyButton
                     property bool copied: false

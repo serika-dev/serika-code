@@ -24,6 +24,8 @@ pub struct StoredMessage {
     pub reasoning: Option<String>,
     /// JSON list of `attachments::Attachment` for a user message.
     pub attachments: Option<String>,
+    /// The model the chat was using when this message was written.
+    pub model: Option<String>,
     pub created_at: i64,
 }
 
@@ -130,6 +132,8 @@ impl SessionStore {
         )?;
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT", []);
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT", []);
+        let _ = conn.execute("ALTER TABLE messages ADD COLUMN model TEXT", []);
+        let _ = conn.execute("ALTER TABLE provider_sessions ADD COLUMN synced_through INTEGER", []);
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -341,6 +345,48 @@ impl SessionStore {
         Ok(())
     }
 
+    /// The last message a provider's own session has seen. Later messages came from other models.
+    pub fn provider_synced(&self, session_id: &str, provider: &str) -> Result<Option<i64>> {
+        let conn = self.lock();
+        let value: Option<Option<i64>> = conn
+            .query_row(
+                "SELECT synced_through FROM provider_sessions WHERE session_id = ?1 AND provider = ?2",
+                params![session_id, provider],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(value.flatten())
+    }
+
+    pub fn set_provider_synced(&self, session_id: &str, provider: &str, message_id: i64) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE provider_sessions SET synced_through = ?3 WHERE session_id = ?1 AND provider = ?2",
+            params![session_id, provider, message_id],
+        )?;
+        Ok(())
+    }
+
+    /// The model a chat continues with. New messages are tagged with it.
+    pub fn set_model(&self, session_id: &str, model: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE sessions SET model_id = ?2 WHERE id = ?1",
+            params![session_id, model],
+        )?;
+        Ok(())
+    }
+
+    /// The newest message id in a chat.
+    pub fn last_message_id(&self, session_id: &str) -> Result<i64> {
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Remove a project from the project list. Its chats stay in the history.
     pub fn forget_project(&self, project: &Path) -> Result<()> {
         let conn = self.lock();
@@ -387,7 +433,8 @@ impl SessionStore {
     ) -> Result<i64> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, attachments, created_at) VALUES (?1, 'user', ?2, ?3, ?4)",
+            "INSERT INTO messages (session_id, role, content, attachments, created_at, model)
+             VALUES (?1, 'user', ?2, ?3, ?4, (SELECT model_id FROM sessions WHERE id = ?1))",
             params![session_id, content, attachments, now_secs()],
         )?;
         let id = conn.last_insert_rowid();
@@ -408,7 +455,8 @@ impl SessionStore {
         let clean_reasoning = reasoning.map(str::trim).filter(|s| !s.is_empty());
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, reasoning, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO messages (session_id, role, content, reasoning, created_at, model)
+             VALUES (?1, ?2, ?3, ?4, ?5, (SELECT model_id FROM sessions WHERE id = ?1))",
             params![session_id, role, content, clean_reasoning, now_secs()],
         )?;
         let id = conn.last_insert_rowid();
@@ -422,7 +470,7 @@ impl SessionStore {
     pub fn messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, role, content, created_at, reasoning, attachments FROM messages WHERE session_id = ?1 ORDER BY id ASC",
+            "SELECT id, role, content, created_at, reasoning, attachments, model FROM messages WHERE session_id = ?1 ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
             let role: String = row.get(1)?;
@@ -449,6 +497,7 @@ impl SessionStore {
                 content,
                 reasoning,
                 attachments: row.get(5)?,
+                model: row.get(6)?,
                 created_at: row.get(3)?,
             })
         })?;
@@ -569,8 +618,8 @@ impl SessionStore {
         )?;
         let (end_id, end_at) = end.unwrap_or((i64::MAX, i64::MAX));
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, reasoning, attachments, created_at)
-             SELECT ?1, role, content, reasoning, attachments, created_at FROM messages
+            "INSERT INTO messages (session_id, role, content, reasoning, attachments, created_at, model)
+             SELECT ?1, role, content, reasoning, attachments, created_at, model FROM messages
              WHERE session_id = ?2 AND id < ?3 ORDER BY id ASC",
             params![new_id, session_id, end_id],
         )?;

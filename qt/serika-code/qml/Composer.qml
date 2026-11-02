@@ -93,6 +93,32 @@ Rectangle {
         anchors.rightMargin: 12
         spacing: 6
 
+        // The chat continues on another model: say so before the message goes out.
+        RowLayout {
+            id: switchHint
+            readonly property string previous: { ipc.turns.count; ipc.running; return ipc.lastReplyModel() }
+            visible: previous.length > 0 && previous !== ipc.selectedModel && !ipc.running
+            Layout.fillWidth: true
+            Layout.topMargin: 4
+            spacing: 6
+            ProviderLogo { provider: ipc.selectedProvider; size: 14 }
+            Text {
+                Layout.fillWidth: true
+                text: Format.tr(composer.dict, "SwitchHint", "Next reply from {to}. It gets this conversation as context.", { to: ipc.selectedModelName })
+                elide: Text.ElideRight
+                color: Theme.textDim
+                font.family: Theme.sans
+                font.pixelSize: 12
+            }
+            Text {
+                text: Format.tr(composer.dict, "SwitchBack", "Use {from}", { from: ipc.modelName(switchHint.previous) })
+                color: Theme.accentSecondary
+                font.family: Theme.sans
+                font.pixelSize: 12
+                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: ipc.chooseModel(switchHint.previous) }
+            }
+        }
+
         // Messages waiting for the current reply to finish
         ColumnLayout {
             visible: ipc.queue.length > 0

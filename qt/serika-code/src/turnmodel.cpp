@@ -26,6 +26,12 @@ QVariant TurnModel::data(const QModelIndex &index, int role) const {
         return turn.streaming;
     case AttachmentsRole:
         return turn.attachments;
+    case ModelRole:
+        return turn.model;
+    case SwitchFromRole:
+        return turn.switchFrom;
+    case SwitchToRole:
+        return turn.switchTo;
     default:
         return {};
     }
@@ -39,6 +45,9 @@ QHash<int, QByteArray> TurnModel::roleNames() const {
         {ToolsRole, "tools"},
         {StreamingRole, "streaming"},
         {AttachmentsRole, "attachments"},
+        {ModelRole, "replyModel"},
+        {SwitchFromRole, "switchFrom"},
+        {SwitchToRole, "switchTo"},
     };
 }
 
@@ -54,6 +63,9 @@ void TurnModel::replaceAll(const QVariantList &turns) {
         turn.reasoning = map.value(QStringLiteral("reasoning")).toString();
         turn.tools = map.value(QStringLiteral("tools")).toList();
         turn.attachments = map.value(QStringLiteral("attachments")).toList();
+        turn.model = map.value(QStringLiteral("model")).toString();
+        turn.switchFrom = map.value(QStringLiteral("from")).toString();
+        turn.switchTo = map.value(QStringLiteral("to")).toString();
         m_turns.append(turn);
     }
     endResetModel();
@@ -76,6 +88,14 @@ int TurnModel::append(const Turn &turn) {
     endInsertRows();
     emit countChanged();
     return row;
+}
+
+void TurnModel::insert(int row, const Turn &turn) {
+    row = qBound(0, row, int(m_turns.size()));
+    beginInsertRows(QModelIndex(), row, row);
+    m_turns.insert(row, turn);
+    endInsertRows();
+    emit countChanged();
 }
 
 Turn *TurnModel::last() { return m_turns.isEmpty() ? nullptr : &m_turns.last(); }

@@ -1512,7 +1512,7 @@ impl SerikaApp {
                         role: "user".into(),
                         content: "can you check where tickets are handled and wire live /models discovery?".into(),
                         reasoning: None,
-                        attachments: None,
+                        attachments: None, model: None,
                         created_at: now - 90,
                     },
                     StoredMessage {
@@ -1526,7 +1526,7 @@ impl SerikaApp {
                              4. Ran `cargo test --workspace` to confirm all 43 unit and integration tests pass."
                                 .into(),
                         ),
-                        attachments: None,
+                        attachments: None, model: None,
                         created_at: now - 40,
                     },
                 ];
@@ -1978,7 +1978,7 @@ impl SerikaApp {
                 AgentEvent::Completed { .. } => self.status = "Ready".into(),
                 AgentEvent::Failed { message } => self.status = message,
                 AgentEvent::Cancelled => self.status = "Cancelled".into(),
-                AgentEvent::Browser { .. } | AgentEvent::ProviderUsage { .. } => {}
+                AgentEvent::Browser { .. } | AgentEvent::ProviderUsage { .. } | AgentEvent::Handoff { .. } => {}
             }
         }
     }
@@ -3559,7 +3559,7 @@ impl SerikaApp {
                                     content: self.streaming_reply.clone(),
                                     reasoning: (!self.streaming_reasoning.is_empty())
                                         .then(|| self.streaming_reasoning.clone()),
-                                    attachments: None,
+                                    attachments: None, model: None,
                                     created_at: 0,
                                 };
                                 self.draw_turn(ui, &temp_msg, false);

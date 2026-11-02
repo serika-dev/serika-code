@@ -189,6 +189,8 @@ public:
     Q_INVOKABLE void resumeQueue();
     Q_INVOKABLE void resumeQueueAt(qint64 epochSecs);
     Q_INVOKABLE void clearQueue();
+    Q_INVOKABLE QString modelName(const QString &id) const;
+    Q_INVOKABLE QString lastReplyModel() const;
     Q_INVOKABLE void browserNewTab(const QString &url = QString());
     Q_INVOKABLE void browserSwitchTab(const QString &id);
     Q_INVOKABLE void browserCloseTab(const QString &id);

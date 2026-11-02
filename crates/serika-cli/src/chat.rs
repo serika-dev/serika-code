@@ -51,6 +51,11 @@ pub struct Chat<'a> {
     names: HashMap<String, String>,
     usage_note: String,
     editor: Editor,
+    /// Output of `!commands` waiting to go out with the next message.
+    shell_notes: Vec<String>,
+    last_reply: String,
+    /// The model that wrote the last reply, to announce a switch.
+    reply_model: Option<String>,
 }
 
 pub async fn run(
@@ -81,7 +86,17 @@ pub async fn run(
         names: HashMap::new(),
         usage_note: String::new(),
         editor: Editor::new(&runtime.paths.data_dir, project, config.context_exclusions.clone()),
+        shell_notes: Vec::new(),
+        last_reply: String::new(),
+        reply_model: None,
     };
+    if let Some(id) = &chat.session {
+        chat.reply_model = runtime
+            .sessions
+            .messages(id)
+            .ok()
+            .and_then(|m| serika_runtime::handoff::previous_model(&m, i64::MAX));
+    }
     chat.learn_cached_names();
     chat.refresh_usage().await;
     chat.banner();
@@ -100,6 +115,17 @@ impl<'a> Chat<'a> {
                     self.banner();
                 }
                 Input::Expand => tui::print_expanded(&self.term),
+                Input::CyclePermission => {
+                    let next = match self.permission {
+                        PermissionMode::Restricted => PermissionMode::Standard,
+                        PermissionMode::Standard => PermissionMode::Full,
+                        PermissionMode::Full => PermissionMode::ReadOnly,
+                        PermissionMode::ReadOnly => PermissionMode::Restricted,
+                    };
+                    self.permission = next;
+                    self.save_config("permission", next.as_str());
+                }
+                Input::PickModel => self.choose_model("").await?,
                 Input::Submit(text) => {
                     let trimmed = text.trim().to_string();
                     if trimmed.is_empty() {
@@ -107,6 +133,10 @@ impl<'a> Chat<'a> {
                         if let Some(next) = self.queue.pop_front() {
                             self.send(next.text, next.attachments).await?;
                         }
+                        continue;
+                    }
+                    if let Some(command) = trimmed.strip_prefix('!') {
+                        self.shell(command.trim()).await;
                         continue;
                     }
                     if trimmed.starts_with('/') && !trimmed.starts_with("//") {
@@ -238,13 +268,23 @@ impl<'a> Chat<'a> {
         if !self.attachments.is_empty() {
             left.push_str(&format!("  {DIM}·{RESET}  📎 {}", self.attachments.len()));
         }
-        let notice = if self.queue.is_empty() {
-            None
-        } else {
+        if !self.shell_notes.is_empty() {
+            left.push_str(&format!("  {DIM}·{RESET}  $ {} output{}", self.shell_notes.len(), if self.shell_notes.len() == 1 { "" } else { "s" }));
+        }
+        let switching = self.session.is_some()
+            && self.reply_model.as_deref().map(|m| m != self.model).unwrap_or(false);
+        let notice = if !self.queue.is_empty() {
             Some(format!(
                 "{} queued · Enter on an empty box sends the next · /queue to manage",
                 self.queue.len()
             ))
+        } else if switching {
+            Some(format!(
+                "⇄ Next reply from {} · the conversation so far goes with it",
+                self.model_name(&self.model)
+            ))
+        } else {
+            None
         };
         Prompt {
             footer_left: left,
@@ -361,13 +401,19 @@ impl<'a> Chat<'a> {
         tui::user_cell(&self.term, &text, &labels);
 
         let mut prompt = text;
+        if !self.shell_notes.is_empty() {
+            let notes = std::mem::take(&mut self.shell_notes).join("\n\n");
+            prompt = format!("Output of commands I ran in my terminal:\n```\n{notes}\n```\n\n{prompt}");
+        }
         if let Some(context) = self.carry.take() {
             prompt = format!("Context from earlier in this conversation (summary):\n{context}\n\n---\n\n{prompt}");
         }
         let mut next = Some((prompt, files));
         while let Some((prompt, files)) = next.take() {
             match self.turn(prompt, files, None).await? {
-                TurnEnd::Completed(_) => {
+                TurnEnd::Completed(reply) => {
+                    self.last_reply = reply;
+                    self.reply_model = Some(self.model.clone());
                     if let Some(item) = self.queue.pop_front() {
                         let labels: Vec<String> = item.attachments.iter().map(|a| a.name.clone()).collect();
                         tui::user_cell(&self.term, &item.text, &labels);
@@ -415,6 +461,7 @@ impl<'a> Chat<'a> {
         let raw = if term.fancy { Some(RawGuard::new()) } else { None };
         let mut keys = raw.as_ref().map(|_| EventStream::new());
         let mut draft = String::new();
+        let started = std::time::Instant::now();
         let mut failed = false;
         let mut stopping = false;
         let mut ticker = tokio::time::interval(Duration::from_millis(80));
@@ -518,6 +565,10 @@ impl<'a> Chat<'a> {
         };
         drop(keys);
         drop(raw);
+        // A long turn rings the terminal bell so you notice it finished.
+        if term.fancy && started.elapsed() > Duration::from_secs(20) && load_cli_prefs(self.runtime).get("bell") != Some(&serde_json::Value::Bool(false)) {
+            tui::write_err("\x07");
+        }
         if !draft.trim().is_empty() {
             self.editor.prefill(draft.trim_end());
         }
@@ -542,8 +593,12 @@ impl<'a> Chat<'a> {
             AgentEvent::ToolOutput { id, stream } => renderer.tool_output(&id, &stream),
             AgentEvent::ToolFinished { id, name, ok, summary } => renderer.tool_finished(&id, &name, ok, &summary),
             AgentEvent::FileChanged(diff) => renderer.file_changed(&diff.path, &diff.diff),
-            AgentEvent::UsageUpdated(usage) => renderer.usage(usage.summary_line()),
+            AgentEvent::UsageUpdated(usage) => renderer.usage(tui::usage_brief(&usage)),
             AgentEvent::Browser { frame } => renderer.set_status(&format!("Browsing {}", frame.url)),
+            AgentEvent::Handoff { from, to, messages } => {
+                let (from, to) = (self.model_name(&from), self.model_name(&to));
+                renderer.handoff(&from, &to, messages);
+            }
             AgentEvent::ProviderUsage { usage, .. } => {
                 if let Some(message) = usage.message {
                     renderer.set_status(&message);
@@ -633,6 +688,31 @@ impl<'a> Chat<'a> {
                 }
             }
             "/expand" => tui::print_expanded(&term),
+            "/undo" => self.undo(false).await?,
+            "/retry" => self.undo(true).await?,
+            "/copy" => {
+                if self.last_reply.trim().is_empty() {
+                    tui::note_line(&term, "No reply to copy yet.");
+                } else if copy_to_clipboard(&self.last_reply) {
+                    tui::note_line(&term, &format!("Copied the last reply ({} characters).", self.last_reply.chars().count()));
+                } else {
+                    tui::error_line(&term, "Could not reach the clipboard.");
+                }
+            }
+            "/export" => self.export(&arg)?,
+            "/rename" => match &self.session {
+                Some(id) if !arg.is_empty() => {
+                    self.runtime.sessions.rename(id, &arg)?;
+                    tui::note_line(&term, &format!("Renamed to “{arg}”."));
+                }
+                Some(_) => tui::note_line(&term, "Usage: /rename <title>"),
+                None => tui::note_line(&term, "Nothing to rename yet."),
+            },
+            "/stats" => self.stats()?,
+            "/init" => {
+                let prompt = "Look around this project and write (or update) SERIKA.md in its root: what the project is, how it is laid out, how to build, run, and test it, conventions to follow, and pitfalls. Keep it short and factual; it is read at the start of every session.".to_string();
+                self.send(prompt, Vec::new()).await?;
+            }
             "/theme" => self.choose_theme(&arg),
             "/doctor" => {
                 crate::doctor(self.runtime, &term).await?;
@@ -647,6 +727,168 @@ impl<'a> Chat<'a> {
             other => tui::error_line(&term, &format!("Unknown command {other}. /help lists them.")),
         }
         Ok(Flow::Continue)
+    }
+
+    /// `!command`: run it in the project, show the output, and keep it for the next message.
+    async fn shell(&mut self, command: &str) {
+        let term = self.term;
+        if command.is_empty() {
+            tui::note_line(&term, "Type a command after !, for example !git status");
+            return;
+        }
+        let mut cmd = if cfg!(windows) {
+            let mut c = tokio::process::Command::new("powershell");
+            c.args(["-NoProfile", "-NonInteractive", "-Command", command]);
+            c
+        } else {
+            let mut c = tokio::process::Command::new("sh");
+            c.args(["-c", command]);
+            c
+        };
+        cmd.current_dir(&self.project).kill_on_drop(true);
+        let started = std::time::Instant::now();
+        let output = match tokio::time::timeout(Duration::from_secs(120), cmd.output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(err)) => {
+                tui::error_line(&term, &format!("could not run it: {err}"));
+                return;
+            }
+            Err(_) => {
+                tui::error_line(&term, "Stopped after 2 minutes.");
+                return;
+            }
+        };
+        let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+        let err = String::from_utf8_lossy(&output.stderr);
+        if !err.trim().is_empty() {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&err);
+        }
+        let ok = output.status.success();
+        let args = serde_json::json!({ "command": command }).to_string();
+        let mut renderer = TurnRenderer::new(term);
+        renderer.tool_requested("shell", "run_command", &args);
+        renderer.tool_output("shell", &text);
+        let summary = format!("exit {}", output.status.code().unwrap_or(-1));
+        renderer.tool_finished("shell", "run_command", ok, &summary);
+        drop(renderer);
+        let clipped: String = text.chars().take(8_000).collect();
+        self.shell_notes.push(format!("$ {command}  (exit {}, {:.1}s)\n{}", output.status.code().unwrap_or(-1), started.elapsed().as_secs_f32(), clipped.trim_end()));
+        tui::info_line(&term, "This output goes along with your next message.");
+    }
+
+    /// Take back the last exchange (and its file edits). With `retry`, ask again right away.
+    async fn undo(&mut self, retry: bool) -> serika_runtime::Result<()> {
+        let term = self.term;
+        let Some(id) = self.session.clone() else {
+            tui::note_line(&term, "Nothing to undo yet.");
+            return Ok(());
+        };
+        let turns = self.runtime.sessions.user_turns(&id)?;
+        let Some((message, _)) = turns.last().copied() else {
+            tui::note_line(&term, "Nothing to undo yet.");
+            return Ok(());
+        };
+        let outcome = self.runtime.sessions.rewind(&id, message)?;
+        let files = attachments::parse_json(outcome.attachments.as_deref());
+        let restored = if outcome.restored_files > 0 {
+            format!(", {} file(s) restored", outcome.restored_files)
+        } else {
+            String::new()
+        };
+        if retry {
+            tui::note_line(&term, &format!("Asking again{restored}…"));
+            self.send(outcome.prompt, files).await?;
+        } else {
+            tui::note_line(&term, &format!("Took back your last message{restored}. It is back in the box to edit."));
+            self.editor.prefill(&outcome.prompt);
+            self.attachments = files;
+        }
+        Ok(())
+    }
+
+    fn export(&self, arg: &str) -> serika_runtime::Result<()> {
+        let term = self.term;
+        let Some(id) = &self.session else {
+            tui::note_line(&term, "Nothing to export yet.");
+            return Ok(());
+        };
+        let title = self.runtime.sessions.get(id)?.map(|s| s.title).unwrap_or_else(|| "Serika chat".into());
+        let mut md = format!("# {title}\n\n");
+        for message in self.runtime.sessions.messages(id)? {
+            if serika_runtime::sessions::is_tool_result(&message.role, &message.content) {
+                continue;
+            }
+            let (text, _) = serika_runtime::protocol::extract_tool_calls(&message.content);
+            if text.trim().is_empty() {
+                continue;
+            }
+            let who = if message.role == "user" {
+                "You".to_string()
+            } else {
+                message.model.as_deref().map(|m| format!("Serika · {}", self.model_name(m))).unwrap_or_else(|| "Serika".into())
+            };
+            md.push_str(&format!("**{who}**\n\n{}\n\n---\n\n", text.trim()));
+        }
+        let path = if arg.is_empty() {
+            let slug: String = title
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect::<String>()
+                .split('-')
+                .filter(|s| !s.is_empty())
+                .take(8)
+                .collect::<Vec<_>>()
+                .join("-");
+            self.project.join(format!("serika-{}.md", if slug.is_empty() { "chat".into() } else { slug }))
+        } else {
+            let p = PathBuf::from(arg);
+            if p.is_absolute() { p } else { self.project.join(p) }
+        };
+        std::fs::write(&path, md)?;
+        tui::note_line(&term, &format!("Saved {}", tui::pretty_path(&path)));
+        Ok(())
+    }
+
+    fn stats(&self) -> serika_runtime::Result<()> {
+        let term = self.term;
+        let Some(id) = &self.session else {
+            tui::note_line(&term, "No conversation yet.");
+            return Ok(());
+        };
+        let messages = self.runtime.sessions.messages(id)?;
+        let turns = self.runtime.sessions.user_turns(id)?.len();
+        let tools = self.runtime.sessions.tool_runs(id)?;
+        let failed = tools.iter().filter(|t| !t.ok).count();
+        let changes = self.runtime.sessions.changes(id)?;
+        let mut files: Vec<&str> = changes.iter().map(|(p, _)| p.as_str()).collect();
+        files.sort();
+        files.dedup();
+        let mut models: Vec<String> = Vec::new();
+        for m in messages.iter().filter(|m| m.role == "assistant") {
+            if let Some(model) = &m.model {
+                let name = self.model_name(model);
+                if !models.contains(&name) {
+                    models.push(name);
+                }
+            }
+        }
+        let started = messages.first().map(|m| m.created_at).unwrap_or_else(now_secs);
+        outln!();
+        for (label, value) in [
+            ("messages", format!("{turns} from you · {} stored in total", messages.len())),
+            ("tools", format!("{} run{}", tools.len(), if failed > 0 { format!(" · {failed} failed") } else { String::new() })),
+            ("files", if files.is_empty() { "none changed".into() } else { format!("{} changed: {}", files.len(), files.iter().take(6).copied().collect::<Vec<_>>().join(", ")) }),
+            ("models", if models.is_empty() { "-".into() } else { models.join(" → ") }),
+            ("started", format!("{} ago", countdown(now_secs() - started))),
+        ] {
+            outln!("  {DIM}{label:<10}{RESET}{value}");
+        }
+        outln!();
+        Ok(())
     }
 
     fn status(&self) {
@@ -764,8 +1006,11 @@ impl<'a> Chat<'a> {
                 self.provider_label(&id)
             ));
         }
-        // Another provider cannot resume this provider's conversation.
-        self.session = None;
+        // The conversation stays: the next reply comes from the new model, which gets the
+        // earlier messages handed over.
+        if self.session.is_some() && self.reply_model.as_deref().map(|m| m != id).unwrap_or(false) {
+            tui::info_line(&self.term, "The conversation continues. The new model gets the earlier messages as context.");
+        }
         self.usage_note.clear();
     }
 
@@ -1170,6 +1415,39 @@ fn compact(n: u64) -> String {
         n if n >= 1_000 => format!("{:.0}K", n as f64 / 1e3),
         n => n.to_string(),
     }
+}
+
+/// Put text on the system clipboard with the platform's own tool.
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write as _;
+    let attempts: &[(&str, &[&str])] = if cfg!(windows) {
+        &[(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", "[Console]::InputEncoding=[Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())"],
+        )]
+    } else if cfg!(target_os = "macos") {
+        &[("pbcopy", &[])]
+    } else {
+        &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["--clipboard", "--input"])]
+    };
+    for (program, args) in attempts {
+        let Ok(mut child) = std::process::Command::new(program)
+            .args(*args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        if child.wait().map(|s| s.success()).unwrap_or(false) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Split on spaces, keeping "quoted paths" together.

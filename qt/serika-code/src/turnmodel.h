@@ -12,6 +12,9 @@ struct Turn {
     QString reasoning;
     QVariantList tools;
     QVariantList attachments; // files and images sent with a user message
+    QString model;            // model that wrote an assistant reply
+    QString switchFrom;       // role "switch": the chat moved from this model…
+    QString switchTo;         // …to this one
     bool streaming = false;
 };
 
@@ -22,7 +25,7 @@ class TurnModel : public QAbstractListModel {
     Q_PROPERTY(int count READ count NOTIFY countChanged)
 
 public:
-    enum Role { TurnRole = Qt::UserRole + 1, ContentRole, ReasoningRole, ToolsRole, StreamingRole, AttachmentsRole };
+    enum Role { TurnRole = Qt::UserRole + 1, ContentRole, ReasoningRole, ToolsRole, StreamingRole, AttachmentsRole, ModelRole, SwitchFromRole, SwitchToRole };
 
     explicit TurnModel(QObject *parent = nullptr);
 
@@ -34,6 +37,7 @@ public:
     void replaceAll(const QVariantList &turns);
     void clear();
     int append(const Turn &turn);
+    void insert(int row, const Turn &turn);
     Turn *last();
     Turn *lastAssistant(int *row = nullptr);
     void changed(int row, const QList<int> &roles);

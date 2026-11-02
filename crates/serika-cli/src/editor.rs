@@ -69,6 +69,10 @@ pub enum Input {
     Exit,
     ClearScreen,
     Expand,
+    /// Shift+Tab: next permission mode. The text in the box stays.
+    CyclePermission,
+    /// Ctrl+P: open the model picker. The text in the box stays.
+    PickModel,
 }
 
 /// What the box shows besides your text.
@@ -104,6 +108,9 @@ pub struct Editor {
     /// Rows drawn last time and the row the cursor was left on, counted from the top.
     drawn_rows: usize,
     cursor_row: usize,
+    /// Terminal width and cursor column of the last frame, to measure reflow after a resize.
+    drawn_width: usize,
+    cursor_col: usize,
 }
 
 const MAX_TEXT_ROWS: usize = 12;
@@ -137,7 +144,19 @@ impl Editor {
             last_ctrl_c: None,
             drawn_rows: 0,
             cursor_row: 0,
+            drawn_width: 0,
+            cursor_col: 0,
         }
+    }
+
+    /// Rows between the top of the last frame and the cursor. When the terminal got narrower,
+    /// each full-width line of that frame now wraps over several rows.
+    fn rows_above(&self, width: usize) -> usize {
+        if self.drawn_width == 0 || width >= self.drawn_width {
+            return self.cursor_row;
+        }
+        let per_line = self.drawn_width.div_ceil(width.max(1));
+        self.cursor_row * per_line + self.cursor_col / width.max(1)
     }
 
     /// Put text in the box for the next read (edit a queued message, for example).
@@ -174,6 +193,7 @@ impl Editor {
         self.notice = None;
         self.drawn_rows = 0;
         self.cursor_row = 0;
+        self.drawn_width = 0;
         self.refresh_items();
         self.render(term, prompt);
         loop {
@@ -275,11 +295,14 @@ impl Editor {
                 }
                 return Some(Input::Submit(self.take()));
             }
+            KeyCode::BackTab => return Some(Input::CyclePermission),
+            KeyCode::Tab if shift => return Some(Input::CyclePermission),
             KeyCode::Tab => {
                 if let Some(item) = self.items.get(self.selected).cloned() {
                     self.apply(&item);
                 }
             }
+            KeyCode::Char('p') if ctrl => return Some(Input::PickModel),
             KeyCode::Esc => {
                 if !self.items.is_empty() {
                     self.dismissed = true;
@@ -583,15 +606,17 @@ impl Editor {
         (rows, cur_row, cur_col)
     }
 
-    fn clear(&mut self, _term: &Term) {
+    fn clear(&mut self, term: &Term) {
         let mut out = std::io::stdout();
-        if self.cursor_row > 0 {
-            let _ = write!(out, "\x1b[{}A", self.cursor_row);
+        let up = self.rows_above(term.width());
+        if up > 0 {
+            let _ = write!(out, "\x1b[{up}A");
         }
         let _ = write!(out, "\r\x1b[J");
         let _ = out.flush();
         self.drawn_rows = 0;
         self.cursor_row = 0;
+        self.drawn_width = 0;
     }
 
     fn render(&mut self, term: &Term, prompt: &Prompt) {
@@ -632,7 +657,8 @@ impl Editor {
             Some(notice) => format!("{}{notice}{RESET}", tui::AMBER),
             None => prompt.footer_left.clone(),
         };
-        let right = &prompt.footer_right;
+        // Narrow terminals keep the left side, which carries notices.
+        let right = if width < 60 { "" } else { prompt.footer_right.as_str() };
         let room = width.saturating_sub(tui::visible_width(right) + 4);
         let left = if tui::visible_width(&left) > room {
             tui::ellipsize_end(&tui::strip_ansi(&left), room)
@@ -658,8 +684,9 @@ impl Editor {
 
         let mut out = std::io::stdout();
         let mut frame = String::new();
-        if self.cursor_row > 0 {
-            frame.push_str(&format!("\x1b[{}A", self.cursor_row));
+        let up_from = self.rows_above(width);
+        if up_from > 0 {
+            frame.push_str(&format!("\x1b[{up_from}A"));
         }
         frame.push_str("\r\x1b[J");
         frame.push_str(&lines.join("\r\n"));
@@ -675,6 +702,8 @@ impl Editor {
         let _ = out.flush();
         self.drawn_rows = total;
         self.cursor_row = target_row;
+        self.drawn_width = width;
+        self.cursor_col = 4 + cur_col;
     }
 }
 

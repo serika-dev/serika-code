@@ -676,6 +676,9 @@ fn event_json(event: AgentEvent) -> Option<Value> {
             value["agent"] = json!(true);
             value
         }
+        AgentEvent::Handoff { from, to, messages } => json!({
+            "event": "handoff", "from": from, "to": to, "messages": messages
+        }),
         AgentEvent::ProviderUsage { provider, usage } => json!({
             "event": "providerUsage", "provider": provider,
             "usage": serde_json::to_value(usage).unwrap_or(Value::Null)
@@ -979,6 +982,7 @@ fn open_session(host: &Host, id: &str) -> Result<Value, String> {
 /// one assistant turn per prompt, with the tools that ran during that turn.
 fn build_turns(messages: &[StoredMessage], tools: &[ToolRun]) -> Vec<Value> {
     let mut turns: Vec<Value> = Vec::new();
+    let mut last_model: Option<String> = None;
     for message in messages {
         if message.role == "user" && message.content.starts_with("Tool results:\n") {
             continue;
@@ -994,11 +998,20 @@ fn build_turns(messages: &[StoredMessage], tools: &[ToolRun]) -> Vec<Value> {
                 join_field(last, "reasoning", reasoning.trim());
                 continue;
             }
+            // A reply from a different model than the previous one marks a switch.
+            if let Some(model) = message.model.clone().filter(|m| !m.is_empty()) {
+                if let Some(previous) = last_model.as_ref().filter(|p| **p != model) {
+                    // Between your message and the reply, as it appeared live.
+                    turns.push(json!({"role": "switch", "from": previous, "to": model, "content": ""}));
+                }
+                last_model = Some(model);
+            }
             turns.push(json!({
                 "role": "assistant",
                 "content": visible.trim(),
                 "reasoning": reasoning.trim(),
                 "createdAt": message.created_at,
+                "model": message.model.clone().unwrap_or_default(),
                 "tools": [],
             }));
         } else {

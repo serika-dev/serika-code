@@ -268,6 +268,29 @@ pub fn print_banner(term: &Term, info: &Banner<'_>) {
     }
     let width = term.width();
     outln!();
+    if width < 64 {
+        // Narrow terminal: one line of brand, then the facts without a box.
+        outln!("  {}  {DIM}v{}{RESET}", gradient_text("▌ Serika Code"), info.version);
+        outln!();
+        let dir = match info.branch {
+            Some(branch) => format!("{}  {VIOLET_LIGHT}⎇ {branch}{RESET}", pretty_path(info.directory)),
+            None => pretty_path(info.directory),
+        };
+        for (label, value) in [
+            ("model", format!("{BOLD}{}{RESET}", info.model)),
+            ("via", info.provider.to_string()),
+            ("folder", dir),
+            ("mode", info.permission.to_string()),
+        ] {
+            let room = width.saturating_sub(12);
+            let value = if visible_width(&value) > room { ellipsize_start(&strip_ansi(&value), room) } else { value };
+            outln!("  {DIM}{label:<8}{RESET}{value}");
+        }
+        outln!();
+        outln!("  {DIM}/ commands · @ files · Shift+Tab mode · Ctrl+P model{RESET}");
+        outln!();
+        return;
+    }
     if width >= 50 {
         // The shadow strokes (╗ ║ ═ …) stay dim so the letters read first.
         for row in LOGO {
@@ -338,7 +361,8 @@ pub fn print_banner(term: &Term, info: &Banner<'_>) {
     outln!();
     outln!("  {BOLD}Tips{RESET}");
     for (key, tip) in [
-        ("/", "commands  ·  @ mention files  ·  drop an image path to attach it"),
+        ("/", "commands  ·  @ mention files  ·  !run a shell command"),
+        ("Ctrl+P", "switch model mid-chat  ·  Shift+Tab permissions"),
         ("Shift+Enter", "new line  ·  ↑↓ history  ·  Esc interrupts a reply"),
         ("Enter while busy", "queues your next message"),
     ] {
@@ -347,8 +371,8 @@ pub fn print_banner(term: &Term, info: &Banner<'_>) {
     outln!();
 }
 
-pub const COMMANDS: [(&str, &str, &str); 24] = [
-    ("/model", "[id]", "pick a model: Serika, Claude Code, Codex, or local"),
+pub const COMMANDS: &[(&str, &str, &str)] = &[
+    ("/model", "[id]", "switch model, even mid-chat: Serika, Claude Code, Codex, local"),
     ("/provider", "", "Claude Code and Codex: sign-in, models, limits"),
     ("/permissions", "[mode]", "what Serika may do without asking"),
     ("/effort", "[level]", "reasoning effort for Claude Code and Codex"),
@@ -358,6 +382,13 @@ pub const COMMANDS: [(&str, &str, &str); 24] = [
     ("/sessions", "", "pick a saved conversation to continue"),
     ("/resume", "[id]", "continue a saved conversation"),
     ("/compact", "", "summarise the chat and continue from the summary"),
+    ("/undo", "", "take back the last message and its file changes"),
+    ("/retry", "", "ask again for a new reply to your last message"),
+    ("/copy", "", "copy the last reply to the clipboard"),
+    ("/export", "[file]", "save this conversation as Markdown"),
+    ("/rename", "<title>", "rename this conversation"),
+    ("/stats", "", "messages, tools, files changed, and models used"),
+    ("/init", "", "have Serika write SERIKA.md with notes about this project"),
     ("/diff", "", "show uncommitted changes"),
     ("/review", "[focus]", "ask Serika to review your changes"),
     ("/browser", "<url|on|off|close>", "open a page in Serika's browser"),
@@ -377,7 +408,7 @@ pub const COMMANDS: [(&str, &str, &str); 24] = [
 pub fn print_help(term: &Term) {
     outln!();
     outln!("  {}", term.bold("Commands"));
-    for (cmd, args, help) in COMMANDS {
+    for &(cmd, args, help) in COMMANDS {
         let left = if args.is_empty() { cmd.to_string() } else { format!("{cmd} {args}") };
         outln!("  {}  {}", term.accent(&format!("{left:<26}")), term.dim(help));
     }
@@ -385,6 +416,9 @@ pub fn print_help(term: &Term) {
     outln!("  {}", term.bold("Keys"));
     for (key, help) in [
         ("Enter", "send (queues it while a reply runs)"),
+        ("!command", "run a shell command; its output goes with your next message"),
+        ("Shift+Tab", "cycle permissions: supervised, auto-accept, full, read-only"),
+        ("Ctrl+P", "switch model without losing the conversation"),
         ("Shift+Enter, Alt+Enter, Ctrl+J", "new line (or end a line with \\)"),
         ("↑ ↓", "history, or move in a list"),
         ("Tab", "complete a command or @file"),
@@ -406,11 +440,15 @@ pub fn user_cell(term: &Term, text: &str, attachments: &[String]) {
         return;
     }
     let width = term.width();
-    for (i, line) in text.lines().enumerate() {
-        let prefix = if i == 0 { format!("{VIOLET}{BOLD}›{RESET}{USER_BG} ") } else { "  ".to_string() };
-        let body = format!("{prefix}{USER_BG}{line}");
-        let pad = width.saturating_sub(visible_width(&body) % width.max(1));
-        outln!("{USER_BG}{body}{USER_BG}{}{RESET}", " ".repeat(pad.min(width)));
+    let mut first = true;
+    for line in text.lines() {
+        for piece in wrap_ansi(line, width.saturating_sub(4).max(10)) {
+            let prefix = if first { format!("{VIOLET}{BOLD}›{RESET}{USER_BG} ") } else { "  ".to_string() };
+            first = false;
+            let body = format!("{prefix}{USER_BG}{piece}");
+            let pad = width.saturating_sub(visible_width(&body) + 1);
+            outln!("{USER_BG}{body}{USER_BG}{}{RESET}", " ".repeat(pad));
+        }
     }
     for name in attachments {
         outln!("  {DIM}📎 {name}{RESET}");
@@ -492,6 +530,9 @@ pub struct TurnRenderer {
     draft: String,
     interrupt_hint: &'static str,
     pub summary: String,
+    tools_run: usize,
+    tools_failed: usize,
+    files_edited: Vec<String>,
 }
 
 impl TurnRenderer {
@@ -517,6 +558,9 @@ impl TurnRenderer {
             draft: String::new(),
             interrupt_hint: "Ctrl+C to interrupt",
             summary: String::new(),
+            tools_run: 0,
+            tools_failed: 0,
+            files_edited: Vec::new(),
         }
     }
 
@@ -662,15 +706,26 @@ impl TurnRenderer {
             self.msg_started = true;
             format!("{VIOLET_LIGHT}●{RESET} ")
         };
-        let body = match &self.fence {
+        match &self.fence {
             Some(lang) => {
                 let width = self.term.width().saturating_sub(8);
                 let code = if line.chars().count() > width { ellipsize_end(line, width) } else { line.to_string() };
-                format!("{DIM}│{RESET} {}", highlight::line(&code, lang, &mut self.highlight))
+                outln!("{prefix}{DIM}│{RESET} {}", highlight::line(&code, lang, &mut self.highlight));
             }
-            None => render_markdown_line(line, self.term.width()),
-        };
-        outln!("{prefix}{body}");
+            None => {
+                // Wrap prose at the terminal edge, continuing under the text (not under the bullet).
+                let body = render_markdown_line(line, self.term.width());
+                let hang = hanging_indent(line);
+                let width = self.term.width().saturating_sub(3).max(20);
+                for (i, piece) in wrap_ansi(&body, width).into_iter().enumerate() {
+                    if i == 0 {
+                        outln!("{prefix}{piece}");
+                    } else {
+                        outln!("  {}{piece}", " ".repeat(hang));
+                    }
+                }
+            }
+        }
     }
 
     pub fn tool_requested(&mut self, id: &str, name: &str, arguments: &str) {
@@ -705,6 +760,10 @@ impl TurnRenderer {
         }
         self.flush_partial_message();
         self.clear_spinner();
+        self.tools_run += 1;
+        if !ok {
+            self.tools_failed += 1;
+        }
         let (args, started) = self
             .tools
             .get(id)
@@ -780,10 +839,30 @@ impl TurnRenderer {
         }
         self.flush_partial_message();
         self.clear_spinner();
+        if !self.files_edited.iter().any(|p| p == path) {
+            self.files_edited.push(path.to_string());
+        }
         let (adds, dels) = diff_counts(diff);
         outln!("{GREEN}╭{RESET} {GREEN}✓{RESET} ✎ {BOLD}Edited{RESET} {path} {GREEN}+{adds}{RESET} {RED}-{dels}{RESET}");
         print_diff_body(&self.term, diff, 40, &format!("{GREEN}│{RESET}"));
         outln!("{GREEN}╰{RESET}");
+    }
+
+    /// A divider where the chat moved to another model.
+    pub fn handoff(&mut self, from: &str, to: &str, messages: usize) {
+        if !self.term.fancy {
+            errln!("switched from {from} to {to}; {messages} earlier messages handed over");
+            return;
+        }
+        self.flush_partial_message();
+        self.clear_spinner();
+        let from = if from.is_empty() { "the previous model".to_string() } else { from.to_string() };
+        let label = format!(
+            " ⇄ {from} → {BOLD}{to}{RESET}{DIM} · {messages} earlier message{} handed over ",
+            if messages == 1 { "" } else { "s" }
+        );
+        let side = self.term.width().saturating_sub(visible_width(&label) + 4) / 2;
+        outln!("{DIM}{}{RESET}{VIOLET_LIGHT}{label}{RESET}{DIM}{}{RESET}", "╌".repeat(side.max(2)), "╌".repeat(side.max(2)));
     }
 
     pub fn usage(&mut self, summary: String) {
@@ -853,15 +932,27 @@ impl TurnRenderer {
             return;
         }
         let secs = self.started.elapsed().as_secs_f32();
-        let mut footer = format!("Worked for {secs:.1}s");
-        if let Some(u) = &self.usage {
-            footer.push_str(" · ");
-            footer.push_str(u);
+        let took = if secs >= 60.0 {
+            format!("{}m {:02}s", secs as u64 / 60, secs as u64 % 60)
+        } else {
+            format!("{secs:.1}s")
+        };
+        let mut parts = vec![format!("{BOLD}Done{RESET}{DIM} in {took}")];
+        if self.tools_run > 0 {
+            let failed = if self.tools_failed > 0 { format!(" ({} failed)", self.tools_failed) } else { String::new() };
+            parts.push(format!("{} tool{}{failed}", self.tools_run, if self.tools_run == 1 { "" } else { "s" }));
         }
+        if !self.files_edited.is_empty() {
+            let n = self.files_edited.len();
+            parts.push(format!("{n} file{} edited", if n == 1 { "" } else { "s" }));
+        }
+        if let Some(u) = &self.usage {
+            parts.push(u.clone());
+        }
+        let label = format!(" {GREEN}✓{RESET} {}{RESET} ", parts.join(" · "));
         let width = self.term.width();
-        let label = format!(" {footer} ");
-        let side = width.saturating_sub(label.chars().count() + 2) / 2;
-        errln!("{DIM}{}{label}{}{RESET}", "─".repeat(side.max(2)), "─".repeat(side.max(2)));
+        let room = width.saturating_sub(visible_width(&label) + 4);
+        errln!("{DIM}──{RESET}{label}{DIM}{}{RESET}", "─".repeat(room.min(width)));
         write_err("\x1b[?25h");
     }
 }
@@ -1217,6 +1308,107 @@ fn inline(text: &str, base: &str) -> String {
     out
 }
 
+/// "weekly 0.4% used" from Serika's usage answer; the plan name when no window is known.
+pub fn usage_brief(usage: &serika_runtime::UsageSnapshot) -> String {
+    let Some(plan) = &usage.plan else { return String::new() };
+    let pct = |w: &Option<serika_runtime::model::UsageWindow>| {
+        w.as_ref().and_then(|w| match (w.used, w.limit) {
+            (Some(used), Some(limit)) if limit > 0 => Some(used as f64 * 100.0 / limit as f64),
+            _ => None,
+        })
+    };
+    let show = |p: f64| if p > 0.0 && p < 10.0 { format!("{p:.1}%") } else { format!("{p:.0}%") };
+    match (pct(&plan.session), pct(&plan.weekly)) {
+        (Some(s), Some(w)) => format!("session {} · week {} used", show(s), show(w)),
+        (None, Some(w)) => format!("week {} used", show(w)),
+        (Some(s), None) => format!("session {} used", show(s)),
+        (None, None) => plan.tier.as_ref().and_then(|t| t.name.clone()).unwrap_or_default(),
+    }
+}
+
+/// A readable name for a model id when no catalog name is at hand.
+pub fn pretty_model(id: &str) -> String {
+    if let Some(rest) = id.strip_prefix("claude-code/") {
+        return format!("Claude Code {rest}");
+    }
+    if let Some(rest) = id.strip_prefix("codex/") {
+        return format!("Codex {rest}");
+    }
+    id.to_string()
+}
+
+/// Columns a wrapped markdown line continues at: its indent plus a list marker.
+fn hanging_indent(line: &str) -> usize {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+    let marker = if trimmed.starts_with("- [") || trimmed.starts_with("* [") {
+        2
+    } else if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") || trimmed.starts_with("> ") {
+        2
+    } else if digits > 0 && (trimmed[digits..].starts_with(". ") || trimmed[digits..].starts_with(") ")) {
+        digits + 2
+    } else {
+        0
+    };
+    indent + marker
+}
+
+/// Break styled text into lines of at most `width` columns at spaces. Escape codes are kept
+/// and cost no width; a word longer than a line is split.
+pub fn wrap_ansi(text: &str, width: usize) -> Vec<String> {
+    if visible_width(text) <= width {
+        return vec![text.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut line_w = 0usize;
+    let mut word = String::new();
+    let mut word_w = 0usize;
+    let mut chars = text.chars().peekable();
+    let flush_word = |lines: &mut Vec<String>, line: &mut String, line_w: &mut usize, word: &mut String, word_w: &mut usize| {
+        if *line_w > 0 && *line_w + *word_w > width {
+            lines.push(std::mem::take(line).trim_end().to_string());
+            *line_w = 0;
+            let trimmed = word.trim_start().to_string();
+            *word_w -= word.len() - trimmed.len();
+            *word = trimmed;
+        }
+        line.push_str(word);
+        *line_w += *word_w;
+        word.clear();
+        *word_w = 0;
+    };
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            word.push(c);
+            for c in chars.by_ref() {
+                word.push(c);
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        if c == ' ' && word_w > 0 && !word.ends_with(' ') {
+            flush_word(&mut lines, &mut line, &mut line_w, &mut word, &mut word_w);
+        }
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if word_w + w > width && line_w == 0 {
+            // A single word wider than the line.
+            lines.push(std::mem::take(&mut word));
+            word_w = 0;
+        }
+        word.push(c);
+        word_w += w;
+    }
+    flush_word(&mut lines, &mut line, &mut line_w, &mut word, &mut word_w);
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
 pub fn pretty_path(path: &Path) -> String {
     let full = path.display().to_string();
     if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
@@ -1376,6 +1568,17 @@ mod tests {
         assert_eq!(strip_ansi(&render_markdown_line("1. first", 80)), "1. first");
         assert_eq!(strip_ansi(&render_markdown_line("- item", 80)), "• item");
         assert_eq!(strip_ansi(&render_markdown_line("| a | b |", 80)), "│ a │ b │");
+    }
+
+    #[test]
+    fn wraps_styled_text_at_spaces() {
+        let text = format!("one {BOLD}two{RESET} three four five");
+        let lines = wrap_ansi(&text, 10);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(plain, vec!["one two", "three four", "five"]);
+        assert!(lines[0].contains(BOLD));
+        assert_eq!(hanging_indent("  - item"), 4);
+        assert_eq!(hanging_indent("12. step"), 4);
     }
 
     #[test]

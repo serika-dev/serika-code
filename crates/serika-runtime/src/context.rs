@@ -20,7 +20,12 @@ pub fn brief(root: &Path, files: &[RelFile], changed: &[String]) -> String {
             manifests.push(file.relative.as_str());
         }
     }
-    let mut text = format!("Project: {}\nFiles indexed: {}\n", root.display(), files.len());
+    let mut text = String::new();
+    // Notes the project keeps for agents come first, so the length limit never cuts them.
+    if let Some((name, notes)) = project_notes(root) {
+        text.push_str(&format!("Project notes from {name} (follow them):\n{notes}\n\n"));
+    }
+    text.push_str(&format!("Project: {}\nFiles indexed: {}\n", root.display(), files.len()));
     if !languages.is_empty() {
         text.push_str("Languages: ");
         text.push_str(
@@ -59,6 +64,20 @@ pub fn brief(root: &Path, files: &[RelFile], changed: &[String]) -> String {
         text.push('\n');
     }
     text
+}
+
+/// SERIKA.md, else AGENTS.md, else CLAUDE.md in the project root, up to 6,000 characters.
+pub fn project_notes(root: &Path) -> Option<(&'static str, String)> {
+    for name in ["SERIKA.md", "AGENTS.md", "CLAUDE.md"] {
+        let Ok(text) = std::fs::read_to_string(root.join(name)) else { continue };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let clipped: String = text.chars().take(6_000).collect();
+        return Some((name, clipped));
+    }
+    None
 }
 
 fn readme_excerpt(root: &Path) -> Option<String> {
@@ -111,5 +130,15 @@ mod tests {
         assert_eq!(trimmed.first().unwrap().role, "system");
         assert_eq!(trimmed.last().unwrap().content, "latest");
         assert!(trimmed.len() < 4);
+    }
+
+    #[test]
+    fn project_notes_lead_the_brief() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Use tabs.").unwrap();
+        let text = brief(dir.path(), &[], &[]);
+        assert!(text.starts_with("Project notes from AGENTS.md (follow them):\nUse tabs."));
+        std::fs::write(dir.path().join("SERIKA.md"), "Prefer SERIKA.").unwrap();
+        assert_eq!(project_notes(dir.path()).unwrap().0, "SERIKA.md");
     }
 }

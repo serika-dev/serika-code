@@ -30,6 +30,8 @@ pub enum AgentEvent {
     FileChanged(FileDiff),
     /// The agent's browser changed: current page and a screenshot (base64 JPEG).
     Browser { frame: crate::browser::Frame },
+    /// The chat moved to another model; `messages` earlier messages went along as context.
+    Handoff { from: String, to: String, messages: usize },
     /// Subscription usage windows reported by Claude Code or Codex.
     ProviderUsage {
         provider: String,
