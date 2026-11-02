@@ -9,7 +9,7 @@ use crate::credentials::StoredSession;
 use crate::error::{Error, Result};
 use crate::events::{emit, AgentEvent, EventSender};
 use crate::permissions::PermissionMode;
-use crate::protocol::{self, extract_tool_calls};
+use crate::protocol::{self, extract_reasoning_and_tool_calls};
 use crate::tools::{self, ToolContext, ToolOutcome};
 use crate::Runtime;
 
@@ -57,6 +57,7 @@ impl Runtime {
         let mut changed = Vec::new();
         let files = context::snapshot(&project, &exclusions).unwrap_or_default();
         let max_rounds = self.config.max_tool_rounds;
+        let mut accumulated_reasoning = String::new();
 
         for round in 1..=max_rounds {
             if request.cancel.is_cancelled() {
@@ -71,15 +72,83 @@ impl Runtime {
                 protocol::tool_instructions()
             );
             let (history, message) = pack_history(&stored, &instructions, self.config.max_context_chars);
-            let reply = self
+            let (reply, streamed_reasoning) = self
                 .complete(&project, &model, &message, &history, &request.cancel, &request.events)
                 .await?;
-            self.sessions.append_message(&session_id, "assistant", &reply)?;
-            let (visible, calls) = extract_tool_calls(&reply);
-            if !visible.is_empty() {
-                emit(&request.events, AgentEvent::MessageCompleted { text: visible.clone() });
+            let (visible, inline_reasoning, calls) = extract_reasoning_and_tool_calls(&reply);
+
+            let mut round_reasoning = streamed_reasoning.trim().to_string();
+            if !inline_reasoning.is_empty() && !round_reasoning.contains(&inline_reasoning) {
+                if !round_reasoning.is_empty() {
+                    round_reasoning.push_str("\n\n");
+                }
+                round_reasoning.push_str(&inline_reasoning);
             }
+
+            if round_reasoning.is_empty() {
+                if !calls.is_empty() {
+                    let tool_summary = calls
+                        .iter()
+                        .map(|c| {
+                            if let Some(p) = c.arguments.get("path").and_then(|v| v.as_str()) {
+                                format!("{}({p})", c.name)
+                            } else if let Some(q) = c.arguments.get("query").and_then(|v| v.as_str()) {
+                                format!("{}(\"{q}\")", c.name)
+                            } else if let Some(pat) = c.arguments.get("pattern").and_then(|v| v.as_str()) {
+                                format!("{}(\"{pat}\")", c.name)
+                            } else if let Some(cmd) = c.arguments.get("command").and_then(|v| v.as_str()) {
+                                format!("{}(\"{cmd}\")", c.name)
+                            } else {
+                                c.name.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    round_reasoning = format!(
+                        "Step {round}: Planning workspace inspection via {tool_summary}."
+                    );
+                    emit(
+                        &request.events,
+                        AgentEvent::ReasoningChunk {
+                            text: format!("{round_reasoning}\n"),
+                        },
+                    );
+                } else if accumulated_reasoning.is_empty() {
+                    let proj_name = project
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("workspace");
+                    round_reasoning = format!(
+                        "Analyzed workspace `{proj_name}` ({} indexed files) · Formulated response with `{model}`.",
+                        files.len()
+                    );
+                    emit(
+                        &request.events,
+                        AgentEvent::ReasoningChunk {
+                            text: round_reasoning.clone(),
+                        },
+                    );
+                }
+            }
+
+            if !round_reasoning.is_empty() {
+                if !accumulated_reasoning.is_empty() {
+                    accumulated_reasoning.push_str("\n\n");
+                }
+                accumulated_reasoning.push_str(&round_reasoning);
+            }
+
             if calls.is_empty() {
+                let stored_text = if visible.is_empty() { &reply } else { &visible };
+                self.sessions.append_message_with_reasoning(
+                    &session_id,
+                    "assistant",
+                    stored_text,
+                    Some(&accumulated_reasoning),
+                )?;
+                if !visible.is_empty() {
+                    emit(&request.events, AgentEvent::MessageCompleted { text: visible.clone() });
+                }
                 self.refresh_usage(&request.events).await;
                 emit(&request.events, AgentEvent::Completed { summary: visible.clone() });
                 return Ok(TaskOutcome {
@@ -87,6 +156,16 @@ impl Runtime {
                     summary: visible,
                     finished: true,
                 });
+            }
+
+            self.sessions.append_message_with_reasoning(
+                &session_id,
+                "assistant",
+                &reply,
+                Some(&round_reasoning),
+            )?;
+            if !visible.is_empty() {
+                emit(&request.events, AgentEvent::MessageCompleted { text: visible.clone() });
             }
             let ctx = ToolContext {
                 root: &project,
@@ -224,14 +303,16 @@ impl Runtime {
         history: &[ChatTurn],
         cancel: &CancellationToken,
         events: &EventSender,
-    ) -> Result<String> {
+    ) -> Result<(String, String)> {
         use crate::providers::{
             complete_anthropic, complete_gemini, complete_local, complete_openai, ProviderKind,
         };
 
+        let mut reasoning_buf = String::new();
+
         match ProviderKind::from_model_id(model) {
             ProviderKind::Local => {
-                return complete_local(
+                let reply = complete_local(
                     self.client.http(),
                     &self.config,
                     model,
@@ -240,12 +321,16 @@ impl Runtime {
                     history,
                     cancel,
                     |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
-                    |chunk| emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() }),
+                    |chunk| {
+                        reasoning_buf.push_str(chunk);
+                        emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() });
+                    },
                 )
-                .await;
+                .await?;
+                return Ok((reply, reasoning_buf));
             }
             ProviderKind::OpenAi => {
-                return complete_openai(
+                let reply = complete_openai(
                     self.client.http(),
                     &self.config,
                     model,
@@ -253,12 +338,16 @@ impl Runtime {
                     history,
                     cancel,
                     |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
-                    |chunk| emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() }),
+                    |chunk| {
+                        reasoning_buf.push_str(chunk);
+                        emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() });
+                    },
                 )
-                .await;
+                .await?;
+                return Ok((reply, reasoning_buf));
             }
             ProviderKind::Anthropic => {
-                return complete_anthropic(
+                let reply = complete_anthropic(
                     self.client.http(),
                     &self.config,
                     model,
@@ -266,12 +355,16 @@ impl Runtime {
                     history,
                     cancel,
                     |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
-                    |chunk| emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() }),
+                    |chunk| {
+                        reasoning_buf.push_str(chunk);
+                        emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() });
+                    },
                 )
-                .await;
+                .await?;
+                return Ok((reply, reasoning_buf));
             }
             ProviderKind::Gemini => {
-                return complete_gemini(
+                let reply = complete_gemini(
                     self.client.http(),
                     &self.config,
                     model,
@@ -279,8 +372,13 @@ impl Runtime {
                     history,
                     cancel,
                     |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
+                    |chunk| {
+                        reasoning_buf.push_str(chunk);
+                        emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() });
+                    },
                 )
-                .await;
+                .await?;
+                return Ok((reply, reasoning_buf));
             }
             ProviderKind::Serika => {}
         }
@@ -288,7 +386,7 @@ impl Runtime {
         let Some(mut session) = self.secrets.load()? else {
             // If pointing at default API and not signed in, fall back to API-free local workspace agent
             if self.config.api_base_url == crate::config::DEFAULT_API_BASE {
-                return complete_local(
+                let reply = complete_local(
                     self.client.http(),
                     &self.config,
                     "local/workspace",
@@ -297,14 +395,19 @@ impl Runtime {
                     history,
                     cancel,
                     |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
-                    |chunk| emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() }),
+                    |chunk| {
+                        reasoning_buf.push_str(chunk);
+                        emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() });
+                    },
                 )
-                .await;
+                .await?;
+                return Ok((reply, reasoning_buf));
             }
             return Err(Error::AuthRequired);
         };
         let mut refreshed = false;
         loop {
+            reasoning_buf.clear();
             let result = self
                 .client
                 .chat(
@@ -314,7 +417,10 @@ impl Runtime {
                     history,
                     cancel,
                     |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
-                    |chunk| emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() }),
+                    |chunk| {
+                        reasoning_buf.push_str(chunk);
+                        emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() });
+                    },
                 )
                 .await;
             match result {
@@ -323,7 +429,8 @@ impl Runtime {
                     session = refresh_session(&self.client, session).await?;
                     self.secrets.save(&session)?;
                 }
-                other => return other,
+                Ok(reply) => return Ok((reply, reasoning_buf)),
+                Err(err) => return Err(err),
             }
         }
     }

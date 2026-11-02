@@ -21,6 +21,7 @@ pub struct StoredMessage {
     pub id: i64,
     pub role: String,
     pub content: String,
+    pub reasoning: Option<String>,
     pub created_at: i64,
 }
 
@@ -65,6 +66,7 @@ impl SessionStore {
                 session_id TEXT NOT NULL,
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
+                reasoning TEXT,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
              );
@@ -105,6 +107,7 @@ impl SessionStore {
              CREATE INDEX IF NOT EXISTS changes_session ON changes(session_id);
              CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated_at);",
         )?;
+        let _ = conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT", []);
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -303,10 +306,21 @@ impl SessionStore {
     }
 
     pub fn append_message(&self, session_id: &str, role: &str, content: &str) -> Result<i64> {
+        self.append_message_with_reasoning(session_id, role, content, None)
+    }
+
+    pub fn append_message_with_reasoning(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+        reasoning: Option<&str>,
+    ) -> Result<i64> {
+        let clean_reasoning = reasoning.map(str::trim).filter(|s| !s.is_empty());
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, role, content, now_secs()],
+            "INSERT INTO messages (session_id, role, content, reasoning, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, role, content, clean_reasoning, now_secs()],
         )?;
         let id = conn.last_insert_rowid();
         conn.execute(
@@ -319,13 +333,32 @@ impl SessionStore {
     pub fn messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, role, content, created_at FROM messages WHERE session_id = ?1 ORDER BY id ASC",
+            "SELECT id, role, content, created_at, reasoning FROM messages WHERE session_id = ?1 ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
+            let role: String = row.get(1)?;
+            let raw_content: String = row.get(2)?;
+            let db_reasoning: Option<String> = row.get(4)?;
+            let (content, reasoning) = if role == "assistant" {
+                let (without_think, inline_think) = crate::protocol::extract_think_blocks(&raw_content);
+                let combined_reasoning = match (
+                    db_reasoning.filter(|s| !s.trim().is_empty()),
+                    (!inline_think.is_empty()).then_some(inline_think),
+                ) {
+                    (Some(a), Some(b)) if !a.contains(&b) => Some(format!("{a}\n\n{b}")),
+                    (Some(a), _) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+                (without_think, combined_reasoning)
+            } else {
+                (raw_content, db_reasoning)
+            };
             Ok(StoredMessage {
                 id: row.get(0)?,
-                role: row.get(1)?,
-                content: row.get(2)?,
+                role,
+                content,
+                reasoning,
                 created_at: row.get(3)?,
             })
         })?;

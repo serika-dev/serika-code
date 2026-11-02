@@ -167,7 +167,7 @@ impl SerikaClient {
         let body = json!({
             "message": message,
             "modelID": model_id,
-            "stream": true,
+            "stream": false,
             "temporary": true,
             "conversationHistory": history_json,
             "webSearch": false,
@@ -194,6 +194,7 @@ impl SerikaClient {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut full = String::new();
+        let mut splitter = crate::protocol::ThinkStreamSplitter::new();
         loop {
             let next = tokio::select! {
                 _ = cancel.cancelled() => return Err(Error::Cancelled),
@@ -206,21 +207,36 @@ impl SerikaClient {
                 match item {
                     SseItem::Content(text) => {
                         full.push_str(&text);
-                        on_content(&text);
+                        splitter.feed(&text, &mut on_content, &mut on_reasoning);
                     }
                     SseItem::Reasoning(text) => on_reasoning(&text),
-                    SseItem::Done => return Ok(full),
+                    SseItem::Done => {
+                        splitter.flush(&mut on_content, &mut on_reasoning);
+                        return Ok(full);
+                    }
                     SseItem::Error(message) => return Err(Error::msg(message)),
                 }
             }
         }
+        splitter.flush(&mut on_content, &mut on_reasoning);
         if full.is_empty() && !buffer.trim().is_empty() {
             if let Ok(value) = serde_json::from_str::<Value>(&buffer) {
-                if let Some(content) = value.get("content").and_then(|item| item.as_str()) {
-                    return Ok(content.to_string());
-                }
                 if value.get("error").is_some() {
                     return Err(Error::msg(message_of(&value)));
+                }
+                for r_key in ["reasoning", "reasoning_content", "thinking", "thought"] {
+                    if let Some(r_txt) = value.get(r_key).and_then(|item| item.as_str()) {
+                        if !r_txt.trim().is_empty() {
+                            on_reasoning(r_txt);
+                            break;
+                        }
+                    }
+                }
+                if let Some(content) = value.get("content").and_then(|item| item.as_str()) {
+                    let mut json_splitter = crate::protocol::ThinkStreamSplitter::new();
+                    json_splitter.feed(content, &mut on_content, &mut on_reasoning);
+                    json_splitter.flush(&mut on_content, &mut on_reasoning);
+                    return Ok(content.to_string());
                 }
             }
         }
@@ -423,14 +439,12 @@ pub fn drain_sse(buffer: &mut String) -> Vec<SseItem> {
     while let Some(index) = buffer.find("\n\n") {
         let raw = buffer[..index].to_string();
         buffer.replace_range(..index + 2, "");
-        if let Some(item) = parse_sse_event(&raw) {
-            items.push(item);
-        }
+        parse_sse_events(&raw, &mut items);
     }
     items
 }
 
-fn parse_sse_event(raw: &str) -> Option<SseItem> {
+fn parse_sse_events(raw: &str, out: &mut Vec<SseItem>) {
     let mut data = String::new();
     for line in raw.lines() {
         let line = line.trim_end_matches('\r');
@@ -443,31 +457,40 @@ fn parse_sse_event(raw: &str) -> Option<SseItem> {
     }
     let data = data.trim();
     if data.is_empty() {
-        return None;
+        return;
     }
     if data == "[DONE]" {
-        return Some(SseItem::Done);
+        out.push(SseItem::Done);
+        return;
     }
     if data == "[ERROR]" {
-        return Some(SseItem::Error("AI generation failed".into()));
+        out.push(SseItem::Error("AI generation failed".into()));
+        return;
     }
-    let value: Value = serde_json::from_str(data).ok()?;
+    let Some(value) = serde_json::from_str::<Value>(data).ok() else {
+        return;
+    };
     if let Some(message) = value.get("error").and_then(value_message) {
         let details = value.get("details").and_then(|item| item.as_str()).unwrap_or("");
         if details.is_empty() {
-            return Some(SseItem::Error(message));
+            out.push(SseItem::Error(message));
+        } else {
+            out.push(SseItem::Error(format!("{message}: {details}")));
         }
-        return Some(SseItem::Error(format!("{message}: {details}")));
+        return;
+    }
+    for r_key in ["reasoning", "reasoning_content", "thinking", "thought"] {
+        if let Some(r_txt) = value.get(r_key).and_then(|item| item.as_str()) {
+            if !r_txt.is_empty() {
+                out.push(SseItem::Reasoning(r_txt.to_string()));
+                break;
+            }
+        }
     }
     let content = value.get("content").and_then(|item| item.as_str()).unwrap_or("");
-    let reasoning = value.get("reasoning").and_then(|item| item.as_str()).unwrap_or("");
     if !content.is_empty() {
-        return Some(SseItem::Content(content.to_string()));
+        out.push(SseItem::Content(content.to_string()));
     }
-    if !reasoning.is_empty() {
-        return Some(SseItem::Reasoning(reasoning.to_string()));
-    }
-    None
 }
 
 #[cfg(test)]

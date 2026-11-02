@@ -728,7 +728,7 @@ pub async fn complete_local(
     history: &[ChatTurn],
     cancel: &CancellationToken,
     mut on_content: impl FnMut(&str),
-    on_reasoning: impl FnMut(&str),
+    mut on_reasoning: impl FnMut(&str),
 ) -> Result<String> {
     // 1. Local Ollama model (`local/ollama:<model>`)
     if let Some(ollama_model) = model_id.strip_prefix("local/ollama:") {
@@ -741,6 +741,7 @@ pub async fn complete_local(
             history,
             cancel,
             on_content,
+            on_reasoning,
         )
         .await;
     }
@@ -774,7 +775,15 @@ pub async fn complete_local(
         {
             if let Some(om) = sub.strip_prefix("ollama:") {
                 return complete_ollama_http_or_cli(
-                    http, config, om, project, message, history, cancel, on_content,
+                    http,
+                    config,
+                    om,
+                    project,
+                    message,
+                    history,
+                    cancel,
+                    on_content,
+                    on_reasoning,
                 )
                 .await;
             }
@@ -795,6 +804,10 @@ pub async fn complete_local(
         let profile = model_id
             .strip_prefix("local/workspace:")
             .unwrap_or("auto");
+        on_reasoning(&format!(
+            "Routing request through Local Workspace `{profile}` engine in {}…\n",
+            project.display()
+        ));
         let reply = synthesize_local_workspace_turn(project, profile, message, history);
         on_content(&reply);
         return Ok(reply);
@@ -938,6 +951,7 @@ async fn complete_ollama_http_or_cli(
     history: &[ChatTurn],
     cancel: &CancellationToken,
     mut on_content: impl FnMut(&str),
+    mut on_reasoning: impl FnMut(&str),
 ) -> Result<String> {
     let base = config
         .ollama_base_url
@@ -969,6 +983,7 @@ async fn complete_ollama_http_or_cli(
             let mut stream = resp.bytes_stream();
             let mut buffer = String::new();
             let mut full = String::new();
+            let mut splitter = crate::protocol::ThinkStreamSplitter::new();
             loop {
                 let next = tokio::select! {
                     _ = cancel.cancelled() => return Err(Error::Cancelled),
@@ -984,22 +999,30 @@ async fn complete_ollama_http_or_cli(
                         continue;
                     }
                     if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                        if let Some(c) = v
-                            .get("message")
-                            .and_then(|m| m.get("content"))
-                            .and_then(|s| s.as_str())
-                        {
-                            if !c.is_empty() {
-                                full.push_str(c);
-                                on_content(c);
+                        if let Some(msg_obj) = v.get("message") {
+                            for r_key in ["thinking", "reasoning", "reasoning_content"] {
+                                if let Some(r_txt) = msg_obj.get(r_key).and_then(|s| s.as_str()) {
+                                    if !r_txt.is_empty() {
+                                        on_reasoning(r_txt);
+                                        break;
+                                    }
+                                }
+                            }
+                            if let Some(c) = msg_obj.get("content").and_then(|s| s.as_str()) {
+                                if !c.is_empty() {
+                                    full.push_str(c);
+                                    splitter.feed(c, &mut on_content, &mut on_reasoning);
+                                }
                             }
                         }
                         if v.get("done").and_then(|d| d.as_bool()) == Some(true) {
+                            splitter.flush(&mut on_content, &mut on_reasoning);
                             return Ok(full);
                         }
                     }
                 }
             }
+            splitter.flush(&mut on_content, &mut on_reasoning);
             if !full.is_empty() {
                 return Ok(full);
             }
@@ -1020,7 +1043,9 @@ async fn complete_ollama_http_or_cli(
         let output = cmd.output().await?;
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !text.is_empty() {
-            on_content(&text);
+            let mut splitter = crate::protocol::ThinkStreamSplitter::new();
+            splitter.feed(&text, &mut on_content, &mut on_reasoning);
+            splitter.flush(&mut on_content, &mut on_reasoning);
             return Ok(text);
         }
     }
@@ -1224,6 +1249,7 @@ async fn stream_openai_compatible(
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
     let mut full = String::new();
+    let mut splitter = crate::protocol::ThinkStreamSplitter::new();
     loop {
         let next = tokio::select! {
             _ = cancel.cancelled() => return Err(Error::Cancelled),
@@ -1240,6 +1266,7 @@ async fn stream_openai_compatible(
                 let Some(data) = line.strip_prefix("data:") else { continue };
                 let data = data.trim();
                 if data == "[DONE]" {
+                    splitter.flush(&mut on_content, &mut on_reasoning);
                     return Ok(full);
                 }
                 if let Ok(v) = serde_json::from_str::<Value>(data) {
@@ -1248,15 +1275,18 @@ async fn stream_openai_compatible(
                         .and_then(|c| c.get(0))
                         .and_then(|c| c.get("delta"))
                     {
+                        for r_key in ["reasoning_content", "reasoning", "thinking", "thought"] {
+                            if let Some(r) = delta.get(r_key).and_then(|s| s.as_str()) {
+                                if !r.is_empty() {
+                                    on_reasoning(r);
+                                    break;
+                                }
+                            }
+                        }
                         if let Some(c) = delta.get("content").and_then(|s| s.as_str()) {
                             if !c.is_empty() {
                                 full.push_str(c);
-                                on_content(c);
-                            }
-                        }
-                        if let Some(r) = delta.get("reasoning_content").and_then(|s| s.as_str()) {
-                            if !r.is_empty() {
-                                on_reasoning(r);
+                                splitter.feed(c, &mut on_content, &mut on_reasoning);
                             }
                         }
                     }
@@ -1264,6 +1294,7 @@ async fn stream_openai_compatible(
             }
         }
     }
+    splitter.flush(&mut on_content, &mut on_reasoning);
     Ok(full)
 }
 
@@ -1348,6 +1379,7 @@ pub async fn complete_anthropic(
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
     let mut full = String::new();
+    let mut splitter = crate::protocol::ThinkStreamSplitter::new();
     loop {
         let next = tokio::select! {
             _ = cancel.cancelled() => return Err(Error::Cancelled),
@@ -1366,25 +1398,27 @@ pub async fn complete_anthropic(
                 if let Ok(v) = serde_json::from_str::<Value>(data) {
                     if v.get("type").and_then(|t| t.as_str()) == Some("content_block_delta") {
                         if let Some(delta) = v.get("delta") {
-                            if let Some(text) = delta.get("text").and_then(|s| s.as_str()) {
-                                if !text.is_empty() {
-                                    full.push_str(text);
-                                    on_content(text);
-                                }
-                            }
                             if let Some(thinking) = delta.get("thinking").and_then(|s| s.as_str()) {
                                 if !thinking.is_empty() {
                                     on_reasoning(thinking);
                                 }
                             }
+                            if let Some(text) = delta.get("text").and_then(|s| s.as_str()) {
+                                if !text.is_empty() {
+                                    full.push_str(text);
+                                    splitter.feed(text, &mut on_content, &mut on_reasoning);
+                                }
+                            }
                         }
                     } else if v.get("type").and_then(|t| t.as_str()) == Some("message_stop") {
+                        splitter.flush(&mut on_content, &mut on_reasoning);
                         return Ok(full);
                     }
                 }
             }
         }
     }
+    splitter.flush(&mut on_content, &mut on_reasoning);
     Ok(full)
 }
 
@@ -1397,6 +1431,7 @@ pub async fn complete_gemini(
     history: &[ChatTurn],
     cancel: &CancellationToken,
     mut on_content: impl FnMut(&str),
+    mut on_reasoning: impl FnMut(&str),
 ) -> Result<String> {
     let key = config.resolve_gemini_key().ok_or_else(|| {
         Error::msg(
@@ -1469,6 +1504,7 @@ pub async fn complete_gemini(
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
     let mut full = String::new();
+    let mut splitter = crate::protocol::ThinkStreamSplitter::new();
     loop {
         let next = tokio::select! {
             _ = cancel.cancelled() => return Err(Error::Cancelled),
@@ -1493,10 +1529,15 @@ pub async fn complete_gemini(
                         .and_then(|p| p.as_array())
                     {
                         for part in parts {
+                            let is_thought = part.get("thought").and_then(|t| t.as_bool()) == Some(true);
                             if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                                 if !text.is_empty() {
-                                    full.push_str(text);
-                                    on_content(text);
+                                    if is_thought {
+                                        on_reasoning(text);
+                                    } else {
+                                        full.push_str(text);
+                                        splitter.feed(text, &mut on_content, &mut on_reasoning);
+                                    }
                                 }
                             }
                         }
@@ -1505,6 +1546,7 @@ pub async fn complete_gemini(
             }
         }
     }
+    splitter.flush(&mut on_content, &mut on_reasoning);
     Ok(full)
 }
 
@@ -1702,9 +1744,18 @@ mod tests {
         .unwrap();
         assert_eq!(r2, "Hello from Claude");
 
-        let r3 = complete_gemini(&http, &cfg, "gemini/gemini-2.5-pro", "hi", &[], &cancel, |_| {})
-            .await
-            .unwrap();
+        let r3 = complete_gemini(
+            &http,
+            &cfg,
+            "gemini/gemini-2.5-pro",
+            "hi",
+            &[],
+            &cancel,
+            |_| {},
+            |_| {},
+        )
+        .await
+        .unwrap();
         assert_eq!(r3, "Hello from Gemini");
     }
 }

@@ -76,10 +76,10 @@ type Done = (String, bool, Option<FileDiff>);
 async fn dispatch(name: &str, args: &Value, ctx: &ToolContext<'_>, id: &str) -> Result<Done, Error> {
     emit(ctx.events, AgentEvent::ToolStarted { id: id.to_string(), name: name.to_string() });
     match name {
-        "list_dir" => Ok((list_dir(args, ctx)?, true, None)),
+        "list_dir" | "list_files" => Ok((list_dir(args, ctx)?, true, None)),
         "read_file" => Ok((read_file(args, ctx).await?, true, None)),
-        "search_text" => Ok((search_text(args, ctx)?, true, None)),
-        "search_files" => Ok((search_files(args, ctx)?, true, None)),
+        "search_text" | "grep" | "ripgrep" => Ok((search_text(args, ctx)?, true, None)),
+        "search_files" | "find_files" | "glob" => Ok((search_files(args, ctx)?, true, None)),
         "write_file" => write_file(args, ctx).await,
         "replace_in_file" => replace_in_file(args, ctx).await,
         "apply_patch" => apply_patch(args, ctx).await,

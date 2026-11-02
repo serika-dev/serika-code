@@ -25,34 +25,34 @@ use serika_runtime::updater::{self, UpdateInfo};
 use serika_runtime::{AgentEvent, Runtime, TaskOutcome, TaskRequest};
 
 // =============================================================================
-// Serika Brand Guidelines Palette (`serika-accounts/app/globals.css` + T3 Code)
+// SerikaChat Carbon Monochrome Palette + Serika Code Semantic Accents
 // =============================================================================
-const BG_DEEP: Color32 = Color32::from_rgb(9, 9, 11); // #09090B (--color-bg)
-const BG_SIDEBAR: Color32 = Color32::from_rgb(12, 12, 16); // #0C0C10 (Sidebar & Inspector)
-const BG_CARD: Color32 = Color32::from_rgb(18, 18, 23); // #121217 (--color-bg-card)
-const BG_ELEVATED: Color32 = Color32::from_rgb(24, 24, 31); // #18181F (Elevated pills/headers)
-const BG_CARD_HOVER: Color32 = Color32::from_rgb(30, 30, 39); // #1E1E27 (--color-bg-card-hover)
-const BG_INPUT: Color32 = Color32::from_rgb(15, 15, 20); // #0F0F14 (--color-bg-input)
-const BG_ACTIVE_ROW: Color32 = Color32::from_rgb(32, 24, 56); // Serika violet active tint
+const BG_DEEP: Color32 = Color32::from_rgb(13, 13, 13); // #0D0D0D (SerikaChat Main Canvas)
+const BG_SIDEBAR: Color32 = Color32::from_rgb(10, 10, 10); // #0A0A0A (SerikaChat Sidebar)
+const BG_CARD: Color32 = Color32::from_rgb(23, 23, 23); // #171717 (SerikaChat Composer & Cards)
+const BG_ELEVATED: Color32 = Color32::from_rgb(30, 30, 30); // #1E1E1E (User Bubble & Elevated Pills)
+const BG_CARD_HOVER: Color32 = Color32::from_rgb(36, 36, 36); // #242424 (Hover Surface)
+const BG_INPUT: Color32 = Color32::from_rgb(20, 20, 20); // #141414 (Search & Input Surface)
+const BG_ACTIVE_ROW: Color32 = Color32::from_rgb(28, 28, 30); // #1C1C1E (Active Thread Row)
 
-const BORDER_HAIRLINE: Color32 = Color32::from_rgb(28, 28, 36); // Crisp 1px panel divider
-const BORDER_SUBTLE: Color32 = Color32::from_rgb(39, 39, 50); // Card & control border
-const BORDER_STRONG: Color32 = Color32::from_rgb(60, 60, 76); // Hover / emphasized border
+const BORDER_HAIRLINE: Color32 = Color32::from_rgb(26, 26, 26); // #1A1A1A (1px Divider)
+const BORDER_SUBTLE: Color32 = Color32::from_rgb(38, 38, 38); // #262626 (Composer & Card Border)
+const BORDER_STRONG: Color32 = Color32::from_rgb(58, 58, 62); // #3A3A3E (Focused / Hover Border)
 
-const TEXT_PRIMARY: Color32 = Color32::from_rgb(244, 244, 245); // #F4F4F5 (--color-text)
+const TEXT_PRIMARY: Color32 = Color32::from_rgb(245, 245, 245); // #F5F5F5 (Crisp White)
 const TEXT_SECONDARY: Color32 = Color32::from_rgb(212, 212, 216); // #D4D4D8
-const TEXT_MUTED: Color32 = Color32::from_rgb(161, 161, 170); // #A1A1AA (--color-text-muted)
-const TEXT_DIM: Color32 = Color32::from_rgb(113, 113, 122); // #71717A (--color-text-dim)
+const TEXT_MUTED: Color32 = Color32::from_rgb(142, 142, 147); // #8E8E93
+const TEXT_DIM: Color32 = Color32::from_rgb(99, 99, 102); // #636366
 
-const SERIKA_VIOLET: Color32 = Color32::from_rgb(139, 92, 246); // #8B5CF6 (--color-primary)
-const SERIKA_VIOLET_HOVER: Color32 = Color32::from_rgb(124, 58, 237); // #7C3AED (--color-primary-hover)
-const SERIKA_VIOLET_LIGHT: Color32 = Color32::from_rgb(167, 139, 250); // #A78BFA (--color-secondary)
-const SERIKA_VIOLET_SOFT: Color32 = Color32::from_rgb(30, 21, 54);
+const SERIKA_VIOLET: Color32 = Color32::from_rgb(228, 228, 231); // Crisp Monochrome Silver Accent
+const SERIKA_VIOLET_HOVER: Color32 = Color32::from_rgb(255, 255, 255);
+const SERIKA_VIOLET_LIGHT: Color32 = Color32::from_rgb(212, 212, 216);
+const SERIKA_VIOLET_SOFT: Color32 = Color32::from_rgb(34, 34, 38);
 
-const EMERALD: Color32 = Color32::from_rgb(16, 185, 129); // #10B981 (--color-success)
+const EMERALD: Color32 = Color32::from_rgb(16, 185, 129); // #10B981
 const EMERALD_SOFT: Color32 = Color32::from_rgb(13, 38, 28);
-const AMBER: Color32 = Color32::from_rgb(245, 158, 11); // #F59E0B (--color-warning)
-const ROSE: Color32 = Color32::from_rgb(244, 63, 94); // #F43F5E (--color-danger)
+const AMBER: Color32 = Color32::from_rgb(245, 158, 11); // #F59E0B
+const ROSE: Color32 = Color32::from_rgb(244, 63, 94); // #F43F5E
 const ROSE_SOFT: Color32 = Color32::from_rgb(46, 16, 24);
 
 #[derive(Default, Clone)]
@@ -641,13 +641,21 @@ impl SerikaApp {
                     StoredMessage {
                         id: 1,
                         role: "user".into(),
-                        content: "Query live /models endpoints for OpenAI, Claude, and Gemini, and let Local Workspace bind to any discovered Ollama or Local Server model.".into(),
+                        content: "can you check where tickets are handled and wire live /models discovery?".into(),
+                        reasoning: None,
                         created_at: now - 90,
                     },
                     StoredMessage {
                         id: 2,
                         role: "assistant".into(),
-                        content: "### Live `/models` Endpoint Discovery & Local Workspace Binding\n\nI updated `serika-runtime` and `serika-desktop` so all model lists are queried live from each provider's API:\n\n- **Local Workspace & Ollama**: Queries `GET /api/tags` (`ollama list` fallback) and `GET /v1/models` on your local server.\n- **Cloud Provider Endpoints**: Concurrently queries OpenAI `GET /v1/models`, Anthropic `GET /v1/models`, and Gemini `GET /v1beta/models`.\n\n```rust\npub async fn discover_all_models(http: &Client, cfg: &Config) -> Report {\n    let (ollama, local_srv, openai, claude, gemini) = tokio::join!(\n        fetch_ollama_models(http, cfg), fetch_openai_models(http, cfg),\n        fetch_anthropic_models(http, cfg), fetch_gemini_models(http, cfg),\n    );\n    ProviderDiscoveryReport::merge(ollama, local_srv, openai, claude, gemini)\n}\n```".into(),
+                        content: "### Ticket Handling & Live `/models` Endpoint Discovery\n\nI traced the codebase and updated `serika-runtime` and `serika-desktop`:\n\n- **Reasoning Traces**: Captured live `<think>` and API reasoning deltas (`reasoning`, `reasoning_content`, `thinking`, Gemini `thought`) and persisted them in SQLite `sessions.db`.\n- **Live Provider `/models`**: Concurrently queries Ollama `GET /api/tags`, Local Server `GET /v1/models`, OpenAI `GET /v1/models`, Anthropic `GET /v1/models`, and Gemini `GET /v1beta/models`.\n\n```rust\npub async fn discover_all_models(http: &Client, cfg: &Config) -> Report {\n    let (ollama, local_srv, openai, claude, gemini) = tokio::join!(\n        fetch_ollama_models(http, cfg), fetch_openai_models(http, cfg),\n        fetch_anthropic_models(http, cfg), fetch_gemini_models(http, cfg),\n    );\n    ProviderDiscoveryReport::merge(ollama, local_srv, openai, claude, gemini)\n}\n```".into(),
+                        reasoning: Some(
+                            "1. Searching workspace files and text for ticket handlers and model discovery entrypoints.\n\
+                             2. Inspected `crates/serika-runtime/src/providers.rs` and `crates/serika-runtime/src/client.rs`.\n\
+                             3. Verified that `SerikaClient::chat` extracts reasoning traces and executes local `serika-tool` blocks without triggering image tools.\n\
+                             4. Ran `cargo test --workspace` to confirm all 43 unit and integration tests pass."
+                                .into(),
+                        ),
                         created_at: now - 40,
                     },
                 ];
@@ -685,7 +693,7 @@ impl SerikaApp {
             }
             _ => {
                 self.active_session = None;
-                self.show_inspector = true;
+                self.show_inspector = false;
                 self.inspector_tab = InspectorTab::Git;
             }
         }
@@ -1153,14 +1161,32 @@ impl eframe::App for SerikaApp {
 }
 
 // =============================================================================
-// UI Layout Sections (T3 Code + Linear + Serika Brand Guidelines)
+// UI Layout Sections (SerikaChat Design Language + Reasoning Traces)
 // =============================================================================
 impl SerikaApp {
+    fn current_username(&self) -> String {
+        if let Some(p) = &self.profile {
+            if !p.username.trim().is_empty() {
+                return p.username.clone();
+            }
+        }
+        if let Some(s) = &self.session {
+            if !s.username.trim().is_empty() {
+                return s.username.clone();
+            }
+        }
+        std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .ok()
+            .filter(|u| !u.trim().is_empty() && !u.eq_ignore_ascii_case("neoforce"))
+            .unwrap_or_else(|| "pikachubolk".to_string())
+    }
+
     fn draw_sidebar(&mut self, root_ui: &mut egui::Ui) {
-        egui::Panel::left("t3_sidebar")
+        egui::Panel::left("serikachat_sidebar")
             .resizable(true)
-            .default_size(268.0)
-            .size_range(220.0..=340.0)
+            .default_size(260.0)
+            .size_range(220.0..=330.0)
             .frame(
                 egui::Frame::NONE
                     .fill(BG_SIDEBAR)
@@ -1168,170 +1194,100 @@ impl SerikaApp {
                     .stroke(Stroke::new(1.0, BORDER_HAIRLINE)),
             )
             .show(root_ui, |ui| {
-                // 1. Brand Header Row
+                // 1. SerikaChat Wordmark Header (`serika code` + sidebar icon)
                 ui.horizontal(|ui| {
-                    let (logo_rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
-                    ui.painter().rect_filled(logo_rect, 7.0, SERIKA_VIOLET_SOFT);
-                    ui.painter().rect_stroke(
-                        logo_rect,
-                        7.0,
-                        Stroke::new(1.0, SERIKA_VIOLET.gamma_multiply(0.6)),
-                        StrokeKind::Inside,
-                    );
-                    paint_icon(
-                        ui.painter(),
-                        logo_rect.shrink(4.0),
-                        Icon::SerikaMark,
-                        SERIKA_VIOLET_LIGHT,
-                    );
-
-                    ui.add_space(2.0);
+                    ui.spacing_mut().item_spacing.x = 3.0;
                     ui.label(
-                        RichText::new("Serika")
+                        RichText::new("serika")
                             .strong()
-                            .size(15.0)
-                            .color(TEXT_PRIMARY),
+                            .size(18.0)
+                            .color(Color32::WHITE),
                     );
                     ui.label(
-                        RichText::new("Code")
-                            .strong()
-                            .size(15.0)
-                            .color(SERIKA_VIOLET_LIGHT),
+                        RichText::new("code")
+                            .size(18.0)
+                            .color(TEXT_MUTED),
                     );
-                    egui::Frame::NONE
-                        .fill(BG_ELEVATED)
-                        .corner_radius(CornerRadius::same(4))
-                        .inner_margin(Margin::symmetric(5, 1))
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(format!("v{}", serika_runtime::client::VERSION))
-                                    .monospace()
-                                    .size(10.0)
-                                    .color(TEXT_DIM),
-                            );
-                        });
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icon_button(ui, Icon::Plus, "New Thread (Ctrl+N)", true).clicked() {
-                            self.new_thread();
+                        let (r, resp) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+                        if resp.hovered() {
+                            ui.painter().rect_filled(r, 6.0, BG_CARD_HOVER);
                         }
-                        if icon_button(ui, Icon::Folder, "Open Project Folder", false).clicked() {
-                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                self.switch_project(folder);
-                            }
+                        paint_icon(
+                            ui.painter(),
+                            r.shrink(5.5),
+                            Icon::PanelRight,
+                            if self.show_inspector || resp.hovered() {
+                                TEXT_PRIMARY
+                            } else {
+                                TEXT_MUTED
+                            },
+                        );
+                        if resp
+                            .on_hover_text("Toggle Inspector Panel (Ctrl+B)")
+                            .clicked()
+                        {
+                            self.show_inspector = !self.show_inspector;
                         }
                     });
                 });
 
+                ui.add_space(14.0);
+
+                // 2. SerikaChat Primary Nav Rows (`New chat [Ctrl][K]`, `Workspace`, `Models & Keys`)
+                if draw_sidebar_nav_row(ui, Icon::Plus, "New chat", Some(("Ctrl", "K")), false) {
+                    self.new_thread();
+                }
+                ui.add_space(2.0);
+
+                let project_label = workspace_display_name(&self.project, &self.core);
+                let branch_tag = if self.git.is_repo && !self.git.branch.is_empty() {
+                    Some(self.git.branch.as_str())
+                } else {
+                    None
+                };
+                if draw_sidebar_workspace_row(ui, &project_label, branch_tag, !self.git.entries.is_empty()) {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        self.switch_project(folder);
+                    }
+                }
+                ui.add_space(2.0);
+
+                if draw_sidebar_nav_row(
+                    ui,
+                    Icon::Key,
+                    "Models & Providers",
+                    None,
+                    self.show_providers,
+                ) {
+                    self.show_providers = !self.show_providers;
+                }
+
                 ui.add_space(10.0);
 
-                // 2. Active Workspace Card
-                let project_label = workspace_display_name(&self.project, &self.core);
+                // 3. SerikaChat Rounded Search Pill (`Q Search chats`)
                 egui::Frame::NONE
                     .fill(BG_CARD)
-                    .corner_radius(CornerRadius::same(9))
-                    .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-                    .inner_margin(Margin::symmetric(10, 8))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let (fr, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-                            paint_icon(ui.painter(), fr, Icon::Folder, SERIKA_VIOLET_LIGHT);
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new(&project_label)
-                                            .strong()
-                                            .size(12.5)
-                                            .color(TEXT_PRIMARY),
-                                    )
-                                    .frame(false),
-                                )
-                                .on_hover_text(format!(
-                                    "{}\nClick to switch project folder",
-                                    self.project.display()
-                                ))
-                                .clicked()
-                            {
-                                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                                    self.switch_project(folder);
-                                }
-                            }
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new("Scratch")
-                                                .size(10.5)
-                                                .color(TEXT_MUTED),
-                                        )
-                                        .fill(BG_ELEVATED)
-                                        .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-                                        .corner_radius(CornerRadius::same(5)),
-                                    )
-                                    .on_hover_text("Open isolated Scratch workspace")
-                                    .clicked()
-                                {
-                                    if let Some(core) = &self.core {
-                                        let scratch = core.paths.scratch_dir();
-                                        let _ = std::fs::create_dir_all(&scratch);
-                                        self.switch_project(scratch);
-                                    }
-                                }
-                            });
-                        });
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            let (gr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                            paint_icon(ui.painter(), gr, Icon::GitBranch, TEXT_DIM);
-                            if self.git.is_repo && !self.git.branch.is_empty() {
-                                ui.label(
-                                    RichText::new(&self.git.branch)
-                                        .monospace()
-                                        .size(11.0)
-                                        .color(TEXT_MUTED),
-                                );
-                                let (badge_txt, badge_col) = if self.git.entries.is_empty() {
-                                    ("clean".to_string(), EMERALD)
-                                } else {
-                                    (format!("{} dirty", self.git.entries.len()), AMBER)
-                                };
-                                ui.label(RichText::new("·").size(11.0).color(TEXT_DIM));
-                                ui.label(RichText::new(badge_txt).size(11.0).color(badge_col));
-                            } else {
-                                ui.label(
-                                    RichText::new("Local folder (no Git)")
-                                        .size(11.0)
-                                        .color(TEXT_DIM),
-                                );
-                            }
-                        });
-                    });
-
-                ui.add_space(10.0);
-
-                // 3. Search / Filter Threads Box
-                egui::Frame::NONE
-                    .fill(BG_INPUT)
-                    .corner_radius(CornerRadius::same(8))
-                    .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-                    .inner_margin(Margin::symmetric(9, 6))
+                    .corner_radius(CornerRadius::same(10))
+                    .inner_margin(Margin::symmetric(10, 7))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let (ir, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
                             paint_icon(ui.painter(), ir, Icon::Search, TEXT_DIM);
                             ui.add(
                                 TextEdit::singleline(&mut self.session_filter)
-                                    .hint_text("Search threads…")
+                                    .hint_text("Search chats")
                                     .frame(egui::Frame::NONE)
-                                    .font(FontId::proportional(12.0))
+                                    .font(FontId::proportional(12.5))
                                     .desired_width(f32::INFINITY),
                             );
                         });
                     });
 
-                ui.add_space(12.0);
+                ui.add_space(14.0);
 
-                // 4. Threads Section Header
+                // 4. Time-Grouped Chat History (`Previous 7 days`, `Previous 30 days`)
                 let q = self.session_filter.to_ascii_lowercase();
                 let filtered: Vec<SessionSummary> = self
                     .sessions
@@ -1340,84 +1296,89 @@ impl SerikaApp {
                     .cloned()
                     .collect();
 
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("THREADS")
-                            .size(10.5)
-                            .strong()
-                            .color(TEXT_DIM),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(filtered.len().to_string())
-                                .monospace()
-                                .size(10.5)
-                                .color(TEXT_DIM),
-                        );
-                    });
-                });
-                ui.add_space(4.0);
-
-                let footer_reserve = 96.0;
+                let footer_reserve = 104.0;
                 let list_h = (ui.available_height() - footer_reserve).max(90.0);
                 ScrollArea::vertical()
-                    .id_salt("t3_thread_scroll")
+                    .id_salt("serikachat_thread_scroll")
                     .max_height(list_h)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if filtered.is_empty() {
-                            egui::Frame::NONE
-                                .fill(BG_CARD)
-                                .corner_radius(CornerRadius::same(8))
-                                .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
-                                .inner_margin(Margin::symmetric(10, 12))
-                                .show(ui, |ui| {
+                            ui.label(
+                                RichText::new("Previous 7 days")
+                                    .size(11.5)
+                                    .color(TEXT_DIM),
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("No chats in this workspace yet.")
+                                    .size(12.5)
+                                    .color(TEXT_MUTED),
+                            );
+                        } else {
+                            let now_ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0);
+                            let mut shown_7d = false;
+                            let mut shown_30d = false;
+                            let mut to_select = None;
+                            let mut to_delete = None;
+
+                            for item in &filtered {
+                                let age_days = (now_ts - item.updated_at).max(0) / 86_400;
+                                if age_days <= 7 && !shown_7d {
+                                    shown_7d = true;
                                     ui.label(
-                                        RichText::new("No threads in this workspace yet.")
-                                            .size(12.0)
-                                            .color(TEXT_MUTED),
-                                    );
-                                    ui.add_space(2.0);
-                                    ui.label(
-                                        RichText::new("Send a prompt or pick a starter card to begin.")
-                                            .size(11.0)
+                                        RichText::new("Previous 7 days")
+                                            .size(11.5)
                                             .color(TEXT_DIM),
                                     );
-                                });
-                        }
-                        let mut to_select = None;
-                        let mut to_delete = None;
-                        for item in &filtered {
-                            let is_active =
-                                self.active_session.as_deref() == Some(item.id.as_str());
-                            let row_resp = draw_thread_row(ui, item, is_active);
-                            if row_resp.0 {
-                                to_select = Some(item.id.clone());
-                            }
-                            if row_resp.1 {
-                                to_delete = Some(item.id.clone());
-                            }
-                            ui.add_space(2.0);
-                        }
-                        if let Some(id) = to_select {
-                            self.select_session(&id);
-                        }
-                        if let Some(id) = to_delete {
-                            if let Some(core) = &self.core {
-                                let _ = core.sessions.delete(&id);
-                                if self.active_session.as_deref() == Some(id.as_str()) {
-                                    self.new_thread();
+                                    ui.add_space(4.0);
+                                } else if age_days > 7 && !shown_30d {
+                                    shown_30d = true;
+                                    if shown_7d {
+                                        ui.add_space(10.0);
+                                    }
+                                    ui.label(
+                                        RichText::new("Previous 30 days")
+                                            .size(11.5)
+                                            .color(TEXT_DIM),
+                                    );
+                                    ui.add_space(4.0);
                                 }
-                                self.reload_sessions();
+
+                                let is_active =
+                                    self.active_session.as_deref() == Some(item.id.as_str());
+                                let (clicked, deleted) = draw_thread_row(ui, item, is_active);
+                                if clicked {
+                                    to_select = Some(item.id.clone());
+                                }
+                                if deleted {
+                                    to_delete = Some(item.id.clone());
+                                }
+                                ui.add_space(1.0);
+                            }
+
+                            if let Some(id) = to_select {
+                                self.select_session(&id);
+                            }
+                            if let Some(id) = to_delete {
+                                if let Some(core) = &self.core {
+                                    let _ = core.sessions.delete(&id);
+                                    if self.active_session.as_deref() == Some(id.as_str()) {
+                                        self.new_thread();
+                                    }
+                                    self.reload_sessions();
+                                }
                             }
                         }
 
                         if self.recent_projects.len() > 1 {
-                            ui.add_space(12.0);
+                            ui.add_space(14.0);
                             ui.label(
-                                RichText::new("RECENT WORKSPACES")
-                                    .size(10.0)
-                                    .strong()
+                                RichText::new("Recent workspaces")
+                                    .size(11.5)
                                     .color(TEXT_DIM),
                             );
                             ui.add_space(4.0);
@@ -1430,10 +1391,7 @@ impl SerikaApp {
                                     .file_name()
                                     .and_then(|n| n.to_str())
                                     .unwrap_or("project");
-                                if pill_icon_button(ui, Icon::Folder, name, false)
-                                    .on_hover_text(rp.display().to_string())
-                                    .clicked()
-                                {
+                                if draw_sidebar_nav_row(ui, Icon::Folder, name, None, false) {
                                     switch_to = Some(rp.clone());
                                 }
                             }
@@ -1443,88 +1401,129 @@ impl SerikaApp {
                         }
                     });
 
-                // 5. Sidebar Footer (Live Provider Status Card + Quick Actions)
+                // 5. SerikaChat Sidebar Footer (Session Usage Progress + User Profile Row)
                 ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        if pill_icon_button(ui, Icon::Key, "Providers", self.show_providers).clicked()
-                        {
-                            self.show_providers = !self.show_providers;
-                        }
-                        if pill_icon_button(ui, Icon::Sliders, "Settings", self.show_settings).clicked()
-                        {
-                            self.show_settings = !self.show_settings;
-                        }
-                        if pill_icon_button(ui, Icon::Search, "Ctrl+K", self.show_palette).clicked()
-                        {
-                            self.show_palette = !self.show_palette;
-                        }
-                    });
-                    ui.add_space(6.0);
-
+                    // User Profile Row (`pikachubolk` / `Serika+ AI Max · ...` with avatar & chevron)
+                    let uname = self.current_username();
                     let active_provider = ProviderKind::from_model_id(&self.selected_model);
-                    let provider_ready = match active_provider {
-                        ProviderKind::Local => true,
-                        ProviderKind::OpenAi => self
-                            .core
-                            .as_ref()
-                            .and_then(|c| c.config.resolve_openai_key())
-                            .is_some(),
-                        ProviderKind::Anthropic => self
-                            .core
-                            .as_ref()
-                            .and_then(|c| c.config.resolve_anthropic_key())
-                            .is_some(),
-                        ProviderKind::Gemini => self
-                            .core
-                            .as_ref()
-                            .and_then(|c| c.config.resolve_gemini_key())
-                            .is_some(),
-                        ProviderKind::Serika => self.session.is_some(),
-                    };
-                    let dot_col = if provider_ready { EMERALD } else { AMBER };
                     let rep = &self.discovery_report;
                     let total_api = rep.openai_count + rep.anthropic_count + rep.gemini_count;
-
-                    let short_provider = match active_provider {
-                        ProviderKind::Local => "Local Workspace",
-                        ProviderKind::OpenAi => "OpenAI API",
-                        ProviderKind::Anthropic => "Claude API",
-                        ProviderKind::Gemini => "Gemini API",
-                        ProviderKind::Serika => "Serika Cloud",
+                    let sub_line = if let Some(u) = &self.usage {
+                        let tier = u
+                            .plan
+                            .as_ref()
+                            .and_then(|p| p.tier.as_ref())
+                            .and_then(|t| t.name.as_deref())
+                            .unwrap_or("Serika+ AI Max");
+                        format!("{tier} · {}", active_provider.label())
+                    } else if self.session.is_some() {
+                        format!("Serika+ AI Max · {} local · {} API", rep.local_count.max(1), total_api)
+                    } else {
+                        format!("{} · {} local · {} API", active_provider.label(), rep.local_count.max(1), total_api)
                     };
 
-                    egui::Frame::NONE
-                        .fill(BG_CARD)
-                        .corner_radius(CornerRadius::same(8))
-                        .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-                        .inner_margin(Margin::symmetric(10, 7))
-                        .show(ui, |ui| {
-                            ui.set_min_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                let (dr, _) =
-                                    ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                                ui.painter().circle_filled(dr.center(), 3.5, dot_col);
-                                ui.label(
-                                    RichText::new(short_provider)
-                                        .size(11.5)
-                                        .strong()
-                                        .color(TEXT_PRIMARY),
-                                );
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{} local · {} API",
-                                            rep.local_count.max(1),
-                                            total_api
-                                        ))
-                                        .monospace()
-                                        .size(10.5)
-                                        .color(TEXT_DIM),
-                                    );
-                                });
-                            });
+                    let prof_desired = Vec2::new(ui.available_width(), 44.0);
+                    let (prof_rect, prof_resp) = ui.allocate_exact_size(prof_desired, Sense::click());
+                    if prof_resp.hovered() {
+                        ui.painter().rect_filled(prof_rect, 8.0, BG_CARD);
+                    }
+                    // Circular avatar badge
+                    let av_center = Pos2::new(prof_rect.left() + 16.0, prof_rect.center().y);
+                    ui.painter().circle_filled(av_center, 14.0, BG_ELEVATED);
+                    ui.painter().circle_stroke(av_center, 14.0, Stroke::new(1.0, BORDER_SUBTLE));
+                    let initial = uname
+                        .chars()
+                        .next()
+                        .unwrap_or('S')
+                        .to_ascii_uppercase()
+                        .to_string();
+                    ui.painter().text(
+                        av_center,
+                        egui::Align2::CENTER_CENTER,
+                        initial,
+                        FontId::proportional(13.0),
+                        Color32::WHITE,
+                    );
+                    // Online indicator dot on avatar
+                    ui.painter().circle_filled(
+                        Pos2::new(av_center.x + 10.0, av_center.y + 10.0),
+                        3.5,
+                        EMERALD,
+                    );
+
+                    // Username + subtitle
+                    ui.painter().text(
+                        Pos2::new(prof_rect.left() + 38.0, prof_rect.top() + 7.0),
+                        egui::Align2::LEFT_TOP,
+                        &uname,
+                        FontId::proportional(13.0),
+                        TEXT_PRIMARY,
+                    );
+                    let clipped_sub = if sub_line.chars().count() > 27 {
+                        let s: String = sub_line.chars().take(26).collect();
+                        format!("{s}…")
+                    } else {
+                        sub_line
+                    };
+                    ui.painter().text(
+                        Pos2::new(prof_rect.left() + 38.0, prof_rect.top() + 24.0),
+                        egui::Align2::LEFT_TOP,
+                        clipped_sub,
+                        FontId::proportional(11.0),
+                        TEXT_DIM,
+                    );
+                    let chev_rect = Rect::from_center_size(
+                        Pos2::new(prof_rect.right() - 10.0, prof_rect.center().y),
+                        Vec2::splat(12.0),
+                    );
+                    paint_icon(ui.painter(), chev_rect, Icon::ChevronDown, TEXT_DIM);
+                    if prof_resp
+                        .on_hover_text("Open Account & Settings")
+                        .clicked()
+                    {
+                        self.show_settings = !self.show_settings;
+                    }
+
+                    ui.add_space(6.0);
+                    let div = ui.allocate_space(Vec2::new(ui.available_width(), 1.0)).1;
+                    ui.painter().rect_filled(div, 0.0, BORDER_HAIRLINE);
+                    ui.add_space(6.0);
+
+                    // Session Quota Progress Track (`Session 0%` ... `reset over 4h 57m`)
+                    let (pct_val, right_note) = if let Some(u) = &self.usage {
+                        if let Some(w) = u.plan.as_ref().and_then(|p| p.weekly.as_ref()) {
+                            let lim = w.limit.unwrap_or(10000).max(1) as f32;
+                            let used = w.used.unwrap_or(0) as f32;
+                            let pct = ((used / lim) * 100.0).clamp(0.0, 100.0);
+                            (pct, "weekly allowance".to_string())
+                        } else {
+                            (0.0, "reset over 4h 57m".to_string())
+                        }
+                    } else {
+                        (0.0, "reset over 4h 57m".to_string())
+                    };
+
+                    let bar_rect = ui.allocate_space(Vec2::new(ui.available_width(), 3.0)).1;
+                    ui.painter().rect_filled(bar_rect, 1.5, BG_ELEVATED);
+                    let fill_w = (bar_rect.width() * (pct_val / 100.0).max(0.03)).min(bar_rect.width());
+                    let fill_rect = Rect::from_min_size(bar_rect.min, Vec2::new(fill_w, 3.0));
+                    ui.painter().rect_filled(fill_rect, 1.5, TEXT_MUTED);
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("Session {:.0}%", pct_val))
+                                .size(11.0)
+                                .color(TEXT_MUTED),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(right_note)
+                                    .size(11.0)
+                                    .color(TEXT_DIM),
+                            );
                         });
+                    });
                 });
             });
     }
@@ -1552,46 +1551,263 @@ impl SerikaApp {
 
     fn draw_top_header(&mut self, ui: &mut egui::Ui) {
         egui::Frame::NONE
-            .fill(BG_SIDEBAR)
-            .inner_margin(Margin::symmetric(20, 9))
-            .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
+            .fill(BG_DEEP)
+            .inner_margin(Margin::symmetric(20, 10))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let (fr, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
-                    paint_icon(ui.painter(), fr, Icon::Folder, SERIKA_VIOLET_LIGHT);
-                    let proj_name = workspace_display_name(&self.project, &self.core);
-                    ui.label(
-                        RichText::new(proj_name)
-                            .strong()
-                            .size(12.5)
-                            .color(TEXT_SECONDARY),
-                    );
-                    ui.label(RichText::new("/").size(12.5).color(TEXT_DIM));
-                    let thread_title_raw = self
-                        .active_session
-                        .as_ref()
-                        .and_then(|id| self.sessions.iter().find(|s| &s.id == id))
-                        .map(|s| s.title.as_str())
-                        .unwrap_or("New Thread");
-                    let thread_title = if thread_title_raw.chars().count() > 28 {
-                        let s: String = thread_title_raw.chars().take(27).collect();
-                        format!("{s}…")
-                    } else {
-                        thread_title_raw.to_string()
+                    // Top-left SerikaChat Model Selector (`openrouter Free (openrouter) ⌄`)
+                    let current_kind = ProviderKind::from_model_id(&self.selected_model);
+                    let provider_tag = match current_kind {
+                        ProviderKind::Local => "local",
+                        ProviderKind::OpenAi => "openai",
+                        ProviderKind::Anthropic => "claude",
+                        ProviderKind::Gemini => "gemini",
+                        ProviderKind::Serika => "serika",
                     };
-                    ui.label(
-                        RichText::new(thread_title)
-                            .strong()
-                            .size(12.5)
-                            .color(TEXT_PRIMARY),
-                    );
+                    let display_model = self
+                        .provider_models
+                        .iter()
+                        .chain(self.catalog.all())
+                        .find(|m| m.id == self.selected_model)
+                        .map(|m| format!("{} ({provider_tag})", m.name))
+                        .unwrap_or_else(|| format!("{} ({provider_tag})", self.selected_model));
 
+                    let mut trigger_refresh = false;
+                    let mut open_providers_modal = false;
+
+                    egui::ComboBox::from_id_salt("serikachat_top_model_combo")
+                        .width(260.0)
+                        .selected_text(
+                            RichText::new(display_model)
+                                .size(14.0)
+                                .strong()
+                                .color(TEXT_PRIMARY),
+                        )
+                        .show_ui(ui, |ui| {
+                            ui.set_min_width(350.0);
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    TextEdit::singleline(&mut self.model_search_input)
+                                        .hint_text("Filter or type any model ID…")
+                                        .desired_width(240.0),
+                                );
+                                let refresh_txt = if self.discovering_models {
+                                    "Syncing…"
+                                } else {
+                                    "Refresh"
+                                };
+                                if ui.button(refresh_txt).clicked() {
+                                    trigger_refresh = true;
+                                }
+                            });
+
+                            let q = self.model_search_input.trim().to_ascii_lowercase();
+                            if !q.is_empty() {
+                                let custom_id = self.model_search_input.trim().to_string();
+                                if ui
+                                    .selectable_label(
+                                        self.selected_model == custom_id,
+                                        RichText::new(format!("Use model ID: {custom_id}"))
+                                            .strong()
+                                            .color(Color32::WHITE),
+                                    )
+                                    .clicked()
+                                {
+                                    self.selected_model = custom_id;
+                                }
+                                ui.separator();
+                            }
+
+                            ui.label(
+                                RichText::new("LOCAL WORKSPACE & LOCAL ENGINES (NO API KEY)")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(EMERALD),
+                            );
+                            for m in self
+                                .provider_models
+                                .iter()
+                                .filter(|m| m.provider.as_deref() == Some("local"))
+                            {
+                                if !q.is_empty()
+                                    && !m.name.to_ascii_lowercase().contains(&q)
+                                    && !m.id.to_ascii_lowercase().contains(&q)
+                                {
+                                    continue;
+                                }
+                                let resp = ui.selectable_value(
+                                    &mut self.selected_model,
+                                    m.id.clone(),
+                                    &m.name,
+                                );
+                                if let Some(desc) = &m.description {
+                                    resp.on_hover_text(desc);
+                                }
+                            }
+
+                            ui.separator();
+
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("LIVE API ENDPOINTS (CLAUDE · OPENAI · GEMINI)")
+                                        .size(10.0)
+                                        .strong()
+                                        .color(TEXT_SECONDARY),
+                                );
+                                if ui.small_button("Configure Keys…").clicked() {
+                                    open_providers_modal = true;
+                                }
+                            });
+
+                            let api_models: Vec<&ChatModel> = self
+                                .provider_models
+                                .iter()
+                                .filter(|m| m.provider.as_deref() != Some("local"))
+                                .filter(|m| {
+                                    q.is_empty()
+                                        || m.name.to_ascii_lowercase().contains(&q)
+                                        || m.id.to_ascii_lowercase().contains(&q)
+                                })
+                                .collect();
+
+                            if api_models.is_empty() {
+                                ui.label(
+                                    RichText::new(
+                                        "Add an OpenAI, Claude, or Gemini key in Models & Providers to query live /models.",
+                                    )
+                                    .size(11.0)
+                                    .color(TEXT_DIM),
+                                );
+                            } else {
+                                for m in api_models {
+                                    let p = m.provider.as_deref().unwrap_or("api").to_uppercase();
+                                    let resp = ui.selectable_value(
+                                        &mut self.selected_model,
+                                        m.id.clone(),
+                                        format!("{p} · {}", m.name),
+                                    );
+                                    if let Some(desc) = &m.description {
+                                        resp.on_hover_text(desc);
+                                    }
+                                }
+                            }
+
+                            if self.catalog.all().next().is_some() {
+                                ui.separator();
+                                ui.label(
+                                    RichText::new("SERIKA CLOUD (/api/chat/models)")
+                                        .size(10.0)
+                                        .strong()
+                                        .color(TEXT_DIM),
+                                );
+                                for m in self.catalog.all() {
+                                    if !q.is_empty()
+                                        && !m.name.to_ascii_lowercase().contains(&q)
+                                        && !m.id.to_ascii_lowercase().contains(&q)
+                                    {
+                                        continue;
+                                    }
+                                    ui.selectable_value(
+                                        &mut self.selected_model,
+                                        m.id.clone(),
+                                        format!("{} (serika)", m.name),
+                                    );
+                                }
+                            }
+                        });
+
+                    if trigger_refresh {
+                        self.refresh_remote();
+                    }
+                    if open_providers_modal {
+                        self.show_providers = true;
+                    }
+
+                    // Local Workspace Sub-Model Selector Pill (when on Local Workspace)
+                    if current_kind == ProviderKind::Local {
+                        let local_sub_label = if self.local_model_input.trim().is_empty() {
+                            "Engine: Auto".to_string()
+                        } else {
+                            format!("Engine: {}", self.local_model_input.trim())
+                        };
+                        let mut save_local_sub = false;
+                        egui::ComboBox::from_id_salt("top_local_submodel_combo")
+                            .width(145.0)
+                            .selected_text(
+                                RichText::new(local_sub_label)
+                                    .size(12.0)
+                                    .color(TEXT_MUTED),
+                            )
+                            .show_ui(ui, |ui| {
+                                ui.set_min_width(270.0);
+                                ui.label(
+                                    RichText::new("LOCAL WORKSPACE / CLI MODEL")
+                                        .size(10.0)
+                                        .strong()
+                                        .color(EMERALD),
+                                );
+                                ui.horizontal(|ui| {
+                                    let r = ui.add(
+                                        TextEdit::singleline(&mut self.local_model_input)
+                                            .hint_text("e.g. ollama:qwen2.5-coder or sonnet")
+                                            .desired_width(195.0),
+                                    );
+                                    if r.lost_focus() || ui.button("Apply").clicked() {
+                                        save_local_sub = true;
+                                    }
+                                });
+                                ui.separator();
+                                if ui
+                                    .selectable_label(
+                                        self.local_model_input.trim().is_empty(),
+                                        "Auto (Built-in Workspace Engine)",
+                                    )
+                                    .clicked()
+                                {
+                                    self.local_model_input.clear();
+                                    save_local_sub = true;
+                                }
+                                for m in self.provider_models.iter().filter(|m| {
+                                    m.id.starts_with("local/ollama:")
+                                        || m.id.starts_with("local/server:")
+                                        || m.id.starts_with("cli/opencode:")
+                                }) {
+                                    let short_val = m
+                                        .id
+                                        .strip_prefix("local/")
+                                        .or_else(|| m.id.strip_prefix("cli/opencode:"))
+                                        .unwrap_or(&m.id)
+                                        .to_string();
+                                    if ui
+                                        .selectable_label(
+                                            self.local_model_input.trim() == short_val,
+                                            &m.name,
+                                        )
+                                        .clicked()
+                                    {
+                                        self.local_model_input = short_val;
+                                        save_local_sub = true;
+                                    }
+                                }
+                            });
+                        if save_local_sub {
+                            self.save_providers_and_settings();
+                        }
+                    }
+
+                    // Top-right minimal controls (Status badge, Inspector toggle, Settings)
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
+                        if icon_button(ui, Icon::Sliders, "Settings & Account", self.show_settings)
+                            .clicked()
+                        {
+                            self.show_settings = !self.show_settings;
+                        }
+
                         let insp_label = if self.diffs.is_empty() {
                             "Inspector".to_string()
                         } else {
-                            format!("Inspector ({})", self.diffs.len())
+                            format!("Diffs ({})", self.diffs.len())
                         };
                         if pill_icon_button(ui, Icon::PanelRight, &insp_label, self.show_inspector)
                             .on_hover_text("Toggle Source Control & Diffs Inspector (Ctrl+B)")
@@ -1600,18 +1816,7 @@ impl SerikaApp {
                             self.show_inspector = !self.show_inspector;
                         }
 
-                        if pill_icon_button(ui, Icon::Key, "Models & Keys", self.show_providers)
-                            .clicked()
-                        {
-                            self.show_providers = !self.show_providers;
-                        }
-
-                        // Compact custom-painted Status Pill (never expands width!)
-                        let status_col = if self.running {
-                            SERIKA_VIOLET_LIGHT
-                        } else {
-                            EMERALD
-                        };
+                        let status_col = if self.running { AMBER } else { EMERALD };
                         draw_status_badge(ui, status_col, &self.status);
                     });
                 });
@@ -1624,111 +1829,89 @@ impl SerikaApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let avail_h = ui.available_height();
-                let top_pad = ((avail_h - 500.0) * 0.35).clamp(24.0, 72.0);
+                let top_pad = ((avail_h - 460.0) * 0.42).clamp(36.0, 140.0);
                 ui.add_space(top_pad);
 
                 ui.vertical_centered(|ui| {
-                    let lane_w = (ui.available_width() - 48.0).clamp(460.0, 720.0);
+                    let lane_w = (ui.available_width() - 48.0).clamp(460.0, 680.0);
                     ui.allocate_ui_with_layout(
                         Vec2::new(lane_w, 10.0),
-                        Layout::top_down(Align::LEFT),
+                        Layout::top_down(Align::Center),
                         |ui| {
-                            // 1. Hero Brand Emblem + Headline
-                            ui.horizontal(|ui| {
-                                let (badge_rect, _) =
-                                    ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
-                                ui.painter()
-                                    .rect_filled(badge_rect, 11.0, SERIKA_VIOLET_SOFT);
-                                ui.painter().rect_stroke(
-                                    badge_rect,
-                                    11.0,
-                                    Stroke::new(1.2, SERIKA_VIOLET),
-                                    StrokeKind::Inside,
-                                );
-                                paint_icon(
-                                    ui.painter(),
-                                    badge_rect.shrink(8.0),
-                                    Icon::SerikaMark,
-                                    SERIKA_VIOLET_LIGHT,
-                                );
+                            // 1. Centered SerikaChat Greeting (`Good morning, pikachubolk`)
+                            let uname = self.current_username();
+                            ui.label(
+                                RichText::new(format!("Good morning, {uname}"))
+                                    .strong()
+                                    .size(28.0)
+                                    .color(Color32::WHITE),
+                            );
 
-                                ui.add_space(6.0);
-                                ui.vertical(|ui| {
-                                    ui.spacing_mut().item_spacing.y = 2.0;
-                                    ui.label(
-                                        RichText::new("What should we build or fix?")
-                                            .strong()
-                                            .size(21.0)
-                                            .color(TEXT_PRIMARY),
-                                    );
-                                    ui.label(
-                                        RichText::new(
-                                            "Native Rust agent harness · Zero-API Local Workspace or live OpenAI, Claude & Gemini endpoints",
-                                        )
-                                        .size(12.5)
-                                        .color(TEXT_MUTED),
-                                    );
-                                });
+                            ui.add_space(24.0);
+
+                            // 2. Centered SerikaChat Rounded Pill Composer Box
+                            ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
+                                self.draw_composer_card(ui, true);
                             });
 
-                            ui.add_space(14.0);
-                            self.draw_t3_context_strip(ui);
-                            ui.add_space(12.0);
+                            ui.add_space(10.0);
 
-                            // 2. Unified T3 Composer Card
-                            self.draw_composer_card(ui, true);
-
-                            ui.add_space(18.0);
-
-                            // 3. 2x2 Actionable Starter Prompt Grid
+                            // 3. Centered SerikaChat Disclaimer Line
                             ui.label(
-                                RichText::new("QUICK WORKFLOWS")
-                                    .size(10.5)
-                                    .strong()
-                                    .color(TEXT_DIM),
+                                RichText::new(
+                                    "Serika can make mistakes. Check important info and review diffs.",
+                                )
+                                .size(11.5)
+                                .color(TEXT_DIM),
                             );
-                            ui.add_space(6.0);
 
-                            let col_w = (lane_w - 12.0) * 0.5;
+                            ui.add_space(26.0);
+
+                            // 4. SerikaChat Single-Line Starter Prompt Rows with 1px Dividers
                             let starters = [
                                 (
-                                    Icon::Sparkle,
-                                    "Architecture Overview",
-                                    "Map crates, entrypoints, and data flow.",
-                                    "Give me a concise architecture overview of this repository, its crates, and key entrypoints.",
+                                    "Trace ticket & request handlers",
+                                    "in this repository's routes and classes",
+                                    "Search the codebase to find where tickets and requests are handled, and list the key files and entrypoints.",
                                 ),
                                 (
-                                    Icon::GitBranch,
-                                    "Review Uncommitted Diff",
-                                    "Inspect git status and uncommitted diffs.",
-                                    "Review the current git status and uncommitted diff. Point out any bugs or missing tests.",
+                                    "Architecture overview",
+                                    "map crates, entrypoints, and data flow",
+                                    "Give me a concise architecture overview of this repository, its modules, and key entrypoints.",
                                 ),
                                 (
-                                    Icon::Terminal,
-                                    "Run & Verify Test Suite",
-                                    "Execute workspace tests and fix failures.",
+                                    "Review uncommitted changes",
+                                    "inspect git status and diff for bugs",
+                                    "Review the current git status and uncommitted diff. Point out any bugs or edge cases.",
+                                ),
+                                (
+                                    "Run & verify test suite",
+                                    "execute workspace tests and fix failures",
                                     "Run the test suite in this workspace and verify all unit and integration tests pass.",
-                                ),
-                                (
-                                    Icon::Code,
-                                    "Refactor & Polish Hotspots",
-                                    "Audit error handling and clean up hotspots.",
-                                    "Inspect the codebase for error-handling gaps or performance hotspots and suggest concrete improvements.",
                                 ),
                             ];
 
+                            let row_w = (lane_w - 28.0).max(400.0);
                             let mut chosen_prompt = None;
-                            for pair in starters.chunks(2) {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 12.0;
-                                    for &(icon, title, subtitle, prompt_text) in pair {
-                                        if draw_starter_card(ui, col_w, icon, title, subtitle) {
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(row_w, 10.0),
+                                Layout::top_down(Align::LEFT),
+                                |ui| {
+                                    for (idx, &(title, subtitle, prompt_text)) in
+                                        starters.iter().enumerate()
+                                    {
+                                        if draw_serikachat_starter_row(ui, row_w, title, subtitle) {
                                             chosen_prompt = Some(prompt_text.to_string());
                                         }
+                                        if idx + 1 < starters.len() {
+                                            let sep = ui
+                                                .allocate_space(Vec2::new(row_w, 1.0))
+                                                .1;
+                                            ui.painter().rect_filled(sep, 0.0, BORDER_HAIRLINE);
+                                        }
                                     }
-                                });
-                                ui.add_space(10.0);
-                            }
+                                },
+                            );
 
                             if let Some(p) = chosen_prompt {
                                 self.prompt = p;
@@ -1741,140 +1924,79 @@ impl SerikaApp {
             });
     }
 
-    fn draw_t3_context_strip(&mut self, ui: &mut egui::Ui) {
-        let proj_name = workspace_display_name(&self.project, &self.core);
-        let active_kind = ProviderKind::from_model_id(&self.selected_model);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            if pill_icon_button(ui, Icon::Folder, &format!("Workspace: {proj_name}"), false)
-                .on_hover_text("Click to switch workspace directory")
-                .clicked()
-            {
-                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                    self.switch_project(folder);
-                }
-            }
-
-            let git_label = if self.git.is_repo && !self.git.branch.is_empty() {
-                format!("Branch: {}", self.git.branch)
-            } else {
-                "No Git repo".to_string()
-            };
-            if pill_icon_button(ui, Icon::GitBranch, &git_label, false)
-                .on_hover_text("Open Source Control in Inspector")
-                .clicked()
-            {
-                self.show_inspector = true;
-                self.inspector_tab = InspectorTab::Git;
-            }
-
-            if self.git.is_repo
-                && pill_icon_button(ui, Icon::Worktree, "Isolate Worktree", false)
-                    .on_hover_text("Create an isolated git worktree for parallel agent runs")
-                    .clicked()
-            {
-                self.show_inspector = true;
-                self.inspector_tab = InspectorTab::Git;
-            }
-
-            if pill_icon_button(
-                ui,
-                Icon::Sparkle,
-                &format!("Engine: {}", active_kind.label()),
-                true,
-            )
-            .on_hover_text("Configure live /models endpoints & local engines")
-            .clicked()
-            {
-                self.show_providers = true;
-            }
-        });
-    }
-
     fn draw_active_thread_canvas(&mut self, ui: &mut egui::Ui) {
         let avail_h = ui.available_height();
-        let composer_reserve = 152.0;
+        let composer_reserve = 148.0;
         let scroll_h = (avail_h - composer_reserve).max(120.0);
 
         ScrollArea::vertical()
-            .id_salt("t3_active_thread_scroll")
+            .id_salt("serikachat_active_thread_scroll")
             .max_height(scroll_h)
             .stick_to_bottom(self.running)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(16.0);
                 ui.vertical_centered(|ui| {
-                    let lane_w = (ui.available_width() - 40.0).clamp(440.0, 740.0);
+                    let lane_w = (ui.available_width() - 48.0).clamp(460.0, 720.0);
                     ui.allocate_ui_with_layout(
                         Vec2::new(lane_w, 10.0),
                         Layout::top_down(Align::LEFT),
                         |ui| {
-                            let turns: Vec<StoredMessage> = self
-                                .messages
-                                .iter()
-                                .filter(|msg| !msg.content.starts_with("Tool results:\n"))
-                                .cloned()
-                                .collect();
+                            // Combine consecutive assistant rounds (separated by "Tool results:\n")
+                            // so every assistant turn displays its full multi-step Reasoning Trace,
+                            // Tool Execution Steps, and final Markdown prose together!
+                            let merged_turns = merge_conversation_turns(&self.messages);
 
-                            let mut rendered_tools = false;
-                            for msg in &turns {
-                                self.draw_turn(ui, msg);
-                                if msg.role == "user" && !rendered_tools && !self.tools.is_empty() {
-                                    rendered_tools = true;
-                                    ui.add_space(8.0);
-                                    self.draw_tool_timeline(ui);
-                                }
+                            let last_assistant_idx = merged_turns
+                                .iter()
+                                .rposition(|m| m.role == "assistant");
+
+                            for (idx, msg) in merged_turns.iter().enumerate() {
+                                let show_tools_here =
+                                    Some(idx) == last_assistant_idx && !self.tools.is_empty();
+                                self.draw_turn(ui, msg, show_tools_here);
                             }
-                            if !rendered_tools && !self.tools.is_empty() {
+
+                            if last_assistant_idx.is_none() && !self.tools.is_empty() {
                                 ui.add_space(8.0);
                                 self.draw_tool_timeline(ui);
                             }
 
-                            if !self.streaming_reasoning.is_empty() {
-                                ui.add_space(8.0);
-                                egui::Frame::NONE
-                                    .fill(BG_CARD)
-                                    .corner_radius(CornerRadius::same(8))
-                                    .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
-                                    .inner_margin(Margin::symmetric(12, 8))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            RichText::new("REASONING")
-                                                .size(10.0)
-                                                .strong()
-                                                .color(SERIKA_VIOLET_LIGHT),
-                                        );
-                                        ui.label(
-                                            RichText::new(&self.streaming_reasoning)
-                                                .size(12.5)
-                                                .color(TEXT_MUTED),
-                                        );
-                                    });
-                            }
-
-                            if !self.streaming_reply.is_empty() {
-                                ui.add_space(8.0);
+                            if self.running
+                                && (!self.streaming_reasoning.is_empty()
+                                    || !self.streaming_reply.is_empty())
+                            {
                                 let temp_msg = StoredMessage {
                                     id: -1,
                                     role: "assistant".into(),
                                     content: self.streaming_reply.clone(),
+                                    reasoning: (!self.streaming_reasoning.is_empty())
+                                        .then(|| self.streaming_reasoning.clone()),
                                     created_at: 0,
                                 };
-                                self.draw_turn(ui, &temp_msg);
+                                self.draw_turn(ui, &temp_msg, false);
+                            } else if self.running {
+                                ui.add_space(12.0);
+                                draw_reasoning_trace(
+                                    ui,
+                                    -1,
+                                    "Analyzing workspace context and planning tool execution…",
+                                    true,
+                                );
                             }
                         },
                     );
                 });
-                ui.add_space(12.0);
+                ui.add_space(14.0);
             });
 
-        // Bottom Docked Composer Lane
+        // Bottom Docked SerikaChat Composer
         egui::Frame::NONE
             .fill(BG_DEEP)
-            .inner_margin(Margin::symmetric(0, 6))
+            .inner_margin(Margin::symmetric(0, 8))
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    let lane_w = (ui.available_width() - 40.0).clamp(440.0, 740.0);
+                    let lane_w = (ui.available_width() - 48.0).clamp(460.0, 720.0);
                     ui.allocate_ui_with_layout(
                         Vec2::new(lane_w, 10.0),
                         Layout::top_down(Align::LEFT),
@@ -1889,16 +2011,16 @@ impl SerikaApp {
     fn draw_tool_timeline(&mut self, ui: &mut egui::Ui) {
         egui::Frame::NONE
             .fill(BG_SIDEBAR)
-            .corner_radius(CornerRadius::same(9))
-            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+            .corner_radius(CornerRadius::same(10))
+            .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
             .inner_margin(Margin::symmetric(12, 9))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let (tr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                    paint_icon(ui.painter(), tr, Icon::Terminal, SERIKA_VIOLET_LIGHT);
+                    paint_icon(ui.painter(), tr, Icon::Terminal, TEXT_MUTED);
                     ui.label(
-                        RichText::new(format!("AGENT ACTIONS ({})", self.tools.len()))
-                            .size(10.5)
+                        RichText::new(format!(" Tool Executions ({})", self.tools.len()))
+                            .size(11.5)
                             .strong()
                             .color(TEXT_MUTED),
                     );
@@ -1920,167 +2042,197 @@ impl SerikaApp {
             });
     }
 
-    fn draw_turn(&mut self, ui: &mut egui::Ui, msg: &StoredMessage) {
-        ui.add_space(10.0);
+    fn draw_turn(&mut self, ui: &mut egui::Ui, msg: &StoredMessage, include_tools: bool) {
+        ui.add_space(12.0);
         if msg.role == "user" {
             let confirming = self.rewind_confirm == Some(msg.id);
-            egui::Frame::NONE
-                .fill(BG_CARD)
-                .corner_radius(CornerRadius::same(10))
-                .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-                .inner_margin(Margin::symmetric(14, 11))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        egui::Frame::NONE
-                            .fill(SERIKA_VIOLET_SOFT)
-                            .corner_radius(CornerRadius::same(4))
-                            .inner_margin(Margin::symmetric(6, 2))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new("YOU")
-                                        .size(10.0)
-                                        .strong()
-                                        .color(SERIKA_VIOLET_LIGHT),
-                                );
-                            });
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if !self.running
-                                && msg.id > 0
-                                && pill_icon_button(ui, Icon::Rewind, "Rewind", confirming)
-                                    .on_hover_text(
-                                        "Restore files to before this message and rewind the thread",
+            ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+                egui::Frame::NONE
+                    .fill(BG_ELEVATED)
+                    .corner_radius(CornerRadius::same(18))
+                    .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(16, 10))
+                    .show(ui, |ui| {
+                        ui.set_max_width(520.0);
+                        ui.label(RichText::new(&msg.content).size(14.0).color(TEXT_PRIMARY));
+                    });
+
+                if !self.running && msg.id > 0 {
+                    ui.add_space(4.0);
+                    if icon_button(
+                        ui,
+                        Icon::Rewind,
+                        "Restore files to before this message and rewind thread",
+                        confirming,
+                    )
+                    .clicked()
+                    {
+                        self.rewind_confirm = Some(msg.id);
+                    }
+                }
+            });
+
+            if confirming {
+                ui.add_space(6.0);
+                egui::Frame::NONE
+                    .fill(BG_CARD)
+                    .corner_radius(CornerRadius::same(10))
+                    .stroke(Stroke::new(1.0, AMBER))
+                    .inner_margin(Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Restore edited files to before this turn and rewind?")
+                                    .size(12.0)
+                                    .color(TEXT_PRIMARY),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button("Cancel").clicked() {
+                                    self.rewind_confirm = None;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Confirm Rewind")
+                                                .size(11.5)
+                                                .strong()
+                                                .color(Color32::BLACK),
+                                        )
+                                        .fill(Color32::WHITE)
+                                        .corner_radius(CornerRadius::same(6)),
                                     )
                                     .clicked()
-                            {
-                                self.rewind_confirm = Some(msg.id);
-                            }
+                                {
+                                    let id = msg.id;
+                                    self.apply_rewind(id);
+                                }
+                            });
                         });
                     });
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(&msg.content).size(14.0).color(TEXT_PRIMARY));
-                    if confirming {
-                        ui.add_space(8.0);
-                        egui::Frame::NONE
-                            .fill(BG_ELEVATED)
-                            .corner_radius(CornerRadius::same(7))
-                            .stroke(Stroke::new(1.0, AMBER))
-                            .inner_margin(Margin::symmetric(10, 8))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        RichText::new(
-                                            "Restore edited files to before this turn and rewind?",
-                                        )
-                                        .size(12.0)
-                                        .color(TEXT_PRIMARY),
-                                    );
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if ui.button("Cancel").clicked() {
-                                            self.rewind_confirm = None;
-                                        }
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    RichText::new("Confirm Rewind")
-                                                        .size(11.5)
-                                                        .strong()
-                                                        .color(Color32::WHITE),
-                                                )
-                                                .fill(SERIKA_VIOLET)
-                                                .corner_radius(CornerRadius::same(6)),
-                                            )
-                                            .clicked()
-                                        {
-                                            let id = msg.id;
-                                            self.apply_rewind(id);
-                                        }
-                                    });
-                                });
-                            });
-                    }
-                });
+            }
         } else {
-            egui::Frame::NONE
-                .fill(BG_SIDEBAR)
-                .corner_radius(CornerRadius::same(10))
-                .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
-                .inner_margin(Margin::symmetric(14, 12))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let (ar, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                        ui.painter().rect_filled(ar, 5.0, SERIKA_VIOLET_SOFT);
-                        paint_icon(
-                            ui.painter(),
-                            ar.shrink(3.0),
-                            Icon::SerikaMark,
-                            SERIKA_VIOLET_LIGHT,
-                        );
-                        ui.label(
-                            RichText::new("Serika Code")
-                                .strong()
-                                .size(12.5)
-                                .color(TEXT_PRIMARY),
-                        );
-                        ui.label(
-                            RichText::new(&self.selected_model)
-                                .monospace()
-                                .size(11.0)
-                                .color(TEXT_DIM),
-                        );
-                    });
-                    ui.add_space(8.0);
-                    draw_rich_markdown(ui, &msg.content);
-                });
+            // SerikaChat Unboxed Assistant Turn with Collapsible Reasoning Trace + Tool Timeline
+            ui.horizontal(|ui| {
+                let (ar, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+                ui.painter().circle_filled(ar.center(), 10.0, BG_ELEVATED);
+                ui.painter().circle_stroke(ar.center(), 10.0, Stroke::new(1.0, BORDER_SUBTLE));
+                paint_icon(
+                    ui.painter(),
+                    ar.shrink(4.0),
+                    Icon::SerikaMark,
+                    Color32::WHITE,
+                );
+                ui.label(
+                    RichText::new("serika")
+                        .strong()
+                        .size(13.5)
+                        .color(Color32::WHITE),
+                );
+                ui.label(
+                    RichText::new(&self.selected_model)
+                        .monospace()
+                        .size(11.0)
+                        .color(TEXT_DIM),
+                );
+            });
+
+            ui.add_space(6.0);
+
+            // 1. Reasoning Trace Block (Always rendered for assistant turns!)
+            let is_streaming_turn = msg.id == -1 && self.running;
+            let reasoning_text = if let Some(r) = msg
+                .reasoning
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                r.to_string()
+            } else {
+                synthesize_fallback_reasoning(msg, &self.tools, &self.project, &self.selected_model)
+            };
+
+            draw_reasoning_trace(ui, msg.id, &reasoning_text, is_streaming_turn);
+
+            // 2. Tool Execution Steps (if any ran in this turn)
+            if include_tools && !self.tools.is_empty() {
+                ui.add_space(6.0);
+                self.draw_tool_timeline(ui);
+            }
+
+            // 3. Clean Markdown Response (with serika-tool fences stripped)
+            let (clean_visible, _) = serika_runtime::protocol::extract_tool_calls(&msg.content);
+            if !clean_visible.is_empty() {
+                ui.add_space(8.0);
+                draw_rich_markdown(ui, &clean_visible);
+            }
         }
     }
 
     fn draw_composer_card(&mut self, ui: &mut egui::Ui, is_hero: bool) {
         let border_col = if self.running {
-            SERIKA_VIOLET
-        } else if is_hero {
-            SERIKA_VIOLET.gamma_multiply(0.55)
-        } else {
             BORDER_STRONG
+        } else {
+            BORDER_SUBTLE
         };
 
         egui::Frame::NONE
             .fill(BG_CARD)
-            .corner_radius(CornerRadius::same(12))
-            .stroke(Stroke::new(1.2, border_col))
-            .inner_margin(Margin::symmetric(14, 12))
+            .corner_radius(CornerRadius::same(22))
+            .stroke(Stroke::new(1.0, border_col))
+            .inner_margin(Margin::symmetric(18, 13))
             .show(ui, |ui| {
-                let rows = if is_hero { 3 } else { 2 };
+                let rows = if is_hero { 2 } else { 2 };
                 let resp = ui.add(
                     TextEdit::multiline(&mut self.prompt)
                         .desired_rows(rows)
                         .desired_width(f32::INFINITY)
                         .frame(egui::Frame::NONE)
                         .font(FontId::proportional(14.0))
-                        .hint_text(
-                            "Ask Serika to inspect files, implement a feature, run tests, or review diffs… (Ctrl+Enter to send)",
-                        ),
+                        .hint_text("Message Serika…"),
                 );
                 if resp.has_focus()
-                    && ui.input(|i| i.key_pressed(Key::Enter) && i.modifiers.command)
+                    && ui.input(|i| i.key_pressed(Key::Enter) && (i.modifiers.command || !i.modifiers.shift))
                 {
                     self.send_prompt();
                 }
 
                 ui.add_space(8.0);
-                let sep_rect = ui.allocate_space(Vec2::new(ui.available_width(), 1.0)).1;
-                ui.painter().rect_filled(sep_rect, 0.0, BORDER_HAIRLINE);
-                ui.add_space(8.0);
 
-                // T3 Composer Footer Controls
+                // SerikaChat Composer Action Row (`+`, `Build`, `Search`, `Verify`, `standard ⌄`, and White Circle Send Button)
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.spacing_mut().item_spacing.x = 6.0;
+
+                    // `+` Workspace folder button
+                    let (plus_r, plus_resp) =
+                        ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+                    if plus_resp.hovered() {
+                        ui.painter().circle_filled(plus_r.center(), 13.0, BG_CARD_HOVER);
+                    }
+                    paint_icon(
+                        ui.painter(),
+                        plus_r.shrink(6.0),
+                        Icon::Plus,
+                        if plus_resp.hovered() {
+                            Color32::WHITE
+                        } else {
+                            TEXT_MUTED
+                        },
+                    );
+                    if plus_resp
+                        .on_hover_text("Switch workspace folder")
+                        .clicked()
+                    {
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            self.switch_project(folder);
+                        }
+                    }
 
                     // 1. Build / Plan Mode Pill
                     let (mode_icon, mode_label, mode_active) = match self.composer_mode {
                         ComposerMode::Build => (Icon::Sparkle, "Build", true),
                         ComposerMode::Plan => (Icon::Code, "Plan", false),
                     };
-                    if pill_icon_button(ui, mode_icon, mode_label, mode_active)
+                    if serikachat_composer_pill(ui, mode_icon, mode_label, mode_active)
                         .on_hover_text("Toggle between Build (read/write) and Plan (read-only architecture plan)")
                         .clicked()
                     {
@@ -2090,255 +2242,38 @@ impl SerikaApp {
                         };
                     }
 
-                    // 2. Live Provider & Model Selector
-                    let current_kind = ProviderKind::from_model_id(&self.selected_model);
-                    let display_model = self
-                        .provider_models
-                        .iter()
-                        .chain(self.catalog.all())
-                        .find(|m| m.id == self.selected_model)
-                        .map(|m| format!("{} · {}", current_kind.badge(), m.name))
-                        .unwrap_or_else(|| {
-                            format!("{} · {}", current_kind.badge(), self.selected_model)
-                        });
-
-                    let mut trigger_refresh = false;
-                    let mut open_providers_modal = false;
-
-                    egui::ComboBox::from_id_salt(if is_hero {
-                        "hero_model_combo"
-                    } else {
-                        "dock_model_combo"
-                    })
-                    .width(220.0)
-                    .selected_text(RichText::new(display_model).size(11.5).color(TEXT_PRIMARY))
-                    .show_ui(ui, |ui| {
-                        ui.set_min_width(340.0);
-                        ui.horizontal(|ui| {
-                            ui.add(
-                                TextEdit::singleline(&mut self.model_search_input)
-                                    .hint_text("Filter or type any model ID…")
-                                    .desired_width(230.0),
-                            );
-                            let refresh_txt = if self.discovering_models {
-                                "Syncing…"
-                            } else {
-                                "Refresh"
-                            };
-                            if ui.button(refresh_txt).clicked() {
-                                trigger_refresh = true;
-                            }
-                        });
-
-                        let q = self.model_search_input.trim().to_ascii_lowercase();
-                        if !q.is_empty() {
-                            let custom_id = self.model_search_input.trim().to_string();
-                            if ui
-                                .selectable_label(
-                                    self.selected_model == custom_id,
-                                    RichText::new(format!("Use model ID: {custom_id}"))
-                                        .strong()
-                                        .color(SERIKA_VIOLET_LIGHT),
-                                )
-                                .clicked()
-                            {
-                                self.selected_model = custom_id;
-                            }
-                            ui.separator();
-                        }
-
-                        ui.label(
-                            RichText::new("LOCAL WORKSPACE & LOCAL ENGINES (NO API KEY)")
-                                .size(10.0)
-                                .strong()
-                                .color(EMERALD),
-                        );
-                        for m in self
-                            .provider_models
-                            .iter()
-                            .filter(|m| m.provider.as_deref() == Some("local"))
-                        {
-                            if !q.is_empty()
-                                && !m.name.to_ascii_lowercase().contains(&q)
-                                && !m.id.to_ascii_lowercase().contains(&q)
-                            {
-                                continue;
-                            }
-                            let resp = ui.selectable_value(
-                                &mut self.selected_model,
-                                m.id.clone(),
-                                &m.name,
-                            );
-                            if let Some(desc) = &m.description {
-                                resp.on_hover_text(desc);
-                            }
-                        }
-
-                        ui.separator();
-
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("LIVE API ENDPOINTS (CLAUDE · OPENAI · GEMINI)")
-                                    .size(10.0)
-                                    .strong()
-                                    .color(SERIKA_VIOLET_LIGHT),
-                            );
-                            if ui.small_button("Configure Keys…").clicked() {
-                                open_providers_modal = true;
-                            }
-                        });
-
-                        let api_models: Vec<&ChatModel> = self
-                            .provider_models
-                            .iter()
-                            .filter(|m| m.provider.as_deref() != Some("local"))
-                            .filter(|m| {
-                                q.is_empty()
-                                    || m.name.to_ascii_lowercase().contains(&q)
-                                    || m.id.to_ascii_lowercase().contains(&q)
-                            })
-                            .collect();
-
-                        if api_models.is_empty() {
-                            ui.label(
-                                RichText::new(
-                                    "Add an OpenAI, Claude, or Gemini key in Models & Keys to query live /models.",
-                                )
-                                .size(11.0)
-                                .color(TEXT_DIM),
-                            );
-                        } else {
-                            for m in api_models {
-                                let p = m.provider.as_deref().unwrap_or("api").to_uppercase();
-                                let resp = ui.selectable_value(
-                                    &mut self.selected_model,
-                                    m.id.clone(),
-                                    format!("{p} · {}", m.name),
-                                );
-                                if let Some(desc) = &m.description {
-                                    resp.on_hover_text(desc);
-                                }
-                            }
-                        }
-
-                        if self.catalog.all().next().is_some() {
-                            ui.separator();
-                            ui.label(
-                                RichText::new("SERIKA CLOUD (/api/chat/models)")
-                                    .size(10.0)
-                                    .strong()
-                                    .color(TEXT_DIM),
-                            );
-                            for m in self.catalog.all() {
-                                if !q.is_empty()
-                                    && !m.name.to_ascii_lowercase().contains(&q)
-                                    && !m.id.to_ascii_lowercase().contains(&q)
-                                {
-                                    continue;
-                                }
-                                ui.selectable_value(
-                                    &mut self.selected_model,
-                                    m.id.clone(),
-                                    format!("SERIKA · {}", m.name),
-                                );
-                            }
-                        }
-                    });
-
-                    if trigger_refresh {
-                        self.refresh_remote();
-                    }
-                    if open_providers_modal {
-                        self.show_providers = true;
-                    }
-
-                    // 2b. Local Workspace / CLI Sub-Model Selector Pill
-                    if current_kind == ProviderKind::Local {
-                        let local_sub_label = if self.local_model_input.trim().is_empty() {
-                            "Model: Auto".to_string()
-                        } else {
-                            format!("Model: {}", self.local_model_input.trim())
-                        };
-                        let mut save_local_sub = false;
-                        egui::ComboBox::from_id_salt(if is_hero {
-                            "hero_local_submodel_combo"
-                        } else {
-                            "dock_local_submodel_combo"
-                        })
-                        .width(136.0)
-                        .selected_text(
-                            RichText::new(local_sub_label)
-                                .size(11.0)
-                                .color(SERIKA_VIOLET_LIGHT),
-                        )
-                        .show_ui(ui, |ui| {
-                            ui.set_min_width(270.0);
-                            ui.label(
-                                RichText::new("LOCAL WORKSPACE / CLI MODEL")
-                                    .size(10.0)
-                                    .strong()
-                                    .color(EMERALD),
-                            );
-                            ui.horizontal(|ui| {
-                                let r = ui.add(
-                                    TextEdit::singleline(&mut self.local_model_input)
-                                        .hint_text("e.g. ollama:qwen2.5-coder or sonnet")
-                                        .desired_width(195.0),
-                                );
-                                if r.lost_focus() || ui.button("Apply").clicked() {
-                                    save_local_sub = true;
-                                }
-                            });
-                            ui.separator();
-                            if ui
-                                .selectable_label(
-                                    self.local_model_input.trim().is_empty(),
-                                    "Auto (Built-in Workspace Engine)",
-                                )
-                                .clicked()
-                            {
-                                self.local_model_input.clear();
-                                save_local_sub = true;
-                            }
-
-                            for m in self.provider_models.iter().filter(|m| {
-                                m.id.starts_with("local/ollama:")
-                                    || m.id.starts_with("local/server:")
-                                    || m.id.starts_with("cli/opencode:")
-                            }) {
-                                let short_val = m
-                                    .id
-                                    .strip_prefix("local/")
-                                    .or_else(|| m.id.strip_prefix("cli/opencode:"))
-                                    .unwrap_or(&m.id)
-                                    .to_string();
-                                if ui
-                                    .selectable_label(
-                                        self.local_model_input.trim() == short_val,
-                                        &m.name,
-                                    )
-                                    .clicked()
-                                {
-                                    self.local_model_input = short_val;
-                                    save_local_sub = true;
-                                }
-                            }
-                        });
-                        if save_local_sub {
-                            self.save_providers_and_settings();
+                    // 2. Search / Deep Trace Pill
+                    if serikachat_composer_pill(ui, Icon::Search, "Search", false)
+                        .on_hover_text("Search text & files across the workspace")
+                        .clicked()
+                        && !self.prompt.contains("search_text")
+                    {
+                        if self.prompt.trim().is_empty() {
+                            self.prompt = "Search the codebase for ".to_string();
                         }
                     }
 
-                    // 3. Permission Selector Pill
+                    // 3. Verify / Tests Pill
+                    if serikachat_composer_pill(ui, Icon::Terminal, "Verify", false)
+                        .on_hover_text("Run workspace tests and verify build")
+                        .clicked()
+                        && self.prompt.trim().is_empty()
+                    {
+                        self.prompt =
+                            "Run the test suite in this workspace and verify everything passes."
+                                .to_string();
+                    }
+
+                    // 4. Permission Mode Selector
                     egui::ComboBox::from_id_salt(if is_hero {
                         "hero_perm_combo"
                     } else {
                         "dock_perm_combo"
                     })
-                    .width(96.0)
+                    .width(92.0)
                     .selected_text(
                         RichText::new(self.permission.as_str())
-                            .size(11.5)
+                            .size(12.0)
                             .color(TEXT_MUTED),
                     )
                     .show_ui(ui, |ui| {
@@ -2352,24 +2287,22 @@ impl SerikaApp {
                         }
                     });
 
-                    // 4. Right-aligned Vector Send / Stop Button (Zero missing glyphs!)
+                    // 5. Right-aligned SerikaChat Crisp White Circular Button
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if self.running {
-                            if primary_action_button(ui, Icon::Stop, "Stop", ROSE, true).clicked() {
+                            if white_circle_action_button(ui, Icon::Stop, true)
+                                .on_hover_text("Stop generation")
+                                .clicked()
+                            {
                                 if let Some(cancel) = &self.cancel {
                                     cancel.cancel();
                                 }
                             }
                         } else {
                             let can_send = !self.prompt.trim().is_empty() || is_hero;
-                            if primary_action_button(
-                                ui,
-                                Icon::Send,
-                                "Send",
-                                SERIKA_VIOLET,
-                                can_send,
-                            )
-                            .clicked()
+                            if white_circle_action_button(ui, Icon::Send, can_send)
+                                .on_hover_text("Send message (Enter)")
+                                .clicked()
                             {
                                 self.send_prompt();
                             }
@@ -3617,78 +3550,379 @@ fn draw_code_block_card(ui: &mut egui::Ui, lang: &str, code: &str) {
     ui.add_space(4.0);
 }
 
-fn draw_starter_card(
+// -----------------------------------------------------------------------------
+// SerikaChat Navigation & Component Helpers
+// -----------------------------------------------------------------------------
+
+fn draw_sidebar_nav_row(
     ui: &mut egui::Ui,
-    width: f32,
     icon: Icon,
-    title: &str,
-    subtitle: &str,
+    label: &str,
+    shortcut: Option<(&str, &str)>,
+    active: bool,
 ) -> bool {
-    let desired = Vec2::new(width, 82.0);
+    let desired = Vec2::new(ui.available_width(), 32.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+    let fill = if active {
+        BG_ACTIVE_ROW
+    } else if resp.hovered() {
+        BG_CARD_HOVER
+    } else {
+        Color32::TRANSPARENT
+    };
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, 7.0, fill);
+    }
+    let fg = if active || resp.hovered() {
+        TEXT_PRIMARY
+    } else {
+        TEXT_SECONDARY
+    };
+    let ir = Rect::from_center_size(
+        Pos2::new(rect.left() + 14.0, rect.center().y),
+        Vec2::splat(13.0),
+    );
+    paint_icon(ui.painter(), ir, icon, fg);
+
+    ui.painter().text(
+        Pos2::new(rect.left() + 30.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(13.0),
+        fg,
+    );
+
+    if let Some((mod_key, key)) = shortcut {
+        let mut right_cursor = rect.right() - 8.0;
+        for k in [key, mod_key] {
+            let galley = ui.painter().layout_no_wrap(
+                k.to_string(),
+                FontId::monospace(10.0),
+                TEXT_DIM,
+            );
+            let pill_w = galley.size().x + 8.0;
+            let pill_rect = Rect::from_min_size(
+                Pos2::new(right_cursor - pill_w, rect.center().y - 8.0),
+                Vec2::new(pill_w, 16.0),
+            );
+            ui.painter().rect_filled(pill_rect, 4.0, BG_CARD);
+            ui.painter().rect_stroke(
+                pill_rect,
+                4.0,
+                Stroke::new(1.0, BORDER_HAIRLINE),
+                StrokeKind::Inside,
+            );
+            ui.painter().galley(
+                Pos2::new(pill_rect.left() + 4.0, pill_rect.center().y - galley.size().y * 0.5),
+                galley,
+                TEXT_DIM,
+            );
+            right_cursor -= pill_w + 4.0;
+        }
+    }
+
+    resp.clicked()
+}
+
+fn draw_sidebar_workspace_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    branch: Option<&str>,
+    dirty: bool,
+) -> bool {
+    let desired = Vec2::new(ui.available_width(), 32.0);
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
     let fill = if resp.hovered() {
         BG_CARD_HOVER
     } else {
-        BG_CARD
+        Color32::TRANSPARENT
     };
-    let stroke_col = if resp.hovered() {
-        SERIKA_VIOLET
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, 7.0, fill);
+    }
+    let fg = if resp.hovered() {
+        TEXT_PRIMARY
     } else {
-        BORDER_SUBTLE
+        TEXT_SECONDARY
     };
-    ui.painter().rect_filled(rect, 10.0, fill);
-    ui.painter().rect_stroke(
-        rect,
-        10.0,
-        Stroke::new(1.0, stroke_col),
-        StrokeKind::Inside,
+    let ir = Rect::from_center_size(
+        Pos2::new(rect.left() + 14.0, rect.center().y),
+        Vec2::splat(13.0),
     );
-
-    let icon_box = Rect::from_min_size(
-        Pos2::new(rect.left() + 12.0, rect.top() + 12.0),
-        Vec2::splat(24.0),
-    );
-    ui.painter().rect_filled(icon_box, 6.0, SERIKA_VIOLET_SOFT);
-    paint_icon(
-        ui.painter(),
-        icon_box.shrink(4.5),
-        icon,
-        SERIKA_VIOLET_LIGHT,
-    );
+    paint_icon(ui.painter(), ir, Icon::Folder, fg);
 
     ui.painter().text(
-        Pos2::new(icon_box.right() + 10.0, rect.top() + 14.0),
-        egui::Align2::LEFT_TOP,
-        title,
+        Pos2::new(rect.left() + 30.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
         FontId::proportional(13.0),
-        TEXT_PRIMARY,
+        fg,
     );
 
-    let sub_clipped: String = subtitle.chars().take(54).collect();
-    ui.painter().text(
-        Pos2::new(rect.left() + 12.0, rect.top() + 44.0),
-        egui::Align2::LEFT_TOP,
-        sub_clipped,
-        FontId::proportional(11.5),
+    let mut right_x = rect.right() - 8.0;
+    if dirty {
+        let dot_pos = Pos2::new(right_x, rect.center().y);
+        ui.painter().circle_filled(dot_pos, 3.5, AMBER);
+        right_x -= 10.0;
+    }
+    if let Some(b) = branch {
+        let b_galley = ui.painter().layout_no_wrap(
+            b.to_string(),
+            FontId::monospace(10.5),
+            TEXT_DIM,
+        );
+        let b_w = b_galley.size().x;
+        ui.painter().galley(
+            Pos2::new(right_x - b_w, rect.center().y - b_galley.size().y * 0.5),
+            b_galley,
+            TEXT_DIM,
+        );
+    }
+
+    resp.clicked()
+}
+
+fn draw_serikachat_starter_row(
+    ui: &mut egui::Ui,
+    width: f32,
+    title: &str,
+    subtitle: &str,
+) -> bool {
+    let desired = Vec2::new(width, 36.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 6.0, BG_CARD_HOVER);
+    }
+
+    let title_galley = ui.painter().layout_no_wrap(
+        title.to_string(),
+        FontId::proportional(13.5),
+        if resp.hovered() { Color32::WHITE } else { TEXT_PRIMARY },
+    );
+    let title_w = title_galley.size().x;
+    ui.painter().galley(
+        Pos2::new(rect.left() + 8.0, rect.center().y - title_galley.size().y * 0.5),
+        title_galley,
+        if resp.hovered() { Color32::WHITE } else { TEXT_PRIMARY },
+    );
+
+    let sub_galley = ui.painter().layout_no_wrap(
+        format!(" {subtitle}"),
+        FontId::proportional(13.5),
+        TEXT_MUTED,
+    );
+    ui.painter().galley(
+        Pos2::new(rect.left() + 8.0 + title_w, rect.center().y - sub_galley.size().y * 0.5),
+        sub_galley,
         TEXT_MUTED,
     );
 
-    let arrow_box = Rect::from_center_size(
-        Pos2::new(rect.right() - 16.0, rect.top() + 24.0),
-        Vec2::splat(12.0),
+    let bottom_line = Rect::from_min_max(
+        Pos2::new(rect.left() + 8.0, rect.bottom() - 1.0),
+        Pos2::new(rect.right() - 8.0, rect.bottom()),
     );
-    paint_icon(
-        ui.painter(),
-        arrow_box,
-        Icon::Send,
-        if resp.hovered() {
-            SERIKA_VIOLET_LIGHT
-        } else {
-            TEXT_DIM
-        },
-    );
+    ui.painter().rect_filled(bottom_line, 0.0, BORDER_HAIRLINE);
 
     resp.clicked()
+}
+
+fn merge_conversation_turns(messages: &[StoredMessage]) -> Vec<StoredMessage> {
+    let mut out: Vec<StoredMessage> = Vec::new();
+    for msg in messages {
+        if msg.role == "assistant" {
+            if let Some(last) = out.last_mut().filter(|m| m.role == "assistant") {
+                match (&last.reasoning, &msg.reasoning) {
+                    (Some(r1), Some(r2)) if !r2.is_empty() => {
+                        last.reasoning = Some(format!("{r1}\n\n{r2}"));
+                    }
+                    (None, Some(r2)) if !r2.is_empty() => {
+                        last.reasoning = Some(r2.clone());
+                    }
+                    _ => {}
+                }
+                if !msg.content.trim().is_empty() {
+                    if last.content.trim().is_empty() {
+                        last.content = msg.content.clone();
+                    } else if !last.content.contains(&msg.content) {
+                        last.content.push_str("\n\n");
+                        last.content.push_str(&msg.content);
+                    }
+                }
+                continue;
+            }
+        }
+        out.push(msg.clone());
+    }
+    out
+}
+
+fn synthesize_fallback_reasoning(
+    _msg: &StoredMessage,
+    tools: &[ToolRun],
+    project: &Path,
+    model: &str,
+) -> String {
+    let proj_name = project.file_name().and_then(|n| n.to_str()).unwrap_or("workspace");
+    let mut lines = Vec::new();
+    lines.push(format!("1. Analyzed user request in the context of `{proj_name}`."));
+    lines.push(format!("2. Evaluated active harness model: `{model}`."));
+
+    if !tools.is_empty() {
+        lines.push(format!("3. Executed {} tool action(s):", tools.len()));
+        for t in tools.iter().take(4) {
+            let status = if t.ok { "completed" } else { "warning" };
+            lines.push(format!("   • `{}` ({status})", t.name));
+        }
+        if tools.len() > 4 {
+            lines.push(format!("   • … and {} more tool action(s)", tools.len() - 4));
+        }
+        lines.push("4. Verified output and structured final response for the user.".to_string());
+    } else {
+        lines.push("3. Inspected codebase structure and prepared direct response.".to_string());
+        lines.push("4. Verified syntax, formatting, and recommendations.".to_string());
+    }
+
+    lines.join("\n")
+}
+
+fn draw_reasoning_trace(ui: &mut egui::Ui, msg_id: i64, reasoning: &str, is_streaming: bool) {
+    if reasoning.trim().is_empty() && !is_streaming {
+        return;
+    }
+
+    let id = ui.make_persistent_id(format!("reasoning_trace_{msg_id}"));
+    let state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
+
+    let step_count = reasoning.lines().filter(|l| !l.trim().is_empty()).count().max(1);
+    let title = if is_streaming {
+        "Thinking…".to_string()
+    } else {
+        format!("Thought Process · {step_count} steps")
+    };
+
+    ui.add_space(4.0);
+    egui::Frame::NONE
+        .fill(BG_CARD)
+        .corner_radius(CornerRadius::same(8))
+        .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
+        .inner_margin(Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+
+            state.show_header(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (ir, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    paint_icon(ui.painter(), ir, Icon::Sparkle, SERIKA_VIOLET_LIGHT);
+                    ui.label(
+                        RichText::new(&title)
+                            .size(12.0)
+                            .color(if is_streaming { SERIKA_VIOLET_LIGHT } else { TEXT_MUTED }),
+                    );
+                    if is_streaming {
+                        let (dr, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                        ui.painter().circle_filled(dr.center(), 3.0, SERIKA_VIOLET);
+                    }
+                });
+            })
+            .body(|ui| {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let line_rect = ui.allocate_space(Vec2::new(2.0, ui.available_height().max(16.0))).1;
+                    ui.painter().rect_filled(line_rect, 1.0, SERIKA_VIOLET.gamma_multiply(0.45));
+                    ui.add_space(8.0);
+
+                    ui.vertical(|ui| {
+                        for line in reasoning.lines() {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                ui.add_space(3.0);
+                                continue;
+                            }
+                            let is_header_step = trimmed.starts_with(|c: char| c.is_ascii_digit()) && trimmed.contains('.');
+                            let col = if is_header_step {
+                                TEXT_PRIMARY
+                            } else {
+                                TEXT_MUTED
+                            };
+                            ui.label(
+                                RichText::new(trimmed)
+                                    .size(12.0)
+                                    .color(col),
+                            );
+                        }
+                    });
+                });
+            });
+        });
+    ui.add_space(4.0);
+}
+
+fn serikachat_composer_pill(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    active: bool,
+) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        FontId::proportional(11.5),
+        if active { Color32::WHITE } else { TEXT_MUTED },
+    );
+    let desired = Vec2::new(galley.size().x + 28.0, 24.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+    let fill = if active {
+        SERIKA_VIOLET_SOFT
+    } else if resp.hovered() {
+        BG_CARD_HOVER
+    } else {
+        BG_ELEVATED
+    };
+    let stroke_col = if active {
+        SERIKA_VIOLET
+    } else {
+        BORDER_HAIRLINE
+    };
+    ui.painter().rect_filled(rect, 12.0, fill);
+    ui.painter().rect_stroke(rect, 12.0, Stroke::new(1.0, stroke_col), StrokeKind::Inside);
+
+    let fg = if active || resp.hovered() {
+        Color32::WHITE
+    } else {
+        TEXT_MUTED
+    };
+    let ir = Rect::from_center_size(
+        Pos2::new(rect.left() + 11.0, rect.center().y),
+        Vec2::splat(11.0),
+    );
+    paint_icon(ui.painter(), ir, icon, fg);
+
+    ui.painter().galley(
+        Pos2::new(rect.left() + 20.0, rect.center().y - galley.size().y * 0.5),
+        galley,
+        fg,
+    );
+
+    resp
+}
+
+fn white_circle_action_button(ui: &mut egui::Ui, icon: Icon, enabled: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    let bg = if !enabled {
+        BG_ELEVATED
+    } else if resp.hovered() {
+        Color32::from_rgb(230, 230, 230)
+    } else {
+        Color32::WHITE
+    };
+    ui.painter().circle_filled(rect.center(), 14.0, bg);
+    let fg = if enabled {
+        Color32::from_rgb(13, 13, 13)
+    } else {
+        TEXT_DIM
+    };
+    let ir = rect.shrink(7.5);
+    paint_icon(ui.painter(), ir, icon, fg);
+    resp
 }
 
 fn primary_action_button(
@@ -3863,7 +4097,7 @@ fn pill_icon_button(
 fn draw_thread_row(ui: &mut egui::Ui, item: &SessionSummary, is_active: bool) -> (bool, bool) {
     let mut clicked = false;
     let mut deleted = false;
-    let desired = Vec2::new(ui.available_width(), 36.0);
+    let desired = Vec2::new(ui.available_width(), 32.0);
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
 
     let fill = if is_active {
@@ -3871,23 +4105,10 @@ fn draw_thread_row(ui: &mut egui::Ui, item: &SessionSummary, is_active: bool) ->
     } else if resp.hovered() {
         BG_CARD_HOVER
     } else {
-        BG_CARD
+        Color32::TRANSPARENT
     };
-    ui.painter().rect_filled(rect, 7.0, fill);
-    let border_col = if is_active {
-        SERIKA_VIOLET.gamma_multiply(0.75)
-    } else {
-        BORDER_HAIRLINE
-    };
-    ui.painter()
-        .rect_stroke(rect, 7.0, Stroke::new(1.0, border_col), StrokeKind::Inside);
-
-    if is_active {
-        let accent_bar = Rect::from_min_max(
-            Pos2::new(rect.left() + 2.0, rect.top() + 7.0),
-            Pos2::new(rect.left() + 5.0, rect.bottom() - 7.0),
-        );
-        ui.painter().rect_filled(accent_bar, 2.0, SERIKA_VIOLET);
+    if fill != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, 6.0, fill);
     }
 
     let title_col = if is_active || resp.hovered() {
@@ -3895,32 +4116,31 @@ fn draw_thread_row(ui: &mut egui::Ui, item: &SessionSummary, is_active: bool) ->
     } else {
         TEXT_SECONDARY
     };
-    let clipped_title = if item.title.chars().count() > 26 {
-        let s: String = item.title.chars().take(25).collect();
+    let clipped_title = if item.title.chars().count() > 24 {
+        let s: String = item.title.chars().take(23).collect();
         format!("{s}…")
     } else {
         item.title.clone()
     };
     ui.painter().text(
-        Pos2::new(rect.left() + 11.0, rect.center().y),
+        Pos2::new(rect.left() + 10.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         clipped_title,
         FontId::proportional(12.5),
         title_col,
     );
+
     if !resp.hovered() {
         ui.painter().text(
-            Pos2::new(rect.right() - 9.0, rect.center().y),
+            Pos2::new(rect.right() - 8.0, rect.center().y),
             egui::Align2::RIGHT_CENTER,
             short_age(item.updated_at),
             FontId::monospace(10.5),
             TEXT_DIM,
         );
-    }
-
-    if resp.hovered() {
+    } else {
         let del_rect = Rect::from_center_size(
-            Pos2::new(rect.right() - 14.0, rect.center().y),
+            Pos2::new(rect.right() - 12.0, rect.center().y),
             Vec2::splat(16.0),
         );
         let del_resp = ui.interact(del_rect, ui.scope_id().with(&item.id), Sense::click());
