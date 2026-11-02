@@ -21,6 +21,8 @@ pub struct SerikaClient {
 pub struct ChatTurn {
     pub role: String,
     pub content: String,
+    /// Server URLs of images attached to this turn.
+    pub attachments: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,8 +41,12 @@ pub enum LoginOutcome {
 
 impl SerikaClient {
     pub fn new(api_base: impl Into<String>, accounts_base: impl Into<String>) -> Result<Self> {
+        // Drop idle connections before the server (or a proxy) closes them, so the next
+        // message never starts on a dead socket.
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(15))
+            .tcp_keepalive(Duration::from_secs(20))
             .build()?;
         Ok(Self {
             http,
@@ -116,6 +122,59 @@ impl SerikaClient {
         self.finish_login(self.post_auth("/api/auth/login", body).await?)
     }
 
+    pub async fn register(
+        &self,
+        username: &str,
+        email: &str,
+        password: &str,
+        date_of_birth: &str,
+    ) -> Result<LoginOutcome> {
+        let body = json!({
+            "username": username,
+            "email": email,
+            "password": password,
+            "dateOfBirth": date_of_birth,
+            "rememberMe": true,
+            "productId": "serika-code",
+        });
+        self.finish_login(self.post_auth("/api/auth/register", body).await?)
+    }
+
+    /// Public artwork behind the accounts sign-in screen: `(artist, image url)`.
+    pub async fn random_auth_background(&self) -> Result<(String, String)> {
+        let value = self
+            .get_json(&self.accounts("/api/auth/random-bg"), None)
+            .await?;
+        let data = value.get("data").unwrap_or(&value);
+        let url = data
+            .get("url")
+            .and_then(|item| item.as_str())
+            .filter(|url| url.starts_with("https://"))
+            .ok_or_else(|| Error::msg("auth background had no image"))?;
+        let artist = data
+            .get("tags")
+            .and_then(|tags| tags.as_array())
+            .and_then(|tags| {
+                tags.iter().find_map(|tag| {
+                    let kind = tag.get("type").and_then(|item| item.as_str())?;
+                    if kind == "artist" {
+                        tag.get("name").and_then(|item| item.as_str()).map(str::to_string)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .or_else(|| {
+                data.get("user")
+                    .and_then(|user| user.get("username"))
+                    .and_then(|item| item.as_str())
+                    .map(str::to_string)
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "Unknown artist".to_string());
+        Ok((artist, url.to_string()))
+    }
+
     pub async fn request_magic_link(&self, email: &str) -> Result<String> {
         let value = self
             .post_auth("/api/auth/magic-link", json!({ "email": email }))
@@ -182,24 +241,66 @@ impl SerikaClient {
         Err(Error::Auth(redact(&text)))
     }
 
+    /// Upload one image the way the web app does. Returns the URL the server will serve it from.
+    pub async fn upload_image(&self, token: &str, file: &crate::attachments::Attachment) -> Result<String> {
+        let bytes = tokio::fs::read(&file.path).await?;
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file.name.clone())
+            .mime_str(crate::attachments::mime_for(&file.name))
+            .map_err(|err| Error::msg(err.to_string()))?;
+        let form = reqwest::multipart::Form::new().part("file", part);
+        let response = self
+            .http
+            .post(self.api("/api/chat/attachments"))
+            .headers(common_headers(Some(token)))
+            .multipart(form)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if matches!(status.as_u16(), 404 | 405 | 501) {
+            return Err(Error::msg("Image uploads are not available on this Serika server yet."));
+        }
+        if !status.is_success() {
+            return Err(error_from_status(status.as_u16(), &text));
+        }
+        let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        value
+            .get("url")
+            .and_then(|url| url.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| Error::msg("the server did not return an image address"))
+    }
+
     pub async fn chat(
         &self,
         token: &str,
         model_id: &str,
         message: &str,
         history: &[ChatTurn],
+        attachments: &[String],
         cancel: &CancellationToken,
         mut on_content: impl FnMut(&str),
         mut on_reasoning: impl FnMut(&str),
     ) -> Result<String> {
+        let image_list = |urls: &[String]| -> Vec<Value> {
+            urls.iter().map(|url| json!({ "url": url, "type": "image" })).collect()
+        };
         let history_json: Vec<Value> = history
             .iter()
-            .map(|turn| json!({ "role": turn.role, "content": turn.content }))
+            .map(|turn| {
+                let mut item = json!({ "role": turn.role, "content": turn.content });
+                if !turn.attachments.is_empty() {
+                    item["attachments"] = Value::Array(image_list(&turn.attachments));
+                }
+                item
+            })
             .collect();
         // Temporary chats are still metered by usageMeter.assertCanChat. They are not
         // stored in the user's chat.serika.dev history. mcp is disabled because those
         // connectors run on the server; local tools are executed by this process.
-        let body = json!({
+        let mut body = json!({
             "message": message,
             "modelID": model_id,
             "stream": false,
@@ -210,6 +311,9 @@ impl SerikaClient {
             "mcp": false,
             "imageRequest": false,
         });
+        if !attachments.is_empty() {
+            body["attachments"] = Value::Array(image_list(attachments));
+        }
         let url = self.api("/api/chat/message");
         let request = self
             .http
@@ -219,7 +323,7 @@ impl SerikaClient {
             .timeout(Duration::from_secs(600));
         let response = tokio::select! {
             _ = cancel.cancelled() => return Err(Error::Cancelled),
-            response = request.send() => response?,
+            response = send_retrying(request) => response?,
         };
         let status = response.status();
         if !status.is_success() {
@@ -287,25 +391,25 @@ impl SerikaClient {
     }
 
     async fn get_json(&self, url: &str, token: Option<&str>) -> Result<Value> {
-        let response = self
-            .http
-            .get(url)
-            .headers(common_headers(token))
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await?;
+        let response = send_retrying(
+            self.http
+                .get(url)
+                .headers(common_headers(token))
+                .timeout(Duration::from_secs(30)),
+        )
+        .await?;
         decode_json(response).await
     }
 
     async fn post_auth(&self, path: &str, body: Value) -> Result<Value> {
-        let response = self
-            .http
-            .post(self.accounts(path))
-            .headers(common_headers(None))
-            .json(&body)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await?;
+        let response = send_retrying(
+            self.http
+                .post(self.accounts(path))
+                .headers(common_headers(None))
+                .json(&body)
+                .timeout(Duration::from_secs(30)),
+        )
+        .await?;
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         let value: Value = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
@@ -347,6 +451,26 @@ impl SerikaClient {
             email: profile.email,
             is_premium: profile.is_premium,
         }))
+    }
+}
+
+/// Send a request, trying again when the connection itself fails (a socket the server already
+/// closed, a dropped packet). Timeouts and HTTP errors are never retried.
+async fn send_retrying(builder: reqwest::RequestBuilder) -> std::result::Result<reqwest::Response, reqwest::Error> {
+    let mut attempt = 0u64;
+    loop {
+        let Some(this_try) = builder.try_clone() else {
+            return builder.send().await;
+        };
+        match this_try.send().await {
+            Ok(response) => return Ok(response),
+            Err(err) if crate::error::is_transient(&err) && attempt < 2 => {
+                attempt += 1;
+                tracing::debug!("retrying after a connection error: {err}");
+                tokio::time::sleep(Duration::from_millis(300 * attempt)).await;
+            }
+            Err(err) => return Err(err),
+        }
     }
 }
 
@@ -596,6 +720,7 @@ mod tests {
                 "token",
                 "deepseek/deepseek-v4.1-flash",
                 "hi",
+                &[],
                 &[],
                 &CancellationToken::new(),
                 |chunk| seen.push_str(chunk),

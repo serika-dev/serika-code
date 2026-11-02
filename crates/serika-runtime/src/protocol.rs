@@ -35,6 +35,15 @@ const KNOWN_TOOLS: &[&str] = &[
     "git_diff",
     "git_log",
     "git_commit",
+    "browser_open",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_press",
+    "browser_scroll",
+    "browser_back",
+    "browser_new_tab",
+    "browser_switch_tab",
 ];
 
 /// Split assistant text into `(visible_prose, extracted_reasoning, tool_calls)`.
@@ -370,6 +379,18 @@ Tools:
 - git_diff {"path":"src/lib.rs"}
 - git_log {"limit":10}
 - git_commit {"message":"why this change","paths":["src/lib.rs"]}
+
+Browser (a real browser with JavaScript; the user watches it in a panel):
+- browser_open {"url":"https://example.com"} (a plain phrase searches the web)
+- browser_snapshot {} returns the page text and numbered interactive elements
+- browser_click {"id":3} clicks element 3 from the latest snapshot
+- browser_type {"id":2,"text":"hello","submit":true} types into element 2 (omit id to type into the focused field)
+- browser_press {"key":"Enter"} (Enter, Tab, Escape, Backspace, ArrowDown, ArrowUp, PageDown, PageUp, Home, End)
+- browser_scroll {"amount":600,"direction":"down"}
+- browser_back {}
+- browser_new_tab {"url":"https://example.com"} opens a tab (url optional); links that open a new window become tabs too
+- browser_switch_tab {"tab":2} shows another tab by its number in the tab list
+Every browser tool returns a fresh snapshot. Use it to read documentation, check a running dev server, or follow links. Element numbers change after each action, so use the latest ones.
 
 search must be copied exactly from the file, including whitespace. Do not commit, push, reset, or delete unless the user asked. git_commit only stages the paths you list."#
 }

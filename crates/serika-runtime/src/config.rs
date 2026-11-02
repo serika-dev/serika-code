@@ -52,6 +52,9 @@ fn default_theme() -> String {
 fn default_locale() -> String {
     "en".to_string()
 }
+fn default_browser_home() -> String {
+    "https://duckduckgo.com".to_string()
+}
 fn default_context_chars() -> usize {
     60_000
 }
@@ -108,6 +111,31 @@ pub struct Config {
     pub local_base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_model: Option<String>,
+    /// Claude Code binary when it is not on PATH.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_path: Option<String>,
+    /// Sets `CLAUDE_CONFIG_DIR` for Claude Code, so a second account keeps its own login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_config_dir: Option<String>,
+    /// Effort level for Claude Code runs (`--effort`), when the model supports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_effort: Option<String>,
+    /// Codex binary when it is not on PATH.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_path: Option<String>,
+    /// Sets `CODEX_HOME` for Codex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_home: Option<String>,
+    /// Reasoning effort for Codex runs (`model_reasoning_effort`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_effort: Option<String>,
+    /// Chromium-based browser the agent drives (Edge, Chrome, Chromium, Brave).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_path: Option<String>,
+    #[serde(default = "default_true")]
+    pub browser_enabled: bool,
+    #[serde(default = "default_browser_home")]
+    pub browser_home: String,
 }
 
 impl Default for Config {
@@ -136,6 +164,15 @@ impl Default for Config {
             ollama_base_url: None,
             local_base_url: None,
             local_model: None,
+            claude_path: None,
+            claude_config_dir: None,
+            codex_path: None,
+            codex_home: None,
+            claude_effort: None,
+            codex_effort: None,
+            browser_path: None,
+            browser_enabled: true,
+            browser_home: default_browser_home(),
         }
     }
 }
@@ -163,6 +200,10 @@ impl Config {
         match self.theme.as_str() {
             "dark" | "light" => {}
             _ => return Err(Error::msg("theme must be \"dark\" or \"light\"")),
+        }
+        let home = self.browser_home.trim();
+        if !(home.starts_with("https://") || home.starts_with("http://")) {
+            return Err(Error::msg("browser_home must start with https:// or http://"));
         }
         if !is_supported_locale(&self.locale) {
             return Err(Error::msg(
@@ -256,6 +297,20 @@ impl Config {
             "log_level" => self.log_level = value.to_string(),
             "theme" => self.theme = value.to_string(),
             "locale" => self.locale = value.trim().to_string(),
+            "claude_path" => self.claude_path = non_empty_value(value),
+            "claude_config_dir" => self.claude_config_dir = non_empty_value(value),
+            "codex_path" => self.codex_path = non_empty_value(value),
+            "codex_home" => self.codex_home = non_empty_value(value),
+            "claude_effort" => self.claude_effort = effort_value(value)?,
+            "codex_effort" => self.codex_effort = effort_value(value)?,
+            "browser_path" => self.browser_path = non_empty_value(value),
+            "browser_home" => self.browser_home = value.trim().to_string(),
+            "browser_enabled" => {
+                self.browser_enabled = matches!(value.trim(), "true" | "1" | "on" | "yes");
+            }
+            "stream" => {
+                self.stream = matches!(value.trim(), "true" | "1" | "on" | "yes");
+            }
             "max_read_bytes" => {
                 self.max_read_bytes = value
                     .parse()
@@ -371,6 +426,27 @@ impl ProjectSettings {
         let text = std::fs::read_to_string(&path)?;
         serde_json::from_str(&text)
             .map_err(|err| Error::msg(format!("could not parse {}: {err}", path.display())))
+    }
+}
+
+/// An effort level is passed to a CLI as an argument, so only plain words are kept.
+fn effort_value(value: &str) -> Result<Option<String>> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.is_empty() || value == "default" {
+        return Ok(None);
+    }
+    if value.len() > 16 || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(Error::msg("effort must be a level such as low, medium or high"));
+    }
+    Ok(Some(value))
+}
+
+fn non_empty_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 

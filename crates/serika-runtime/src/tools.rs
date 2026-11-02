@@ -26,6 +26,8 @@ pub struct ToolContext<'a> {
     pub events: &'a EventSender,
     pub cancel: &'a CancellationToken,
     pub approvals: &'a ApprovalHub,
+    pub browser: &'a crate::browser::BrowserHost,
+    pub browser_enabled: bool,
 }
 
 pub struct ToolOutcome {
@@ -96,8 +98,95 @@ async fn dispatch(name: &str, args: &Value, ctx: &ToolContext<'_>, id: &str) -> 
             Ok((gitinfo::log(ctx.root, limit).await?, true, None))
         }
         "git_commit" => git_commit(args, ctx).await,
+        "browser_open" | "browser_snapshot" | "browser_click" | "browser_type" | "browser_press"
+        | "browser_scroll" | "browser_back" | "browser_new_tab" | "browser_switch_tab" => {
+            browser_tool(name, args, ctx).await
+        }
         other => Ok((format!("unknown tool \"{other}\""), false, None)),
     }
+}
+
+async fn browser_tool(name: &str, args: &Value, ctx: &ToolContext<'_>) -> Result<Done, Error> {
+    if !ctx.browser_enabled {
+        return Err(Error::msg("the browser is turned off in Settings → Browser"));
+    }
+    let outcome = match name {
+        "browser_open" => {
+            let url = arg_str(args, "url")?;
+            ensure(ctx, ActionKind::Read, url, "open a web page", false).await?;
+            ctx.browser.open(url).await?
+        }
+        "browser_snapshot" => {
+            ensure(ctx, ActionKind::Read, "current page", "read the page", false).await?;
+            ctx.browser.snapshot().await?
+        }
+        "browser_click" => {
+            let id = args
+                .get("id")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| Error::msg("missing numeric argument \"id\""))? as u32;
+            ensure(ctx, ActionKind::CommandDev, &format!("click element {id}"), "click in the browser", false).await?;
+            ctx.browser.click(id).await?
+        }
+        "browser_type" => {
+            let text = arg_str(args, "text")?;
+            let id = args.get("id").and_then(|v| v.as_u64()).map(|v| v as u32);
+            let submit = args.get("submit").and_then(|v| v.as_bool()).unwrap_or(false);
+            let clear = args.get("clear").and_then(|v| v.as_bool()).unwrap_or(true);
+            ensure(ctx, ActionKind::CommandDev, text, "type in the browser", false).await?;
+            ctx.browser.type_text(id, text, submit, clear).await?
+        }
+        "browser_press" => {
+            let key = arg_str(args, "key")?;
+            ensure(ctx, ActionKind::CommandDev, key, "press a key in the browser", false).await?;
+            ctx.browser.press(key).await?
+        }
+        "browser_scroll" => {
+            ensure(ctx, ActionKind::Read, "scroll", "scroll the page", false).await?;
+            let mut amount = args.get("amount").and_then(|v| v.as_f64()).unwrap_or(600.0);
+            if args.get("direction").and_then(|v| v.as_str()) == Some("up") {
+                amount = -amount.abs();
+            }
+            ctx.browser.scroll(amount).await?
+        }
+        "browser_new_tab" => {
+            let url = args.get("url").and_then(|v| v.as_str());
+            ensure(ctx, ActionKind::Read, url.unwrap_or("new tab"), "open a browser tab", false).await?;
+            ctx.browser.new_tab(url).await?
+        }
+        "browser_switch_tab" => {
+            let tab = args
+                .get("tab")
+                .map(|v| match v {
+                    Value::Number(n) => n.to_string(),
+                    other => other.as_str().unwrap_or("").to_string(),
+                })
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| Error::msg("missing argument \"tab\" (its number in the tab list)"))?;
+            ensure(ctx, ActionKind::Read, &tab, "switch browser tab", false).await?;
+            ctx.browser.switch_tab(&tab).await?
+        }
+        _ => {
+            ensure(ctx, ActionKind::Read, "history", "go back", false).await?;
+            ctx.browser.back().await?
+        }
+    };
+    let (snapshot, frame) = outcome;
+    let mut text = snapshot.to_model_text();
+    if frame.tabs.len() > 1 {
+        let list: Vec<String> = frame
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| {
+                let mark = if tab.active { " (current)" } else { "" };
+                format!("[{}] {}{mark} {}", i + 1, tab.title, tab.url)
+            })
+            .collect();
+        text = format!("Open tabs (browser_switch_tab {{\"tab\":n}}):\n{}\n\n{text}", list.join("\n"));
+    }
+    emit(ctx.events, AgentEvent::Browser { frame });
+    Ok((text, true, None))
 }
 
 fn list_dir(args: &Value, ctx: &ToolContext<'_>) -> Result<String, Error> {

@@ -121,6 +121,12 @@ pub fn install_system(paths: &AppPaths, opts: &SetupOptions) -> Result<SetupRepo
         }
     }
 
+    match install_qt_app(&install_root, source_dir) {
+        Ok(Some(app)) => installed_binaries.push(app),
+        Ok(None) => {}
+        Err(err) => notes.push(format!("could not install the Qt app: {err}")),
+    }
+
     let path_updated = if opts.add_to_path {
         ensure_in_user_path(&bin_dir).unwrap_or_else(|err| {
             notes.push(format!("could not update PATH automatically: {err}"));
@@ -146,6 +152,59 @@ pub fn install_system(paths: &AppPaths, opts: &SetupOptions) -> Result<SetupRepo
         shortcuts_created,
         notes,
     })
+}
+
+fn qt_app_exe_name() -> &'static str {
+    if cfg!(windows) {
+        "serika-code.exe"
+    } else {
+        "serika-code"
+    }
+}
+
+/// Folder that `scripts/package-qt.ps1` produces: the Qt app plus the Qt libraries it needs.
+fn find_packaged_qt_app(source_dir: &Path) -> Option<PathBuf> {
+    let candidates = [
+        source_dir.join("serika-code"),
+        source_dir.join("..").join("..").join("dist").join("serika-code"),
+    ];
+    candidates
+        .into_iter()
+        .find(|dir| dir.join(qt_app_exe_name()).is_file())
+}
+
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy the packaged Qt desktop to `<install>/app`. It runs its own copy of `serika`
+/// next to it, so the folder stands alone.
+fn install_qt_app(install_root: &Path, source_dir: &Path) -> Result<Option<PathBuf>> {
+    let Some(packaged) = find_packaged_qt_app(source_dir) else {
+        return Ok(None);
+    };
+    let target = install_root.join("app");
+    if dunce::canonicalize(&packaged).ok() != dunce::canonicalize(&target).ok() {
+        if target.exists() {
+            std::fs::remove_dir_all(&target)?;
+        }
+        copy_dir(&packaged, &target)?;
+    }
+    let cli = source_dir.join(if cfg!(windows) { "serika.exe" } else { "serika" });
+    if cli.is_file() {
+        std::fs::copy(&cli, target.join(cli.file_name().unwrap_or_default()))?;
+    }
+    Ok(Some(target.join(qt_app_exe_name())))
 }
 
 pub fn uninstall_system(
@@ -174,6 +233,11 @@ pub fn uninstall_system(
         if p.exists() && std::fs::remove_file(&p).is_ok() {
             removed.push(p.display().to_string());
         }
+    }
+
+    let app_dir = install_root.join("app");
+    if app_dir.exists() && std::fs::remove_dir_all(&app_dir).is_ok() {
+        removed.push(app_dir.display().to_string());
     }
 
     if prefix.is_none() {
@@ -237,13 +301,20 @@ fn ensure_in_user_path(bin_dir: &Path) -> Result<bool> {
     }
 }
 
-fn create_platform_shortcuts(_install_root: &Path, bin_dir: &Path) -> Result<Vec<PathBuf>> {
+fn create_platform_shortcuts(install_root: &Path, bin_dir: &Path) -> Result<Vec<PathBuf>> {
     let mut created = Vec::new();
     #[cfg(windows)]
     {
+        let qt_exe = install_root.join("app").join(qt_app_exe_name());
         let desktop_exe = bin_dir.join("serika-desktop.exe");
         let cli_exe = bin_dir.join("serika.exe");
-        let target_exe = if desktop_exe.exists() { &desktop_exe } else { &cli_exe };
+        let target_exe = if qt_exe.exists() {
+            &qt_exe
+        } else if desktop_exe.exists() {
+            &desktop_exe
+        } else {
+            &cli_exe
+        };
         let default_work_dir = dirs::home_dir().unwrap_or_else(|| bin_dir.to_path_buf());
         if let Some(appdata) = dirs::data_dir() {
             let start_menu = appdata
@@ -264,7 +335,7 @@ fn create_platform_shortcuts(_install_root: &Path, bin_dir: &Path) -> Result<Vec
                 created.push(lnk);
             }
         }
-        let _ = register_windows_uninstall(_install_root, &cli_exe);
+        let _ = register_windows_uninstall(install_root, &cli_exe, target_exe);
     }
     #[cfg(target_os = "macos")]
     {
@@ -328,11 +399,13 @@ fn create_windows_shortcut(target: &Path, lnk: &Path, working_dir: &Path) -> Res
          $s = $ws.CreateShortcut('{}'); \
          $s.TargetPath = '{}'; \
          $s.WorkingDirectory = '{}'; \
+         $s.IconLocation = '{},0'; \
          $s.Description = 'Serika Code — Native AI coding agent'; \
          $s.Save()",
         lnk.display().to_string().replace('\'', "''"),
         target.display().to_string().replace('\'', "''"),
-        working_dir.display().to_string().replace('\'', "''")
+        working_dir.display().to_string().replace('\'', "''"),
+        target.display().to_string().replace('\'', "''")
     );
     let status = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -344,15 +417,17 @@ fn create_windows_shortcut(target: &Path, lnk: &Path, working_dir: &Path) -> Res
 }
 
 #[cfg(windows)]
-fn register_windows_uninstall(install_root: &Path, cli_exe: &Path) -> Result<()> {
+fn register_windows_uninstall(install_root: &Path, cli_exe: &Path, app_exe: &Path) -> Result<()> {
     let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\SerikaCode";
     let uninstall_cmd = format!("\"{}\" setup --uninstall", cli_exe.display());
+    let icon = format!("{},0", app_exe.display());
     for (name, val) in [
         ("DisplayName", "Serika Code"),
         ("DisplayVersion", VERSION),
         ("Publisher", "Serika"),
         ("InstallLocation", &install_root.display().to_string()),
         ("UninstallString", &uninstall_cmd),
+        ("DisplayIcon", &icon),
     ] {
         let _ = Command::new("reg")
             .args(["add", key, "/v", name, "/t", "REG_SZ", "/d", val, "/f"])

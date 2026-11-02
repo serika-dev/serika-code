@@ -22,6 +22,8 @@ pub struct Runtime {
     pub secrets: Arc<dyn SecretStore>,
     pub client: SerikaClient,
     pub approvals: Arc<ApprovalHub>,
+    /// The browser the agent drives and the desktop panel shows. Starts on first use.
+    pub browser: Arc<crate::browser::BrowserHost>,
 }
 
 impl Runtime {
@@ -46,6 +48,10 @@ impl Runtime {
         let sessions = SessionStore::open(&paths.database)?;
         let _ = sessions.purge_expired(config.session_retention_days);
         let client = SerikaClient::new(&config.api_base_url, &config.accounts_base_url)?;
+        let browser = Arc::new(crate::browser::BrowserHost::new(
+            crate::browser::profile_dir(&paths.data_dir),
+            config.browser_path.clone(),
+        ));
         Ok(Self {
             config,
             paths,
@@ -53,6 +59,7 @@ impl Runtime {
             secrets,
             client,
             approvals: Arc::new(ApprovalHub::new()),
+            browser,
         })
     }
 
@@ -67,6 +74,20 @@ impl Runtime {
         two_factor: Option<&str>,
     ) -> Result<crate::client::LoginOutcome> {
         let outcome = self.client.login_password(email, password, two_factor).await?;
+        self.persist_login(outcome)
+    }
+
+    pub async fn register(
+        &self,
+        username: &str,
+        email: &str,
+        password: &str,
+        date_of_birth: &str,
+    ) -> Result<crate::client::LoginOutcome> {
+        let outcome = self
+            .client
+            .register(username, email, password, date_of_birth)
+            .await?;
         self.persist_login(outcome)
     }
 

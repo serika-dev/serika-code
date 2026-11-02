@@ -28,6 +28,13 @@ pub enum AgentEvent {
     ToolOutput { id: String, stream: String },
     ToolFinished { id: String, name: String, ok: bool, summary: String },
     FileChanged(FileDiff),
+    /// The agent's browser changed: current page and a screenshot (base64 JPEG).
+    Browser { frame: crate::browser::Frame },
+    /// Subscription usage windows reported by Claude Code or Codex.
+    ProviderUsage {
+        provider: String,
+        usage: crate::agents::ProviderUsage,
+    },
     UsageUpdated(UsageSnapshot),
     Completed { summary: String },
     Failed { message: String },

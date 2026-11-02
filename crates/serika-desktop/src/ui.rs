@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::i18n::{self, Key as Msg, Locale};
+use serika_runtime::i18n::{self, Key as Msg, Locale};
 
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Key, Layout,
@@ -224,6 +224,12 @@ enum Icon {
     Lock,
     LogOut,
     Link,
+    Minimize,
+    Maximize,
+    Restore,
+    Mail,
+    User,
+    Eye,
 }
 
 fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -736,6 +742,78 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
                 stroke,
             );
         }
+        Icon::Minimize => {
+            painter.line_segment(
+                [Pos2::new(c.x - r, c.y), Pos2::new(c.x + r, c.y)],
+                Stroke::new(1.6, color),
+            );
+        }
+        Icon::Maximize => {
+            painter.rect_stroke(
+                Rect::from_center_size(c, Vec2::splat(r * 1.7)),
+                1.0,
+                Stroke::new(1.4, color),
+                StrokeKind::Inside,
+            );
+        }
+        Icon::Restore => {
+            let back = Rect::from_min_size(
+                Pos2::new(c.x - r * 0.15, c.y - r * 0.85),
+                Vec2::splat(r * 1.35),
+            );
+            let front = Rect::from_min_size(
+                Pos2::new(c.x - r * 0.7, c.y - r * 0.35),
+                Vec2::splat(r * 1.35),
+            );
+            painter.rect_stroke(back, 1.0, Stroke::new(1.3, color), StrokeKind::Inside);
+            painter.rect_filled(front, 1.0, bg_sidebar());
+            painter.rect_stroke(front, 1.0, Stroke::new(1.3, color), StrokeKind::Inside);
+        }
+        Icon::Mail => {
+            let box_rect = Rect::from_center_size(c, Vec2::new(r * 2.0, r * 1.4));
+            painter.rect_stroke(box_rect, 1.5, stroke, StrokeKind::Inside);
+            painter.line_segment([box_rect.left_top(), c], stroke);
+            painter.line_segment([box_rect.right_top(), c], stroke);
+        }
+        Icon::User => {
+            painter.circle_stroke(Pos2::new(c.x, c.y - r * 0.35), r * 0.42, stroke);
+            painter.line_segment(
+                [
+                    Pos2::new(c.x - r * 0.75, c.y + r * 0.85),
+                    Pos2::new(c.x - r * 0.35, c.y + r * 0.15),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(c.x + r * 0.75, c.y + r * 0.85),
+                    Pos2::new(c.x + r * 0.35, c.y + r * 0.15),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(c.x - r * 0.35, c.y + r * 0.15),
+                    Pos2::new(c.x + r * 0.35, c.y + r * 0.15),
+                ],
+                stroke,
+            );
+        }
+        Icon::Eye => {
+            painter.circle_stroke(c, r * 0.28, stroke);
+            painter.add(egui::Shape::line(
+                vec![
+                    Pos2::new(c.x - r, c.y),
+                    Pos2::new(c.x - r * 0.35, c.y - r * 0.45),
+                    Pos2::new(c.x + r * 0.35, c.y - r * 0.45),
+                    Pos2::new(c.x + r, c.y),
+                    Pos2::new(c.x + r * 0.35, c.y + r * 0.45),
+                    Pos2::new(c.x - r * 0.35, c.y + r * 0.45),
+                    Pos2::new(c.x - r, c.y),
+                ],
+                stroke,
+            ));
+        }
     }
 }
 
@@ -771,6 +849,132 @@ fn draw_account_avatar(
         FontId::proportional((rect.height() * 0.46).max(10.0)),
         text_primary(),
     );
+}
+
+fn chrome_button(ui: &mut egui::Ui, rect: Rect, id: &str, icon: Icon, danger: bool) -> egui::Response {
+    let resp = ui.interact(rect, ui.make_persistent_id(id), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            0.0,
+            if danger { ROSE } else { bg_card_hover() },
+        );
+    }
+    let color = if danger && resp.hovered() {
+        Color32::WHITE
+    } else {
+        text_primary()
+    };
+    paint_icon(ui.painter(), rect.shrink2(Vec2::new(16.0, 11.0)), icon, color);
+    resp
+}
+
+fn paint_auth_backdrop(painter: &egui::Painter, rect: Rect, texture: Option<&egui::TextureHandle>) {
+    painter.rect_filled(rect, 0.0, Color32::BLACK);
+    if let Some(texture) = texture {
+        painter.image(
+            texture.id(),
+            rect,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    } else {
+        painter.circle_filled(
+            Pos2::new(rect.left() + rect.width() * 0.3, rect.center().y),
+            220.0,
+            Color32::from_rgba_unmultiplied(139, 92, 246, 70),
+        );
+    }
+    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(120));
+}
+
+fn wide_accent_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    wide_button(ui, label, ACCENT_PURPLE, true)
+}
+
+fn wide_button(ui: &mut egui::Ui, label: &str, fill: Color32, accent_hover: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+    let color = if resp.hovered() && accent_hover {
+        ACCENT_PURPLE_HOVER
+    } else if resp.hovered() {
+        Color32::from_rgb(71, 82, 196)
+    } else {
+        fill
+    };
+    ui.painter().rect_filled(rect, 12.0, color);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(15.0),
+        Color32::WHITE,
+    );
+    resp
+}
+
+fn labeled_icon_field(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    text: &mut String,
+    hint: &str,
+    password: bool,
+    _width: f32,
+) {
+    egui::Frame::NONE
+        .fill(bg_input())
+        .stroke(Stroke::new(1.0, border_subtle()))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (icon_rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                paint_icon(ui.painter(), icon_rect, icon, text_dim());
+                ui.add(
+                    TextEdit::singleline(text)
+                        .password(password)
+                        .hint_text(hint)
+                        .desired_width(ui.available_width())
+                        .frame(egui::Frame::NONE),
+                );
+            });
+        });
+}
+
+fn window_resize_edges(ctx: &egui::Context) {
+    if ctx.input(|input| input.viewport().maximized.unwrap_or(false)) {
+        return;
+    }
+    let rect = ctx.content_rect();
+    let t = 5.0;
+    let edges = [
+        (Rect::from_min_max(rect.left_top(), Pos2::new(rect.left() + t, rect.top() + t)), egui::ResizeDirection::NorthWest, "nw"),
+        (Rect::from_min_max(Pos2::new(rect.right() - t, rect.top()), rect.right_top() + Vec2::new(0.0, t)), egui::ResizeDirection::NorthEast, "ne"),
+        (Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - t), Pos2::new(rect.left() + t, rect.bottom())), egui::ResizeDirection::SouthWest, "sw"),
+        (Rect::from_min_max(rect.right_bottom() - Vec2::splat(t), rect.right_bottom()), egui::ResizeDirection::SouthEast, "se"),
+        (Rect::from_min_max(Pos2::new(rect.left() + t, rect.top()), Pos2::new(rect.right() - t, rect.top() + t)), egui::ResizeDirection::North, "n"),
+        (Rect::from_min_max(Pos2::new(rect.left() + t, rect.bottom() - t), Pos2::new(rect.right() - t, rect.bottom())), egui::ResizeDirection::South, "s"),
+        (Rect::from_min_max(Pos2::new(rect.left(), rect.top() + t), Pos2::new(rect.left() + t, rect.bottom() - t)), egui::ResizeDirection::West, "w"),
+        (Rect::from_min_max(Pos2::new(rect.right() - t, rect.top() + t), Pos2::new(rect.right(), rect.bottom() - t)), egui::ResizeDirection::East, "e"),
+    ];
+    for (edge, direction, id) in edges {
+        let response = egui::Area::new(egui::Id::unique(("window-resize", id)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(edge.min)
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.allocate_exact_size(edge.size(), Sense::drag()).1
+            });
+        if response.inner.drag_started() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+        }
+    }
+}
+
+fn decode_cover_rgba(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    let image = image::load_from_memory(bytes).ok()?;
+    let image = image.resize(1400, 900, image::imageops::FilterType::Triangle);
+    let rgba = image.to_rgba8();
+    Some((rgba.width() as usize, rgba.height() as usize, rgba.into_raw()))
 }
 
 fn decode_avatar_rgba(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
@@ -810,6 +1014,8 @@ pub fn launch(cfg: LaunchConfig) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Serika Code")
+            .with_decorations(false)
+            .with_resizable(true)
             .with_inner_size([1420.0, 880.0])
             .with_min_inner_size([980.0, 640.0]),
         ..Default::default()
@@ -833,6 +1039,7 @@ enum UiNotice {
     SessionUpdated(StoredSession),
     AvatarBytes { url: String, bytes: Vec<u8> },
     MagicLink(Result<String, String>),
+    AuthArt { artist: String, bytes: Vec<u8> },
     LoggedIn(Result<LoginOutcome, String>),
     GitRefreshed(GitRepoSnapshot),
     GitActionDone(Result<String, String>),
@@ -873,6 +1080,13 @@ enum ComposerMode {
 enum SettingsTab {
     General,
     Account,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShellGate {
+    Login,
+    Welcome,
+    App,
 }
 
 #[allow(dead_code)]
@@ -946,6 +1160,17 @@ struct SerikaApp {
     avatar_loaded_for: Option<String>,
     avatar_pending: Option<(String, Vec<u8>)>,
     avatar_fetching: bool,
+    show_welcome: bool,
+    login_is_sign_in: bool,
+    show_password: bool,
+    remember_me: bool,
+    agreed_terms: bool,
+    username_input: String,
+    dob_input: String,
+    auth_art: Option<egui::TextureHandle>,
+    auth_artist: String,
+    auth_art_pending: Option<(String, Vec<u8>)>,
+    auth_art_requested: bool,
 
     // Panels & Modals
     locale: Locale,
@@ -1071,6 +1296,7 @@ impl SerikaApp {
 
         let git = gitinfo::snapshot_sync(&project).unwrap_or_default();
         let show_inspector = git.is_repo && !git.entries.is_empty();
+        let show_welcome = cfg.screenshot_path.is_none();
 
         let mut app = Self {
             smoke: cfg.smoke,
@@ -1133,6 +1359,17 @@ impl SerikaApp {
             avatar_loaded_for: None,
             avatar_pending: None,
             avatar_fetching: false,
+            show_welcome,
+            login_is_sign_in: true,
+            show_password: false,
+            remember_me: true,
+            agreed_terms: false,
+            username_input: String::new(),
+            dob_input: String::new(),
+            auth_art: None,
+            auth_artist: String::new(),
+            auth_art_pending: None,
+            auth_art_requested: false,
             locale,
             theme_light,
             show_inspector,
@@ -1275,6 +1512,7 @@ impl SerikaApp {
                         role: "user".into(),
                         content: "can you check where tickets are handled and wire live /models discovery?".into(),
                         reasoning: None,
+                        attachments: None,
                         created_at: now - 90,
                     },
                     StoredMessage {
@@ -1288,6 +1526,7 @@ impl SerikaApp {
                              4. Ran `cargo test --workspace` to confirm all 43 unit and integration tests pass."
                                 .into(),
                         ),
+                        attachments: None,
                         created_at: now - 40,
                     },
                 ];
@@ -1530,6 +1769,7 @@ impl SerikaApp {
             yes: self.auto_approve_session,
             events: events_tx,
             cancel,
+            attachments: Vec::new(),
         };
         let tx = self.tx.clone();
         self.tokio.spawn(async move {
@@ -1580,6 +1820,12 @@ impl SerikaApp {
                         self.avatar_pending = Some((url, bytes));
                     }
                 }
+                UiNotice::AuthArt { artist, bytes } => {
+                    self.auth_artist = artist;
+                    if !bytes.is_empty() {
+                        self.auth_art_pending = Some((self.auth_artist.clone(), bytes));
+                    }
+                }
                 UiNotice::MagicLink(Ok(message)) => {
                     self.auth_busy = false;
                     self.auth_notice = message;
@@ -1598,6 +1844,7 @@ impl SerikaApp {
                     self.magic_token_input.clear();
                     self.awaiting_second_factor = false;
                     self.auth_busy = false;
+                    self.show_welcome = false;
                     self.auth_notice = self.t(Msg::SignedInCloud).to_string();
                     self.refresh_remote();
                 }
@@ -1731,6 +1978,7 @@ impl SerikaApp {
                 AgentEvent::Completed { .. } => self.status = "Ready".into(),
                 AgentEvent::Failed { message } => self.status = message,
                 AgentEvent::Cancelled => self.status = "Cancelled".into(),
+                AgentEvent::Browser { .. } | AgentEvent::ProviderUsage { .. } => {}
             }
         }
     }
@@ -1777,9 +2025,11 @@ impl eframe::App for SerikaApp {
         set_ui_light(self.theme_light);
         self.drain_channels();
         self.install_pending_avatar(&ctx);
+        self.install_pending_auth_art(&ctx);
         let waiting_for_account = self.session.is_some() && self.profile.is_none();
         let waiting_for_avatar = self.avatar_fetching || self.avatar_pending.is_some();
-        if self.auth_busy || waiting_for_account || waiting_for_avatar {
+        let waiting_for_art = self.auth_art_requested && self.auth_art.is_none();
+        if self.auth_busy || waiting_for_account || waiting_for_avatar || waiting_for_art {
             ctx.request_repaint_after(Duration::from_millis(80));
         }
         if self.smoke {
@@ -1814,8 +2064,14 @@ impl eframe::App for SerikaApp {
         });
 
         if self.screenshot_view.as_deref() == Some("cli") {
+            self.draw_title_bar(root_ui);
             self.draw_codex_cli_showcase(root_ui);
         } else {
+            self.draw_title_bar(root_ui);
+            match self.shell_gate() {
+                ShellGate::Login => self.draw_login_screen(root_ui),
+                ShellGate::Welcome => self.draw_welcome_screen(root_ui),
+                ShellGate::App => {
             self.draw_sidebar(root_ui);
             if self.show_inspector {
                 self.draw_inspector(root_ui);
@@ -1845,7 +2101,10 @@ impl eframe::App for SerikaApp {
             self.draw_palette_modal(&ctx);
             self.draw_shortcuts_modal(&ctx);
             self.draw_floating_menus(&ctx);
+                }
+            }
         }
+        window_resize_edges(&ctx);
 
         if let Some(out_path) = self.screenshot_path.clone() {
             self.screenshot_frames += 1;
@@ -2050,6 +2309,52 @@ impl SerikaApp {
                 egui::TextureOptions::LINEAR,
             ));
         }
+    }
+
+    fn install_pending_auth_art(&mut self, ctx: &egui::Context) {
+        let Some((_, bytes)) = self.auth_art_pending.take() else {
+            return;
+        };
+        if let Some((width, height, rgba)) = decode_cover_rgba(&bytes) {
+            let image = egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba);
+            self.auth_art = Some(ctx.load_texture(
+                "serika-auth-art",
+                image,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
+    }
+
+    fn shell_gate(&self) -> ShellGate {
+        if self.screenshot_path.is_some() {
+            return ShellGate::App;
+        }
+        if self.session.is_none() {
+            return ShellGate::Login;
+        }
+        if self.show_welcome {
+            ShellGate::Welcome
+        } else {
+            ShellGate::App
+        }
+    }
+
+    fn ensure_auth_art(&mut self) {
+        if self.auth_art_requested {
+            return;
+        }
+        let Some(core) = self.core.clone() else {
+            return;
+        };
+        self.auth_art_requested = true;
+        let tx = self.tx.clone();
+        self.tokio.spawn(async move {
+            let Ok((artist, url)) = core.client.random_auth_background().await else {
+                return;
+            };
+            let bytes = core.client.fetch_bytes(&url).await.unwrap_or_default();
+            let _ = tx.send(UiNotice::AuthArt { artist, bytes });
+        });
     }
 
     fn session_meter(&self) -> (f32, String, String) {
@@ -2302,6 +2607,356 @@ impl SerikaApp {
         self.show_model_menu = false;
         self.show_account_menu = false;
         self.show_chat_menu = false;
+    }
+
+    fn draw_title_bar(&mut self, root_ui: &mut egui::Ui) {
+        let maximized = root_ui
+            .ctx()
+            .input(|input| input.viewport().maximized.unwrap_or(false));
+        egui::Panel::top("serika_chrome")
+            .exact_size(36.0)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::NONE.fill(bg_sidebar()))
+            .show(root_ui, |ui| {
+                let rect = ui.max_rect();
+                let button_w = 46.0;
+                let close_rect = Rect::from_min_max(
+                    Pos2::new(rect.right() - button_w, rect.top()),
+                    rect.right_bottom(),
+                );
+                let max_rect = Rect::from_min_max(
+                    Pos2::new(close_rect.left() - button_w, rect.top()),
+                    Pos2::new(close_rect.left(), rect.bottom()),
+                );
+                let min_rect = Rect::from_min_max(
+                    Pos2::new(max_rect.left() - button_w, rect.top()),
+                    Pos2::new(max_rect.left(), rect.bottom()),
+                );
+                let drag_rect = Rect::from_min_max(rect.left_top(), min_rect.left_bottom());
+                let drag = ui.interact(
+                    drag_rect,
+                    ui.make_persistent_id("window_drag"),
+                    Sense::click_and_drag(),
+                );
+                if drag.double_clicked() {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                } else if drag.drag_started() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                }
+                ui.painter().text(
+                    Pos2::new(drag_rect.left() + 14.0, drag_rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    "Serika Code",
+                    FontId::proportional(13.0),
+                    text_secondary(),
+                );
+                if chrome_button(ui, min_rect, "min", Icon::Minimize, false).clicked() {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
+                let open_icon = if maximized { Icon::Restore } else { Icon::Maximize };
+                if chrome_button(ui, max_rect, "open", open_icon, false).clicked() {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                }
+                if chrome_button(ui, close_rect, "close", Icon::Close, true).clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+    }
+
+    fn draw_welcome_screen(&mut self, ui: &mut egui::Ui) {
+        self.ensure_auth_art();
+        let rect = ui.available_rect_before_wrap();
+        ui.allocate_rect(rect, Sense::hover());
+        paint_auth_backdrop(ui.painter(), rect, self.auth_art.as_ref());
+        let name = self.current_username();
+        let greeting = self.greeting(&name);
+        let card = Rect::from_center_size(rect.center(), Vec2::new(460.0, 320.0));
+        ui.painter().rect_filled(card, 20.0, Color32::from_black_alpha(170));
+        ui.painter()
+            .rect_stroke(card, 20.0, Stroke::new(1.0, border_subtle()), StrokeKind::Inside);
+        let mut card_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(card.shrink(28.0))
+                .layout(Layout::top_down(Align::Center)),
+        );
+        card_ui.add_space(12.0);
+        let (mark, _) = card_ui.allocate_exact_size(Vec2::splat(42.0), Sense::hover());
+        paint_icon(card_ui.painter(), mark.shrink(6.0), Icon::SerikaMark, Color32::WHITE);
+        card_ui.add_space(16.0);
+        card_ui.label(
+            RichText::new("Welcome")
+                .size(32.0)
+                .strong()
+                .color(Color32::WHITE),
+        );
+        card_ui.add_space(6.0);
+        card_ui.label(RichText::new(greeting).size(16.0).color(text_secondary()));
+        card_ui.add_space(4.0);
+        card_ui.label(
+            RichText::new("Your Serika Code workspace is ready.")
+                .size(13.0)
+                .color(text_dim()),
+        );
+        card_ui.add_space(22.0);
+        if wide_accent_button(&mut card_ui, "Continue").clicked() {
+            self.show_welcome = false;
+        }
+        if !self.auth_artist.is_empty() {
+            ui.painter().text(
+                Pos2::new(rect.left() + 16.0, rect.bottom() - 18.0),
+                egui::Align2::LEFT_CENTER,
+                format!("Art by {}", self.auth_artist),
+                FontId::proportional(11.0),
+                Color32::from_white_alpha(180),
+            );
+        }
+    }
+
+    fn draw_login_screen(&mut self, ui: &mut egui::Ui) {
+        self.ensure_auth_art();
+        let rect = ui.available_rect_before_wrap();
+        ui.allocate_rect(rect, Sense::hover());
+        let panel_w = 480.0_f32.min(rect.width() * 0.46).max(360.0);
+        let art_rect = Rect::from_min_max(rect.left_top(), Pos2::new(rect.right() - panel_w, rect.bottom()));
+        let form_rect = Rect::from_min_max(Pos2::new(art_rect.right(), rect.top()), rect.right_bottom());
+        paint_auth_backdrop(ui.painter(), art_rect, self.auth_art.as_ref());
+        ui.painter().rect_filled(form_rect, 0.0, bg_sidebar());
+        ui.painter().rect_filled(
+            Rect::from_min_max(form_rect.left_top(), Pos2::new(form_rect.left() + 1.0, form_rect.bottom())),
+            0.0,
+            border_subtle(),
+        );
+        if !self.auth_artist.is_empty() {
+            ui.painter().text(
+                Pos2::new(art_rect.left() + 16.0, art_rect.bottom() - 18.0),
+                egui::Align2::LEFT_CENTER,
+                format!("Art by {}", self.auth_artist),
+                FontId::proportional(11.0),
+                Color32::from_white_alpha(190),
+            );
+        }
+
+        let mut form = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(form_rect.shrink2(Vec2::new(36.0, 24.0)))
+                .layout(Layout::top_down(Align::Center)),
+        );
+        ScrollArea::vertical()
+            .id_salt("signature_login")
+            .auto_shrink([false, false])
+            .show(&mut form, |ui| {
+                ui.set_width(ui.available_width());
+                ui.vertical_centered(|ui| {
+                    ui.add_space(12.0);
+                    let (mark, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+                    paint_icon(ui.painter(), mark.shrink(4.0), Icon::SerikaMark, Color32::WHITE);
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("serika").strong().size(22.0).color(Color32::WHITE));
+                    ui.label(
+                        RichText::new("Serika Code")
+                            .size(13.0)
+                            .color(text_dim()),
+                    );
+                    ui.add_space(28.0);
+                    let title = if self.login_is_sign_in {
+                        "Welcome Back"
+                    } else {
+                        "Create Account"
+                    };
+                    let subtitle = if self.login_is_sign_in {
+                        "Enter your details to sign in"
+                    } else {
+                        "Fill in your information to get started"
+                    };
+                    ui.label(RichText::new(title).strong().size(28.0).color(Color32::WHITE));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(subtitle).size(13.5).color(text_secondary()));
+                });
+                ui.add_space(22.0);
+                if !self.auth_notice.is_empty() {
+                    egui::Frame::NONE
+                        .fill(Color32::from_rgba_unmultiplied(80, 16, 24, 180))
+                        .corner_radius(CornerRadius::same(12))
+                        .inner_margin(Margin::symmetric(12, 10))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(&self.auth_notice).size(13.0).color(Color32::from_rgb(252, 165, 165)));
+                        });
+                    ui.add_space(14.0);
+                }
+                if self.awaiting_second_factor {
+                    ui.label(
+                        RichText::new(self.t(Msg::SecondFactorHint))
+                            .size(12.5)
+                            .color(AMBER),
+                    );
+                    ui.add_space(8.0);
+                }
+                let field_w = ui.available_width();
+                if !self.login_is_sign_in {
+                    labeled_icon_field(ui, Icon::User, &mut self.username_input, "Username", false, field_w);
+                    ui.add_space(12.0);
+                }
+                labeled_icon_field(ui, Icon::Mail, &mut self.email_input, "Email address", false, field_w);
+                ui.add_space(12.0);
+                labeled_icon_field(
+                    ui,
+                    Icon::Lock,
+                    &mut self.password_input,
+                    "Password",
+                    !self.show_password,
+                    field_w,
+                );
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(if self.show_password { "Hide password" } else { "Show password" })
+                        .clicked()
+                    {
+                        self.show_password = !self.show_password;
+                    }
+                });
+                if !self.login_is_sign_in {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new("Date of birth (16+)").size(12.0).color(text_dim()));
+                    ui.add(
+                        TextEdit::singleline(&mut self.dob_input)
+                            .hint_text("YYYY-MM-DD")
+                            .desired_width(field_w),
+                    );
+                }
+                ui.add_space(12.0);
+                if self.login_is_sign_in {
+                    ui.checkbox(&mut self.remember_me, "Remember me for 30 days");
+                } else {
+                    ui.checkbox(&mut self.agreed_terms, "I agree to the Terms and Privacy Policy");
+                }
+                if self.awaiting_second_factor {
+                    ui.add_space(10.0);
+                    labeled_icon_field(
+                        ui,
+                        Icon::Shield,
+                        &mut self.two_factor_input,
+                        "Authentication code",
+                        false,
+                        field_w,
+                    );
+                }
+                ui.add_space(16.0);
+                let label = if self.auth_busy {
+                    "…"
+                } else if self.login_is_sign_in {
+                    "Sign In"
+                } else {
+                    "Create Account"
+                };
+                if wide_accent_button(ui, label).clicked() && !self.auth_busy {
+                    if self.login_is_sign_in {
+                        self.start_password_login();
+                    } else {
+                        self.start_register();
+                    }
+                }
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("or").size(12.0).color(text_dim()));
+                });
+                ui.add_space(10.0);
+                if wide_button(ui, "Continue with Discord", Color32::from_rgb(88, 101, 242), false).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(
+                        "https://accounts.serika.dev/api/auth/discord/login",
+                    ));
+                }
+                if self.login_is_sign_in {
+                    ui.add_space(12.0);
+                    if ui
+                        .link(RichText::new("Forgot Password?").size(13.0).color(ACCENT_PURPLE_SEC))
+                        .clicked()
+                    {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(
+                            "https://accounts.serika.dev/forgot-password",
+                        ));
+                    }
+                    ui.add_space(6.0);
+                    if ui
+                        .link(RichText::new(self.t(Msg::SendLink)).size(13.0).color(text_secondary()))
+                        .clicked()
+                    {
+                        self.start_magic_link();
+                    }
+                    if !self.magic_token_input.is_empty() || self.auth_notice.contains("link") {
+                        ui.add_space(8.0);
+                        labeled_icon_field(
+                            ui,
+                            Icon::Key,
+                            &mut self.magic_token_input,
+                            "Paste the token from the email link",
+                            false,
+                            field_w,
+                        );
+                        ui.add_space(8.0);
+                        if wide_accent_button(ui, "Continue with link").clicked() {
+                            self.consume_magic_link();
+                        }
+                    }
+                }
+                ui.add_space(16.0);
+                let switch = if self.login_is_sign_in {
+                    "Need an account? Sign up"
+                } else {
+                    "Already have an account? Sign in"
+                };
+                if ui
+                    .link(RichText::new(switch).size(13.5).color(text_secondary()))
+                    .clicked()
+                {
+                    self.login_is_sign_in = !self.login_is_sign_in;
+                    self.auth_notice.clear();
+                    self.awaiting_second_factor = false;
+                }
+                ui.add_space(20.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new("© 2026 Serika.dev")
+                            .size(11.0)
+                            .color(text_dim()),
+                    );
+                });
+            });
+    }
+
+    fn start_register(&mut self) {
+        if self.auth_busy {
+            return;
+        }
+        let Some(core) = self.core.clone() else {
+            return;
+        };
+        if !self.agreed_terms {
+            self.auth_notice = "Agree to the Terms and Privacy Policy to create an account.".into();
+            return;
+        }
+        let username = self.username_input.trim().to_string();
+        let email = self.email_input.trim().to_string();
+        let password = self.password_input.clone();
+        let dob = self.dob_input.trim().to_string();
+        if username.is_empty() || email.is_empty() || password.is_empty() || dob.is_empty() {
+            self.auth_notice = "Username, email, password, and date of birth are required.".into();
+            return;
+        }
+        self.auth_busy = true;
+        self.auth_notice.clear();
+        let tx = self.tx.clone();
+        self.tokio.spawn(async move {
+            let result = core
+                .register(&username, &email, &password, &dob)
+                .await
+                .map_err(|err| err.to_string());
+            let _ = tx.send(UiNotice::LoggedIn(result));
+        });
     }
 
     fn draw_sidebar(&mut self, root_ui: &mut egui::Ui) {
@@ -2904,6 +3559,7 @@ impl SerikaApp {
                                     content: self.streaming_reply.clone(),
                                     reasoning: (!self.streaming_reasoning.is_empty())
                                         .then(|| self.streaming_reasoning.clone()),
+                                    attachments: None,
                                     created_at: 0,
                                 };
                                 self.draw_turn(ui, &temp_msg, false);

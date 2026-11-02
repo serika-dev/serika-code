@@ -102,10 +102,10 @@ mod tests {
     #[test]
     fn trims_old_turns_and_keeps_the_instruction() {
         let turns = vec![
-            ChatTurn { role: "system".into(), content: "rules".into() },
-            ChatTurn { role: "user".into(), content: "a".repeat(100) },
-            ChatTurn { role: "assistant".into(), content: "b".repeat(100) },
-            ChatTurn { role: "user".into(), content: "latest".into() },
+            ChatTurn { role: "system".into(), content: "rules".into(), attachments: Vec::new() },
+            ChatTurn { role: "user".into(), content: "a".repeat(100), attachments: Vec::new() },
+            ChatTurn { role: "assistant".into(), content: "b".repeat(100), attachments: Vec::new() },
+            ChatTurn { role: "user".into(), content: "latest".into(), attachments: Vec::new() },
         ];
         let trimmed = trim_history(turns, 120);
         assert_eq!(trimmed.first().unwrap().role, "system");

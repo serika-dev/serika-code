@@ -22,6 +22,8 @@ pub struct TaskRequest {
     pub yes: bool,
     pub events: EventSender,
     pub cancel: CancellationToken,
+    /// Files and images staged by `attachments::stage`.
+    pub attachments: Vec<crate::attachments::Attachment>,
 }
 
 pub struct TaskOutcome {
@@ -32,7 +34,7 @@ pub struct TaskOutcome {
 
 impl Runtime {
     pub async fn run_task(&self, request: TaskRequest) -> Result<TaskOutcome> {
-        if request.prompt.trim().is_empty() {
+        if request.prompt.trim().is_empty() && request.attachments.is_empty() {
             return Err(Error::msg("the task is empty"));
         }
         let project = dunce::canonicalize(&request.project).map_err(|_| {
@@ -52,6 +54,12 @@ impl Runtime {
         let mut exclusions = self.config.context_exclusions.clone();
         exclusions.extend(project_settings.extra_exclusions);
         let model = self.resolve_model(request.model.as_deref()).await?;
+        // Claude Code and Codex run their own tool loop on the user's subscription login.
+        if let Some(agent) = crate::agents::CliAgent::from_model(&model) {
+            return self
+                .run_cli_agent(agent, &request, &project, permission, &model)
+                .await;
+        }
         let session_id = self.open_session(&project, &request, &model, permission)?;
         emit(
             &request.events,
@@ -63,9 +71,15 @@ impl Runtime {
             &request.events,
             AgentEvent::Status(format!("model {model} · {permission}")),
         );
-        let turn_id = self
-            .sessions
-            .append_message(&session_id, "user", request.prompt.trim())?;
+        let mut attachments = request.attachments.clone();
+        crate::attachments::load_text(&mut attachments);
+        self.prepare_attachments(&mut attachments, &model, &request.events)
+            .await?;
+        let turn_id = self.sessions.append_user_message(
+            &session_id,
+            request.prompt.trim(),
+            crate::attachments::to_json(&attachments).as_deref(),
+        )?;
 
         let mut changed = Vec::new();
         let files = context::snapshot(&project, &exclusions).unwrap_or_default();
@@ -84,7 +98,7 @@ impl Runtime {
                 "{}\n\nPermission mode: {permission}.\n{brief}",
                 protocol::tool_instructions()
             );
-            let (history, message) =
+            let (history, message, message_images) =
                 pack_history(&stored, &instructions, self.config.max_context_chars);
             let (reply, streamed_reasoning) = self
                 .complete(
@@ -92,6 +106,7 @@ impl Runtime {
                     &model,
                     &message,
                     &history,
+                    &message_images,
                     &request.cancel,
                     &request.events,
                 )
@@ -218,6 +233,8 @@ impl Runtime {
                 events: &request.events,
                 cancel: &request.cancel,
                 approvals: &self.approvals,
+                browser: &self.browser,
+                browser_enabled: self.config.browser_enabled,
             };
             let mut packed = String::from("Tool results:\n");
             for call in calls {
@@ -280,7 +297,7 @@ impl Runtime {
         })
     }
 
-    fn open_session(
+    pub(crate) fn open_session(
         &self,
         project: &std::path::Path,
         request: &TaskRequest,
@@ -356,6 +373,7 @@ impl Runtime {
         model: &str,
         message: &str,
         history: &[ChatTurn],
+        message_images: &[String],
         cancel: &CancellationToken,
         events: &EventSender,
     ) -> Result<(String, String)> {
@@ -541,6 +559,7 @@ impl Runtime {
                     model,
                     message,
                     history,
+                    message_images,
                     cancel,
                     |chunk| {
                         emit(
@@ -573,6 +592,54 @@ impl Runtime {
         }
     }
 
+    /// Check what a Serika model can take and upload the images. Text files travel inline.
+    pub(crate) async fn prepare_attachments(
+        &self,
+        attachments: &mut [crate::attachments::Attachment],
+        model: &str,
+        events: &EventSender,
+    ) -> Result<()> {
+        use crate::attachments::AttachmentKind;
+        if attachments.is_empty() {
+            return Ok(());
+        }
+        if let Some(other) = attachments.iter().find(|a| a.kind == AttachmentKind::File) {
+            return Err(Error::msg(format!(
+                "{} cannot be sent to Serika models. Images and text or code files work; pick Claude Code or Codex to use other files.",
+                other.name
+            )));
+        }
+        let images: Vec<usize> = attachments
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.kind == AttachmentKind::Image && a.url.is_none())
+            .map(|(i, _)| i)
+            .collect();
+        if images.is_empty() {
+            return Ok(());
+        }
+        let Some(mut session) = self.secrets.load().ok().flatten() else {
+            return Err(Error::msg("Sign in to send images to Serika models."));
+        };
+        let _ = model;
+        for (n, index) in images.iter().enumerate() {
+            emit(
+                events,
+                AgentEvent::Status(format!("uploading image {} of {}", n + 1, images.len())),
+            );
+            let url = match self.client.upload_image(&session.token, &attachments[*index]).await {
+                Err(Error::Auth(_)) => {
+                    session = refresh_session(&self.client, session).await?;
+                    self.secrets.save(&session)?;
+                    self.client.upload_image(&session.token, &attachments[*index]).await?
+                }
+                other => other?,
+            };
+            attachments[*index].url = Some(url);
+        }
+        Ok(())
+    }
+
     async fn refresh_usage(&self, events: &EventSender) {
         let Ok(Some(session)) = self.secrets.load() else {
             return;
@@ -597,18 +664,33 @@ async fn refresh_session(
     }
 }
 
+/// The text a model sees for one stored message: text files are inlined, images travel as URLs.
+fn message_parts(message: &crate::sessions::StoredMessage) -> (String, Vec<String>) {
+    let attachments = crate::attachments::parse_json(message.attachments.as_deref());
+    if attachments.is_empty() {
+        return (message.content.clone(), Vec::new());
+    }
+    let images = attachments
+        .iter()
+        .filter(|a| a.kind == crate::attachments::AttachmentKind::Image)
+        .filter_map(|a| a.url.clone())
+        .collect();
+    (crate::attachments::with_files(&message.content, &attachments), images)
+}
+
 fn pack_history(
     messages: &[crate::sessions::StoredMessage],
     instructions: &str,
     max_chars: usize,
-) -> (Vec<ChatTurn>, String) {
-    let current = messages
+) -> (Vec<ChatTurn>, String, Vec<String>) {
+    let (current, current_images) = messages
         .last()
-        .map(|message| message.content.clone())
+        .map(message_parts)
         .unwrap_or_default();
     let mut turns = vec![ChatTurn {
         role: "system".into(),
         content: instructions.to_string(),
+        attachments: Vec::new(),
     }];
     let prior = messages.len().saturating_sub(1);
     for message in &messages[..prior] {
@@ -617,12 +699,14 @@ fn pack_history(
         } else {
             "user"
         };
+        let (content, images) = message_parts(message);
         turns.push(ChatTurn {
             role: role.to_string(),
-            content: message.content.clone(),
+            content,
+            attachments: images,
         });
     }
-    (trim_history(turns, max_chars), current)
+    (trim_history(turns, max_chars), current, current_images)
 }
 
 fn format_result(name: &str, outcome: &ToolOutcome) -> String {
@@ -755,6 +839,7 @@ mod tests {
                 yes: true,
                 events: tx,
                 cancel: CancellationToken::new(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
@@ -780,6 +865,7 @@ mod tests {
                 yes: true,
                 events: tx2,
                 cancel: CancellationToken::new(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
@@ -849,6 +935,7 @@ mod tests {
                 yes: true,
                 events: tx,
                 cancel: CancellationToken::new(),
+                attachments: Vec::new(),
             })
             .await
             .err()

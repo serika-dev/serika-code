@@ -22,12 +22,26 @@ pub struct StoredMessage {
     pub role: String,
     pub content: String,
     pub reasoning: Option<String>,
+    /// JSON list of `attachments::Attachment` for a user message.
+    pub attachments: Option<String>,
     pub created_at: i64,
 }
 
 pub struct RewindOutcome {
     pub prompt: String,
+    /// JSON list of the attachments the rewound message carried.
+    pub attachments: Option<String>,
     pub restored_files: usize,
+}
+
+/// A fresh chat id, in the same form the agent uses.
+pub fn new_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// Tool results travel back to the model as user messages; they are not turns the user wrote.
+pub fn is_tool_result(role: &str, content: &str) -> bool {
+    role == "user" && content.starts_with("Tool results:\n")
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +115,13 @@ impl SessionStore {
                 content BLOB,
                 UNIQUE(session_id, message_id, path)
              );
+             CREATE TABLE IF NOT EXISTS provider_sessions (
+                session_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                provider_session TEXT NOT NULL,
+                PRIMARY KEY(session_id, provider),
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+             );
              CREATE INDEX IF NOT EXISTS messages_session ON messages(session_id);
              CREATE INDEX IF NOT EXISTS snapshots_session ON snapshots(session_id, message_id);
              CREATE INDEX IF NOT EXISTS tool_runs_session ON tool_runs(session_id);
@@ -108,6 +129,7 @@ impl SessionStore {
              CREATE INDEX IF NOT EXISTS sessions_updated ON sessions(updated_at);",
         )?;
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT", []);
+        let _ = conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT", []);
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -296,6 +318,53 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Id a subscription CLI (Claude Code, Codex) gave this conversation, used to resume it.
+    pub fn provider_session(&self, session_id: &str, provider: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT provider_session FROM provider_sessions WHERE session_id = ?1 AND provider = ?2",
+        )?;
+        let mut rows = stmt.query_map(params![session_id, provider], |row| row.get(0))?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_provider_session(&self, session_id: &str, provider: &str, value: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO provider_sessions (session_id, provider, provider_session) VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id, provider) DO UPDATE SET provider_session = excluded.provider_session",
+            params![session_id, provider, value],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a project from the project list. Its chats stay in the history.
+    pub fn forget_project(&self, project: &Path) -> Result<()> {
+        let conn = self.lock();
+        conn.execute(
+            "DELETE FROM projects WHERE path = ?1",
+            params![project.to_string_lossy().to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Every project the app knows, newest first: remembered folders plus folders that have chats.
+    pub fn projects(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT path, MAX(seen) FROM (
+                SELECT path, last_opened AS seen FROM projects
+                UNION ALL
+                SELECT project_path AS path, updated_at AS seen FROM sessions
+             ) GROUP BY path ORDER BY MAX(seen) DESC LIMIT 80",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Error::from)
+    }
+
     pub fn recent_projects(&self) -> Result<Vec<String>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
@@ -307,6 +376,26 @@ impl SessionStore {
 
     pub fn append_message(&self, session_id: &str, role: &str, content: &str) -> Result<i64> {
         self.append_message_with_reasoning(session_id, role, content, None)
+    }
+
+    /// A user message with the files and images attached to it.
+    pub fn append_user_message(
+        &self,
+        session_id: &str,
+        content: &str,
+        attachments: Option<&str>,
+    ) -> Result<i64> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, attachments, created_at) VALUES (?1, 'user', ?2, ?3, ?4)",
+            params![session_id, content, attachments, now_secs()],
+        )?;
+        let id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+            params![now_secs(), session_id],
+        )?;
+        Ok(id)
     }
 
     pub fn append_message_with_reasoning(
@@ -333,7 +422,7 @@ impl SessionStore {
     pub fn messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, role, content, created_at, reasoning FROM messages WHERE session_id = ?1 ORDER BY id ASC",
+            "SELECT id, role, content, created_at, reasoning, attachments FROM messages WHERE session_id = ?1 ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
             let role: String = row.get(1)?;
@@ -359,6 +448,7 @@ impl SessionStore {
                 role,
                 content,
                 reasoning,
+                attachments: row.get(5)?,
                 created_at: row.get(3)?,
             })
         })?;
@@ -383,14 +473,129 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Ids and times of the messages the user wrote, oldest first. The desktop addresses a
+    /// turn by its position in this list, which is the same for a live chat and a reloaded one.
+    pub fn user_turns(&self, session_id: &str) -> Result<Vec<(i64, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, content, created_at FROM messages WHERE session_id = ?1 AND role = 'user' ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, content, created_at) = row?;
+            if !is_tool_result("user", &content) {
+                out.push((id, created_at));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Message id of the user's `index`-th turn (0-based).
+    pub fn user_turn_id(&self, session_id: &str, index: usize) -> Result<i64> {
+        self.user_turns(session_id)?
+            .get(index)
+            .map(|(id, _)| *id)
+            .ok_or_else(|| Error::msg("that message is no longer in this chat"))
+    }
+
+    /// Remove one exchange: the user's `index`-th message and the reply to it. Files stay as they are.
+    pub fn delete_turn(&self, session_id: &str, index: usize) -> Result<()> {
+        let turns = self.user_turns(session_id)?;
+        let (start, start_at) = *turns
+            .get(index)
+            .ok_or_else(|| Error::msg("that message is no longer in this chat"))?;
+        let next = turns.get(index + 1).copied();
+        let conn = self.lock();
+        match next {
+            Some((end, end_at)) => {
+                conn.execute(
+                    "DELETE FROM messages WHERE session_id = ?1 AND id >= ?2 AND id < ?3",
+                    params![session_id, start, end],
+                )?;
+                for table in ["tool_runs", "changes"] {
+                    conn.execute(
+                        &format!("DELETE FROM {table} WHERE session_id = ?1 AND created_at >= ?2 AND created_at < ?3"),
+                        params![session_id, start_at, end_at],
+                    )?;
+                }
+                conn.execute(
+                    "DELETE FROM snapshots WHERE session_id = ?1 AND message_id >= ?2 AND message_id < ?3",
+                    params![session_id, start, end],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "DELETE FROM messages WHERE session_id = ?1 AND id >= ?2",
+                    params![session_id, start],
+                )?;
+                for table in ["tool_runs", "changes"] {
+                    conn.execute(
+                        &format!("DELETE FROM {table} WHERE session_id = ?1 AND created_at >= ?2"),
+                        params![session_id, start_at],
+                    )?;
+                }
+                conn.execute(
+                    "DELETE FROM snapshots WHERE session_id = ?1 AND message_id >= ?2",
+                    params![session_id, start],
+                )?;
+            }
+        }
+        // The provider's own copy of the conversation still has the removed turn.
+        conn.execute("DELETE FROM provider_sessions WHERE session_id = ?1", params![session_id])?;
+        Ok(())
+    }
+
+    /// Copy a chat up to and including the reply to the user's `index`-th message into a new chat.
+    pub fn fork(&self, session_id: &str, index: usize, new_id: &str) -> Result<()> {
+        let turns = self.user_turns(session_id)?;
+        if index >= turns.len() {
+            return Err(Error::msg("that message is no longer in this chat"));
+        }
+        let end = turns.get(index + 1).map(|(id, at)| (*id, *at));
+        let conn = self.lock();
+        let (project, title, model, permission): (String, String, String, String) = conn.query_row(
+            "SELECT project_path, title, model_id, permission FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        let now = now_secs();
+        conn.execute(
+            "INSERT INTO sessions (id, project_path, title, model_id, permission, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![new_id, project, format!("{title} (fork)"), model, permission, now],
+        )?;
+        let (end_id, end_at) = end.unwrap_or((i64::MAX, i64::MAX));
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, reasoning, attachments, created_at)
+             SELECT ?1, role, content, reasoning, attachments, created_at FROM messages
+             WHERE session_id = ?2 AND id < ?3 ORDER BY id ASC",
+            params![new_id, session_id, end_id],
+        )?;
+        conn.execute(
+            "INSERT INTO tool_runs (id, session_id, name, arguments, output, ok, created_at)
+             SELECT ?1 || '-' || id, ?1, name, arguments, output, ok, created_at FROM tool_runs
+             WHERE session_id = ?2 AND created_at < ?3",
+            params![new_id, session_id, end_at],
+        )?;
+        conn.execute(
+            "INSERT INTO changes (session_id, path, diff, created_at)
+             SELECT ?1, path, diff, created_at FROM changes WHERE session_id = ?2 AND created_at < ?3",
+            params![new_id, session_id, end_at],
+        )?;
+        Ok(())
+    }
+
     /// Drop this user turn and everything after it, and put edited files back.
     pub fn rewind(&self, session_id: &str, message_id: i64) -> Result<RewindOutcome> {
         let conn = self.lock();
-        let (role, prompt, created_at): (String, String, i64) = conn
+        let (role, prompt, created_at, attachments): (String, String, i64, Option<String>) = conn
             .query_row(
-                "SELECT role, content, created_at FROM messages WHERE session_id = ?1 AND id = ?2",
+                "SELECT role, content, created_at, attachments FROM messages WHERE session_id = ?1 AND id = ?2",
                 params![session_id, message_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .map_err(|_| Error::msg("that message is not in this session"))?;
         if role != "user" {
@@ -454,8 +659,10 @@ impl SessionStore {
             "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
             params![now_secs(), session_id],
         )?;
+        conn.execute("DELETE FROM provider_sessions WHERE session_id = ?1", params![session_id])?;
         Ok(RewindOutcome {
             prompt,
+            attachments,
             restored_files: restored,
         })
     }
@@ -547,5 +754,75 @@ mod tests {
         assert!(reopened.tool_runs("s1").unwrap().is_empty());
         assert!(reopened.changes("s1").unwrap().is_empty());
         assert!(reopened.get("s1").unwrap().is_none());
+    }
+
+    fn three_turns(store: &SessionStore, dir: &Path) {
+        store
+            .create("s1", dir, "Chat", "claude-code/opus", PermissionMode::Standard)
+            .unwrap();
+        for (prompt, reply) in [("one", "first"), ("two", "second"), ("three", "third")] {
+            store.append_user_message("s1", prompt, Some("[]")).unwrap();
+            store.append_message("s1", "user", "Tool results:\nok").unwrap();
+            store.append_message("s1", "assistant", reply).unwrap();
+        }
+        store.set_provider_session("s1", "claude", "abc").unwrap();
+    }
+
+    #[test]
+    fn user_turns_skip_tool_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("s.db")).unwrap();
+        three_turns(&store, dir.path());
+        let turns = store.user_turns("s1").unwrap();
+        assert_eq!(turns.len(), 3);
+        let second = store.user_turn_id("s1", 1).unwrap();
+        let outcome = store.rewind("s1", second).unwrap();
+        assert_eq!(outcome.prompt, "two");
+        assert_eq!(outcome.attachments.as_deref(), Some("[]"));
+        assert_eq!(store.user_turns("s1").unwrap().len(), 1);
+        // The provider's transcript no longer matches, so it is dropped.
+        assert_eq!(store.provider_session("s1", "claude").unwrap(), None);
+        assert!(store.user_turn_id("s1", 5).is_err());
+    }
+
+    #[test]
+    fn deletes_one_exchange_in_the_middle() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("s.db")).unwrap();
+        three_turns(&store, dir.path());
+        store.delete_turn("s1", 1).unwrap();
+        let texts: Vec<String> = store
+            .messages("s1")
+            .unwrap()
+            .into_iter()
+            .filter(|m| !is_tool_result(&m.role, &m.content))
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(texts, vec!["one", "first", "three", "third"]);
+        store.delete_turn("s1", 1).unwrap();
+        assert_eq!(store.user_turns("s1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn forks_up_to_a_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("s.db")).unwrap();
+        three_turns(&store, dir.path());
+        store.record_tool("t1", "s1", "read_file", "{}", "ok", true).unwrap();
+        store.fork("s1", 1, "s2").unwrap();
+        let fork = store.get("s2").unwrap().unwrap();
+        assert_eq!(fork.title, "Chat (fork)");
+        assert_eq!(fork.model_id, "claude-code/opus");
+        let texts: Vec<String> = store
+            .messages("s2")
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.role == "assistant")
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(texts, vec!["first", "second"]);
+        // The original is untouched.
+        assert_eq!(store.user_turns("s1").unwrap().len(), 3);
+        assert!(store.fork("s1", 9, "s3").is_err());
     }
 }

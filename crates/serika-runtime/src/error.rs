@@ -27,8 +27,43 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
-    #[error(transparent)]
+    #[error("{}", describe_http(.0))]
     Http(#[from] reqwest::Error),
+}
+
+/// A network failure in words, with the real cause. reqwest's own text is only
+/// "error sending request for url (...)", which hides whether it was a timeout, a refused
+/// connection, or a connection the server had already closed.
+pub fn describe_http(err: &reqwest::Error) -> String {
+    let mut causes: Vec<String> = Vec::new();
+    let mut current = std::error::Error::source(err);
+    while let Some(cause) = current {
+        let text = cause.to_string();
+        if !text.is_empty() && !causes.contains(&text) {
+            causes.push(text);
+        }
+        current = cause.source();
+    }
+    let headline = if err.is_timeout() {
+        "Serika did not answer in time."
+    } else if err.is_connect() {
+        "Could not connect to Serika. Check your internet connection."
+    } else if err.is_request() {
+        "The connection to Serika was interrupted. Try again."
+    } else {
+        "The request to Serika failed."
+    };
+    if causes.is_empty() {
+        headline.to_string()
+    } else {
+        format!("{headline} ({})", causes.join(": "))
+    }
+}
+
+/// Connection-level failures where nothing reached the server or the reply never started.
+/// A pooled connection the server already closed shows up this way.
+pub fn is_transient(err: &reqwest::Error) -> bool {
+    !err.is_timeout() && (err.is_connect() || err.is_request())
 }
 
 impl Error {

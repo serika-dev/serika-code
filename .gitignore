@@ -15,3 +15,7 @@ config.local.json
 *.log
 .DS_Store
 Thumbs.db
+
+# Qt desktop build output and packaged app
+/qt/serika-code/build/
+/dist/

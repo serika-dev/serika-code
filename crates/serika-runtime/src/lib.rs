@@ -6,7 +6,10 @@
 //! calls to the client.
 
 pub mod agent;
+pub mod agents;
 pub mod app;
+pub mod attachments;
+pub mod browser;
 pub mod client;
 pub mod config;
 pub mod context;
@@ -16,6 +19,7 @@ pub mod doctor;
 pub mod error;
 pub mod events;
 pub mod gitinfo;
+pub mod i18n;
 pub mod logsetup;
 pub mod model;
 pub mod patch;
