@@ -364,4 +364,40 @@ QtObject {
         }
         return text
     }
+
+    // Unified diff → rows for the Changes pane: { kind: hunk|add|del|ctx, old, new, text }.
+    function diffLines(diff) {
+        var out = []
+        var lines = (diff || "").split("\n")
+        var oldNo = 0, newNo = 0
+        for (var i = 0; i < lines.length; ++i) {
+            var line = lines[i]
+            if (line.indexOf("+++") === 0 || line.indexOf("---") === 0 || line.indexOf("diff --git") === 0 || line.indexOf("index ") === 0)
+                continue
+            if (line.indexOf("@@") === 0) {
+                var m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)/)
+                if (m) { oldNo = parseInt(m[1]); newNo = parseInt(m[2]) }
+                out.push({ kind: "hunk", old: "", new: "", text: m && m[3] ? m[3].trim() : "" })
+                continue
+            }
+            if (line.length === 0 && i === lines.length - 1) continue
+            var c = line.charAt(0)
+            if (c === "+") { out.push({ kind: "add", old: "", new: String(newNo++), text: line.substring(1) }) }
+            else if (c === "-") { out.push({ kind: "del", old: String(oldNo++), new: "", text: line.substring(1) }) }
+            else if (c === "\\") { continue }
+            else { out.push({ kind: "ctx", old: String(oldNo++), new: String(newNo++), text: line.substring(1) }) }
+        }
+        return out
+    }
+
+    function diffStats(diff) {
+        var add = 0, del = 0
+        var lines = (diff || "").split("\n")
+        for (var i = 0; i < lines.length; ++i) {
+            var c = lines[i].charAt(0)
+            if (c === "+" && lines[i].indexOf("+++") !== 0) add++
+            else if (c === "-" && lines[i].indexOf("---") !== 0) del++
+        }
+        return { add: add, del: del }
+    }
 }

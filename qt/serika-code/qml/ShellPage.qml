@@ -99,8 +99,10 @@ Item {
         id: main
         anchors.left: sidebar.right
         anchors.right: shell.inspectorOpen && shell.dockSide === "right" ? inspector.left : parent.right
+        anchors.rightMargin: shell.inspectorOpen && shell.dockSide === "right" ? 4 : 0
         anchors.top: parent.top
         anchors.bottom: shell.inspectorOpen && shell.dockSide === "bottom" ? inspector.top : parent.bottom
+        anchors.bottomMargin: shell.inspectorOpen && shell.dockSide === "bottom" ? 4 : 0
         visible: !(shell.inspectorOpen && shell.dockMaximized)
 
         ChatHeader {
@@ -261,11 +263,14 @@ Item {
 
     Inspector {
         id: inspector
+        // A floating card: 8 px from the edges, under the title row so the window buttons stay clear.
         readonly property bool full: shell.dockMaximized
-        x: full ? sidebar.width : (shell.dockSide === "right" ? shell.width - width : sidebar.width)
-        y: full || shell.dockSide === "right" ? 0 : shell.height - height
-        width: full ? shell.width - sidebar.width : (shell.dockSide === "right" ? shell.clampDock(shell.dockSize) : shell.width - sidebar.width)
-        height: full || shell.dockSide === "right" ? shell.height : shell.clampDock(shell.dockSize)
+        readonly property real gap: 8
+        readonly property real titleRow: 52
+        x: full || shell.dockSide === "bottom" ? sidebar.width + gap : shell.width - width - gap
+        y: full || shell.dockSide === "right" ? titleRow : shell.height - height - gap
+        width: full || shell.dockSide === "bottom" ? shell.width - sidebar.width - 2 * gap : shell.clampDock(shell.dockSize)
+        height: full || shell.dockSide === "right" ? shell.height - titleRow - gap : shell.clampDock(shell.dockSize)
         open: shell.inspectorOpen
         tab: shell.inspectorTab
         mode: shell.dockMode
@@ -288,10 +293,10 @@ Item {
         MouseArea {
             z: 10
             visible: !shell.dockMaximized
-            x: shell.dockSide === "right" ? -3 : 0
-            y: shell.dockSide === "bottom" ? -3 : 0
-            width: shell.dockSide === "right" ? 6 : parent.width
-            height: shell.dockSide === "bottom" ? 6 : parent.height
+            x: shell.dockSide === "right" ? -7 : 0
+            y: shell.dockSide === "bottom" ? -7 : 0
+            width: shell.dockSide === "right" ? 8 : parent.width
+            height: shell.dockSide === "bottom" ? 8 : parent.height
             cursorShape: shell.dockSide === "right" ? Qt.SizeHorCursor : Qt.SizeVerCursor
             hoverEnabled: true
             property point start

@@ -2,9 +2,9 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// The dock beside or below the chat: Changes and Browser, either as tabs or split side by side.
-// ShellPage owns every piece of state; this only draws it and asks for changes through signals.
-Rectangle {
+// The panel beside or below the chat with Changes and Browser, as tabs or split.
+// A floating card under the title row. ShellPage owns all state; this asks through signals.
+Item {
     id: dock
     property bool open: false
     property string tab: "changes"          // active pane in tabs mode
@@ -12,231 +12,214 @@ Rectangle {
     property string side: "right"           // "right" or "bottom"
     property var panes: ["changes", "browser"]   // panes shown in split mode
     property bool maximized: false
-    property real headerInset: 146          // room for the window controls when the dock reaches the top edge
     signal tabRequested(string id)
     signal closeRequested()
-    signal paneCloseRequested(string id)
     signal maximizeRequested()
     signal modeRequested(string mode)
     signal sideRequested(string side)
     readonly property var dict: ipc.strings
     readonly property var allPanes: [
-        { id: "changes", label: Format.t(dict, "Diffs") || "Changes", icon: "git-branch", count: ipc.diffs.length },
+        { id: "changes", label: Format.tr(dict, "Changes", "Changes"), icon: "git-branch", count: ipc.diffs.length },
         { id: "browser", label: Format.tr(dict, "Browser", "Browser"), icon: "globe", count: (ipc.browser.tabs || []).length }
     ]
-    function pane(id) {
-        for (let i = 0; i < allPanes.length; ++i)
-            if (allPanes[i].id === id) return allPanes[i]
-        return allPanes[0]
-    }
-    readonly property var splitPanes: allPanes.filter(function (p) { return dock.panes.indexOf(p.id) >= 0 })
+    function shown(id) { return mode === "split" ? panes.indexOf(id) >= 0 : tab === id }
 
     visible: open
-    color: Theme.card
-    clip: true
+    opacity: open ? 1 : 0
+    Behavior on opacity { NumberAnimation { duration: 140 } }
 
-    // Border toward the chat
     Rectangle {
-        visible: dock.side === "right" && !dock.maximized
-        anchors.left: parent.left
-        width: 1
-        height: parent.height
-        color: Theme.borderSubtle
-    }
-    Rectangle {
-        visible: dock.side === "bottom" && !dock.maximized
-        anchors.top: parent.top
-        width: parent.width
-        height: 1
-        color: Theme.borderSubtle
-    }
-
-    component PaneButton: Rectangle {
-        id: pb
-        property var entry: ({})
-        property bool current: false
-        signal picked()
-        implicitHeight: 32
-        implicitWidth: pbRow.implicitWidth + 22
-        radius: 8
-        color: current ? Theme.active : (pbArea.containsMouse ? Theme.hover : "transparent")
-        Row {
-            id: pbRow
-            anchors.centerIn: parent
-            spacing: 7
-            Icon { anchors.verticalCenter: parent.verticalCenter; name: pb.entry.icon || "layers"; size: 15; color: pb.current ? Theme.text : Theme.textSecondary }
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: pb.entry.label || ""
-                color: pb.current ? Theme.text : Theme.textSecondary
-                font.family: Theme.sans
-                font.pixelSize: 13
-                font.weight: Font.Medium
-            }
-            Rectangle {
-                visible: (pb.entry.count || 0) > 0
-                anchors.verticalCenter: parent.verticalCenter
-                width: countText.implicitWidth + 10
-                height: 16
-                radius: 8
-                color: Theme.accentSoft
-                Text {
-                    id: countText
-                    anchors.centerIn: parent
-                    text: pb.entry.count || 0
-                    color: Theme.accentSecondary
-                    font.family: Theme.sans
-                    font.pixelSize: 10
-                    font.weight: Font.DemiBold
-                }
-            }
-        }
-        MouseArea { id: pbArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: pb.picked() }
-    }
-
-    // Header controls shared by both modes
-    component DockControls: Row {
-        spacing: 2
-        IconButton {
-            id: layoutButton
-            icon: "layout"
-            iconSize: 15
-            active: layoutMenu.opened
-            tip: Format.tr(dock.dict, "DockLayout", "Panel layout")
-            onClicked: layoutMenu.opened ? layoutMenu.close() : layoutMenu.open()
-            Popover {
-                id: layoutMenu
-                x: layoutButton.width - width
-                y: layoutButton.height + 6
-                width: 250
-                contentItem: ColumnLayout {
-                    spacing: 8
-                    Text { Layout.leftMargin: 6; Layout.topMargin: 4; text: Format.tr(dock.dict, "DockShow", "Show panels"); color: Theme.textDim; font.family: Theme.sans; font.pixelSize: 12 }
-                    Segmented {
-                        Layout.leftMargin: 4
-                        options: [
-                            { value: "tabs", label: Format.tr(dock.dict, "DockTabsShort", "As tabs"), icon: "square" },
-                            { value: "split", label: Format.tr(dock.dict, "DockSplitShort", "Split"), icon: "columns" }
-                        ]
-                        value: dock.mode
-                        onPicked: (v) => dock.modeRequested(v)
-                    }
-                    Text { Layout.leftMargin: 6; text: Format.tr(dock.dict, "DockPlace", "Dock position"); color: Theme.textDim; font.family: Theme.sans; font.pixelSize: 12 }
-                    Segmented {
-                        Layout.leftMargin: 4
-                        Layout.bottomMargin: 4
-                        options: [
-                            { value: "right", label: Format.tr(dock.dict, "DockRightShort", "Right") },
-                            { value: "bottom", label: Format.tr(dock.dict, "DockBottomShort", "Bottom") }
-                        ]
-                        value: dock.side
-                        onPicked: (v) => dock.sideRequested(v)
-                    }
-                }
-            }
-        }
-        IconButton {
-            icon: dock.maximized ? "minimize-2" : "maximize-2"
-            iconSize: 15
-            tip: dock.maximized ? Format.tr(dock.dict, "Restore", "Restore") : Format.tr(dock.dict, "Maximize", "Maximize")
-            onClicked: dock.maximizeRequested()
-        }
-        IconButton {
-            icon: "x"
-            iconSize: 16
-            tip: Format.tr(dock.dict, "ClosePanel", "Close panel")
-            onClicked: dock.closeRequested()
-        }
-    }
-
-    readonly property bool reachesTop: dock.side === "right" || dock.maximized
-
-    ColumnLayout {
+        id: card
         anchors.fill: parent
-        anchors.leftMargin: dock.side === "right" && !dock.maximized ? 1 : 0
-        anchors.topMargin: dock.side === "bottom" && !dock.maximized ? 1 : 0
-        spacing: 0
+        radius: 14
+        color: Theme.card
+        border.width: 1
+        border.color: Theme.borderSubtle
+        clip: true
 
-        // Tabs mode header
-        RowLayout {
-            visible: dock.mode === "tabs"
-            Layout.fillWidth: true
-            Layout.preferredHeight: dock.reachesTop ? 52 : 44
-            Layout.leftMargin: 10
-            Layout.rightMargin: dock.reachesTop ? dock.headerInset : 8
-            spacing: 4
-            Repeater {
-                model: dock.allPanes
-                delegate: PaneButton {
-                    required property var modelData
-                    entry: modelData
-                    current: dock.tab === modelData.id
-                    onPicked: dock.tabRequested(modelData.id)
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 1
+            spacing: 0
+
+            // Header: pane switcher and window-style controls
+            Item {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 46
+
+                Rectangle {
+                    id: switcher
+                    anchors.left: parent.left
+                    anchors.leftMargin: 8
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: 32
+                    width: switchRow.implicitWidth + 6
+                    radius: 10
+                    color: Theme.bg
+                    border.width: 1
+                    border.color: Theme.borderSubtle
+                    Row {
+                        id: switchRow
+                        anchors.centerIn: parent
+                        spacing: 2
+                        Repeater {
+                            model: dock.allPanes
+                            delegate: Rectangle {
+                                id: pill
+                                required property var modelData
+                                readonly property bool on: dock.shown(modelData.id)
+                                height: 26
+                                width: pillRow.implicitWidth + 20
+                                radius: 7
+                                color: on ? Theme.raised : (pillArea.containsMouse ? Theme.hover : "transparent")
+                                border.width: on ? 1 : 0
+                                border.color: Theme.border
+                                Behavior on color { ColorAnimation { duration: 120 } }
+                                Row {
+                                    id: pillRow
+                                    anchors.centerIn: parent
+                                    spacing: 6
+                                    Icon {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        name: pill.modelData.icon
+                                        size: 14
+                                        color: pill.on ? Theme.text : Theme.textSecondary
+                                    }
+                                    Text {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: pill.modelData.label
+                                        color: pill.on ? Theme.text : Theme.textSecondary
+                                        font.family: Theme.sans
+                                        font.pixelSize: 13
+                                        font.weight: pill.on ? Font.DemiBold : Font.Medium
+                                    }
+                                    Rectangle {
+                                        visible: pill.modelData.count > 0
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: Math.max(18, countText.implicitWidth + 10)
+                                        height: 17
+                                        radius: 8.5
+                                        color: pill.on ? Theme.accentSoft : Theme.active
+                                        Text {
+                                            id: countText
+                                            anchors.centerIn: parent
+                                            text: pill.modelData.count
+                                            color: pill.on ? Theme.accentSecondary : Theme.textDim
+                                            font.family: Theme.sans
+                                            font.pixelSize: 10
+                                            font.weight: Font.DemiBold
+                                        }
+                                    }
+                                }
+                                MouseArea {
+                                    id: pillArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: dock.tabRequested(pill.modelData.id)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Row {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 6
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 0
+                    IconButton {
+                        id: layoutButton
+                        icon: dock.mode === "split" ? "columns" : "layout"
+                        iconSize: 15
+                        active: layoutMenu.opened
+                        tip: Format.tr(dock.dict, "DockLayout", "Panel layout")
+                        onClicked: layoutMenu.opened ? layoutMenu.close() : layoutMenu.open()
+                        Popover {
+                            id: layoutMenu
+                            x: layoutButton.width - width
+                            y: layoutButton.height + 6
+                            width: 248
+                            contentItem: ColumnLayout {
+                                spacing: 8
+                                Text { Layout.leftMargin: 6; Layout.topMargin: 4; text: Format.tr(dock.dict, "DockShow", "Show panels"); color: Theme.textDim; font.family: Theme.sans; font.pixelSize: 12 }
+                                Segmented {
+                                    Layout.leftMargin: 4
+                                    options: [
+                                        { value: "tabs", label: Format.tr(dock.dict, "DockTabsShort", "One at a time"), icon: "square" },
+                                        { value: "split", label: Format.tr(dock.dict, "DockSplitShort", "Split"), icon: "columns" }
+                                    ]
+                                    value: dock.mode
+                                    onPicked: (v) => dock.modeRequested(v)
+                                }
+                                Text { Layout.leftMargin: 6; text: Format.tr(dock.dict, "DockPlace", "Position"); color: Theme.textDim; font.family: Theme.sans; font.pixelSize: 12 }
+                                Segmented {
+                                    Layout.leftMargin: 4
+                                    Layout.bottomMargin: 4
+                                    options: [
+                                        { value: "right", label: Format.tr(dock.dict, "DockRightShort", "Right") },
+                                        { value: "bottom", label: Format.tr(dock.dict, "DockBottomShort", "Bottom") }
+                                    ]
+                                    value: dock.side
+                                    onPicked: (v) => dock.sideRequested(v)
+                                }
+                            }
+                        }
+                    }
+                    IconButton {
+                        icon: dock.maximized ? "minimize-2" : "maximize-2"
+                        iconSize: 14
+                        tip: dock.maximized ? Format.tr(dock.dict, "Restore", "Restore") : Format.tr(dock.dict, "Maximize", "Maximize")
+                        onClicked: dock.maximizeRequested()
+                    }
+                    IconButton {
+                        icon: "x"
+                        iconSize: 16
+                        tip: Format.tr(dock.dict, "ClosePanel", "Close panel")
+                        onClicked: dock.closeRequested()
+                    }
                 }
             }
-            Item { Layout.fillWidth: true }
-            DockControls {}
-        }
-        Rectangle { visible: dock.mode === "tabs"; Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.borderSubtle }
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.borderSubtle }
 
-        StackLayout {
-            visible: dock.mode === "tabs"
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            currentIndex: dock.tab === "browser" ? 1 : 0
-            DiffPanel {}
-            BrowserPanel {}
-        }
+            // One pane at a time
+            StackLayout {
+                visible: dock.mode === "tabs"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                currentIndex: dock.tab === "browser" ? 1 : 0
+                DiffPanel {}
+                BrowserPanel {}
+            }
 
-        // Split mode: a slim title row, then the panes side by side (or stacked when docked right)
-        RowLayout {
-            visible: dock.mode === "split"
-            Layout.fillWidth: true
-            Layout.preferredHeight: dock.reachesTop ? 52 : 40
-            Layout.leftMargin: 14
-            Layout.rightMargin: dock.reachesTop ? dock.headerInset : 8
-            spacing: 6
-            Repeater {
-                model: dock.allPanes
-                delegate: PaneButton {
-                    required property var modelData
-                    entry: modelData
-                    current: dock.panes.indexOf(modelData.id) >= 0
-                    onPicked: dock.tabRequested(modelData.id)
+            // Both panes: stacked when docked right, side by side below
+            SplitView {
+                id: split
+                visible: dock.mode === "split"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                orientation: dock.side === "right" && !dock.maximized ? Qt.Vertical : Qt.Horizontal
+                handle: Rectangle {
+                    implicitWidth: split.orientation === Qt.Horizontal ? 6 : split.width
+                    implicitHeight: split.orientation === Qt.Vertical ? 6 : split.height
+                    color: SplitHandle.pressed ? Theme.accent : (SplitHandle.hovered ? Theme.border : Theme.borderSubtle)
                 }
-            }
-            Item { Layout.fillWidth: true }
-            DockControls {}
-        }
-        Rectangle { visible: dock.mode === "split"; Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.borderSubtle }
-
-        SplitView {
-            id: split
-            visible: dock.mode === "split"
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            // Docked right the dock is tall and narrow, so panes stack; docked below they sit side by side.
-            orientation: dock.side === "right" && !dock.maximized ? Qt.Vertical : Qt.Horizontal
-            handle: Rectangle {
-                implicitWidth: split.orientation === Qt.Horizontal ? 5 : split.width
-                implicitHeight: split.orientation === Qt.Vertical ? 5 : split.height
-                color: SplitHandle.pressed ? Theme.accent : (SplitHandle.hovered ? Theme.border : Theme.borderSubtle)
-            }
-            Item {
-                visible: dock.panes.indexOf("browser") >= 0
-                SplitView.fillWidth: true
-                SplitView.fillHeight: true
-                SplitView.minimumWidth: 220
-                SplitView.minimumHeight: 160
-                BrowserPanel { anchors.fill: parent; visible: dock.mode === "split" }
-            }
-            Item {
-                visible: dock.panes.indexOf("changes") >= 0
-                SplitView.preferredWidth: split.width * 0.42
-                SplitView.preferredHeight: split.height * 0.4
-                SplitView.minimumWidth: 220
-                SplitView.minimumHeight: 120
-                DiffPanel { anchors.fill: parent }
+                Item {
+                    visible: dock.panes.indexOf("browser") >= 0
+                    SplitView.fillWidth: true
+                    SplitView.fillHeight: true
+                    SplitView.minimumWidth: 240
+                    SplitView.minimumHeight: 180
+                    BrowserPanel { anchors.fill: parent; visible: dock.mode === "split" }
+                }
+                Item {
+                    visible: dock.panes.indexOf("changes") >= 0
+                    SplitView.preferredWidth: split.width * 0.42
+                    SplitView.preferredHeight: split.height * 0.42
+                    SplitView.minimumWidth: 240
+                    SplitView.minimumHeight: 140
+                    DiffPanel { anchors.fill: parent }
+                }
             }
         }
     }

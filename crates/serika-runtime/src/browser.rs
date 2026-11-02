@@ -175,6 +175,8 @@ pub struct BrowserHost {
     live: Mutex<Option<Live>>,
     /// Viewport size every tab renders at; the panel sets it to its own size.
     view: StdMutex<(u32, u32)>,
+    /// The browser's user agent without "Headless", which some sites refuse.
+    user_agent: StdMutex<Option<String>>,
 }
 
 /// Locate a Chromium-based browser: the configured path, then common install locations.
@@ -320,6 +322,7 @@ impl BrowserHost {
             binary,
             live: Mutex::new(None),
             view: StdMutex::new((VIEW_WIDTH, VIEW_HEIGHT)),
+            user_agent: StdMutex::new(None),
         }
     }
 
@@ -368,6 +371,12 @@ impl BrowserHost {
             .map(str::to_string)
             .ok_or_else(|| Error::msg("could not attach to the browser tab"))?;
         cdp.call("Page.enable", json!({}), Some(&session)).await?;
+        let agent = self.user_agent.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(agent) = agent {
+            let _ = cdp
+                .call("Emulation.setUserAgentOverride", json!({"userAgent": agent}), Some(&session))
+                .await;
+        }
         let (width, height) = self.view();
         cdp.call(
             "Emulation.setDeviceMetricsOverride",
@@ -584,49 +593,35 @@ impl BrowserHost {
         })?;
         std::fs::create_dir_all(&self.profile_dir)?;
         let port_file = self.profile_dir.join("DevToolsActivePort");
-        let _ = std::fs::remove_file(&port_file);
-
-        let mut command = Command::new(&binary);
-        command
-            .args([
-                "--headless=new",
-                "--remote-debugging-port=0",
-                "--remote-allow-origins=*",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--disable-background-networking",
-                "--disable-sync",
-                "--hide-scrollbars",
-                "--mute-audio",
-            ])
-            .arg({
-                let (width, height) = self.view();
-                format!("--window-size={width},{height}")
-            })
-            .arg(format!("--user-data-dir={}", self.profile_dir.display()))
-            .arg("about:blank")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        #[cfg(windows)]
-        command.creation_flags(0x08000000);
-        let child = command
-            .spawn()
-            .map_err(|err| Error::msg(format!("could not start {}: {err}", binary.display())))?;
-
-        let mut endpoint: Option<(String, String)> = None;
-        for _ in 0..120 {
-            if let Ok(text) = std::fs::read_to_string(&port_file) {
-                let mut lines = text.lines();
-                if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
-                    endpoint = Some((port.trim().to_string(), path.trim().to_string()));
-                    break;
+        let mut attempt = 0;
+        let (child, port, path) = loop {
+            attempt += 1;
+            let _ = std::fs::remove_file(&port_file);
+            let mut child = self.spawn_browser(&binary)?;
+            match wait_for_port(&port_file, &mut child).await {
+                PortWait::Ready(port, path) => break (child, port, path),
+                // A browser left over from a crashed or killed run still holds the profile:
+                // the new one hands over to it and exits. Clear it out and try once more.
+                PortWait::Exited if attempt == 1 => {
+                    kill_profile_orphans(&self.profile_dir).await;
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                }
+                PortWait::Exited => {
+                    return Err(Error::msg(
+                        "the browser closed right after starting. Another copy may be using Serika's browser profile; \
+                         close it from Task Manager or restart the app.",
+                    ))
+                }
+                PortWait::TimedOut => {
+                    let _ = child.kill().await;
+                    if attempt == 1 {
+                        kill_profile_orphans(&self.profile_dir).await;
+                        continue;
+                    }
+                    return Err(Error::msg("the browser did not open its debugging port"));
                 }
             }
-            tokio::time::sleep(Duration::from_millis(150)).await;
-        }
-        let (port, path) =
-            endpoint.ok_or_else(|| Error::msg("the browser did not open its debugging port"))?;
+        };
         let (socket, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}{path}"))
             .await
             .map_err(|err| Error::msg(format!("could not connect to the browser: {err}")))?;
@@ -656,6 +651,11 @@ impl BrowserHost {
             }
         });
 
+        if let Ok(version) = cdp.call("Browser.getVersion", json!({}), None).await {
+            if let Some(agent) = version.get("userAgent").and_then(|a| a.as_str()) {
+                *self.user_agent.lock().unwrap_or_else(|e| e.into_inner()) = Some(normal_user_agent(agent));
+            }
+        }
         let targets = cdp.call("Target.getTargets", json!({}), None).await?;
         let page = targets
             .get("targetInfos")
@@ -682,6 +682,39 @@ impl BrowserHost {
             tabs: vec![tab],
             active: 0,
         })
+    }
+
+    fn spawn_browser(&self, binary: &Path) -> Result<Child> {
+        let mut command = Command::new(binary);
+        command
+            .args([
+                "--headless=new",
+                "--remote-debugging-port=0",
+                "--remote-allow-origins=*",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--hide-scrollbars",
+                "--mute-audio",
+            ])
+            .arg({
+                let (width, height) = self.view();
+                format!("--window-size={width},{height}")
+            })
+            .arg(format!("--user-data-dir={}", self.profile_dir.display()))
+            .arg("about:blank")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
+        let child = command
+            .spawn()
+            .map_err(|err| Error::msg(format!("could not start {}: {err}", binary.display())))?;
+        #[cfg(windows)]
+        job::adopt(&child);
+        Ok(child)
     }
 
     async fn eval(&self, cdp: &Cdp, session: &str, expression: &str) -> Result<Value> {
@@ -1000,6 +1033,135 @@ impl BrowserHost {
     }
 }
 
+/// "HeadlessChrome/131" → "Chrome/131", "HeadlessEdg/131" → "Edg/131".
+fn normal_user_agent(agent: &str) -> String {
+    agent.replace("HeadlessChrome", "Chrome").replace("HeadlessEdg", "Edg").replace("Headless", "")
+}
+
+enum PortWait {
+    Ready(String, String),
+    Exited,
+    TimedOut,
+}
+
+/// Wait for the browser to write its DevTools endpoint, or to exit early.
+async fn wait_for_port(port_file: &Path, child: &mut Child) -> PortWait {
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(port_file) {
+            let mut lines = text.lines();
+            if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
+                return PortWait::Ready(port.trim().to_string(), path.trim().to_string());
+            }
+        }
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return PortWait::Exited;
+        }
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+    PortWait::TimedOut
+}
+
+/// Stop browsers that still use our profile after the app that started them is gone.
+async fn kill_profile_orphans(profile: &Path) {
+    let marker = profile.display().to_string();
+    #[cfg(windows)]
+    {
+        let script = format!(
+            "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' OR Name='chrome.exe' OR Name='brave.exe'\" | \
+             Where-Object {{ $_.CommandLine -and $_.CommandLine.Contains('{}') }} | \
+             ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}",
+            marker.replace('\'', "''")
+        );
+        let mut command = Command::new("powershell");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+        command.creation_flags(0x08000000);
+        let _ = tokio::time::timeout(Duration::from_secs(15), command.output()).await;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            Command::new("pkill").args(["-f", &format!("user-data-dir={marker}")]).output(),
+        )
+        .await;
+    }
+}
+
+/// On Windows the browser lives in a job object that is closed when Serika exits, however it
+/// exits, so a killed or crashed app never leaves a headless browser holding the profile.
+#[cfg(windows)]
+mod job {
+    use std::sync::OnceLock;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicLimit {
+        per_process_user_time: i64,
+        per_job_user_time: i64,
+        limit_flags: u32,
+        minimum_working_set: usize,
+        maximum_working_set: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ExtendedLimit {
+        basic: BasicLimit,
+        io: [u64; 6],
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+
+    extern "system" {
+        fn CreateJobObjectW(attributes: *mut core::ffi::c_void, name: *const u16) -> isize;
+        fn SetInformationJobObject(job: isize, class: i32, info: *mut core::ffi::c_void, length: u32) -> i32;
+        fn AssignProcessToJobObject(job: isize, process: isize) -> i32;
+    }
+
+    const EXTENDED_LIMIT_INFORMATION: i32 = 9;
+    const KILL_ON_JOB_CLOSE: u32 = 0x2000;
+
+    fn handle() -> isize {
+        static JOB: OnceLock<isize> = OnceLock::new();
+        *JOB.get_or_init(|| {
+            // SAFETY: creates an unnamed job object owned by this process and sets its limits.
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
+                if job != 0 {
+                    let mut info = ExtendedLimit::default();
+                    info.basic.limit_flags = KILL_ON_JOB_CLOSE;
+                    SetInformationJobObject(
+                        job,
+                        EXTENDED_LIMIT_INFORMATION,
+                        &mut info as *mut ExtendedLimit as *mut core::ffi::c_void,
+                        std::mem::size_of::<ExtendedLimit>() as u32,
+                    );
+                }
+                job
+            }
+        })
+    }
+
+    pub fn adopt(child: &tokio::process::Child) {
+        let job = handle();
+        if job == 0 {
+            return;
+        }
+        if let Some(process) = child.raw_handle() {
+            // SAFETY: the handle belongs to a child we just spawned and is still open.
+            unsafe {
+                AssignProcessToJobObject(job, process as isize);
+            }
+        }
+    }
+}
+
 /// Where the headless browser keeps its profile (cookies survive between runs).
 pub fn profile_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("browser-profile")
@@ -1008,6 +1170,14 @@ pub fn profile_dir(data_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_agent_hides_headless() {
+        let ua = "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/141.0.0.0 Safari/537.36 HeadlessEdg/141.0.0.0";
+        let out = normal_user_agent(ua);
+        assert!(!out.contains("Headless"));
+        assert!(out.contains("Chrome/141.0.0.0") && out.contains("Edg/141.0.0.0"));
+    }
 
     #[test]
     fn addresses_become_urls_or_searches() {

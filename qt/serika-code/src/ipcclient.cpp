@@ -12,6 +12,7 @@
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QDesktopServices>
 #include <QMimeData>
 #include <QPainter>
 #include <QStandardPaths>
@@ -642,6 +643,18 @@ QString IpcClient::modelName(const QString &id) const {
     if (id.startsWith(QLatin1String("codex/")))
         return QStringLiteral("Codex · ") + id.mid(6);
     return id.section(QLatin1Char('/'), -1);
+}
+
+/// Show a file in the system file manager, selected where the platform allows it.
+void IpcClient::revealFile(const QString &path) {
+    const QFileInfo info(path);
+#ifdef Q_OS_WIN
+    QProcess::startDetached(QStringLiteral("explorer.exe"), {QStringLiteral("/select,") + QDir::toNativeSeparators(info.absoluteFilePath())});
+#elif defined(Q_OS_MACOS)
+    QProcess::startDetached(QStringLiteral("open"), {QStringLiteral("-R"), info.absoluteFilePath()});
+#else
+    QDesktopServices::openUrl(QUrl::fromLocalFile(info.absolutePath()));
+#endif
 }
 
 QString IpcClient::lastReplyModel() const {
