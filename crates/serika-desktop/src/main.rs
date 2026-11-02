@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod i18n;
 mod shot;
 mod ui;
 
@@ -35,7 +36,7 @@ fn main() {
                 "Serika Code desktop\n\n  \
                  serika-desktop                            open the application\n  \
                  serika-desktop --smoke                    open and close immediately\n  \
-                 serika-desktop --screenshot <png> [view]  capture a UI screenshot (draft|thread|providers|cli)\n  \
+                 serika-desktop --screenshot <png> [view]  capture a UI screenshot (draft|thread|models|account|settings|chat|providers|cli)\n  \
                  serika-desktop --setup                    install binaries, PATH, and desktop shortcuts\n  \
                  serika-desktop --uninstall                remove installed binaries and shortcuts\n  \
                  serika-desktop --version"

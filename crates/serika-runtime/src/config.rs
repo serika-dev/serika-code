@@ -28,16 +28,29 @@ fn default_log() -> String {
     "info".to_string()
 }
 fn default_exclusions() -> Vec<String> {
-    ["node_modules", "target", "dist", "build", ".git", "vendor", "__pycache__", ".next", "coverage"]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+    [
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        ".git",
+        "vendor",
+        "__pycache__",
+        ".next",
+        "coverage",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 fn default_read() -> usize {
     200_000
 }
 fn default_theme() -> String {
     "dark".to_string()
+}
+fn default_locale() -> String {
+    "en".to_string()
 }
 fn default_context_chars() -> usize {
     60_000
@@ -70,6 +83,9 @@ pub struct Config {
     pub max_read_bytes: usize,
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// UI language code (`en`, `nl`, `ja`, ...). English is the canonical default.
+    #[serde(default = "default_locale")]
+    pub locale: String,
     #[serde(default = "default_context_chars")]
     pub max_context_chars: usize,
     #[serde(default = "default_true")]
@@ -108,6 +124,7 @@ impl Default for Config {
             context_exclusions: default_exclusions(),
             max_read_bytes: default_read(),
             theme: default_theme(),
+            locale: default_locale(),
             max_context_chars: default_context_chars(),
             stream: true,
             openai_api_key: None,
@@ -128,13 +145,17 @@ impl Config {
         validate_base_url("api_base_url", &self.api_base_url)?;
         validate_base_url("accounts_base_url", &self.accounts_base_url)?;
         if self.command_timeout_secs == 0 || self.command_timeout_secs > 3600 {
-            return Err(Error::msg("command_timeout_secs must be between 1 and 3600"));
+            return Err(Error::msg(
+                "command_timeout_secs must be between 1 and 3600",
+            ));
         }
         if self.max_tool_rounds == 0 || self.max_tool_rounds > 40 {
             return Err(Error::msg("max_tool_rounds must be between 1 and 40"));
         }
         if self.max_read_bytes < 1024 || self.max_read_bytes > 5_000_000 {
-            return Err(Error::msg("max_read_bytes must be between 1024 and 5000000"));
+            return Err(Error::msg(
+                "max_read_bytes must be between 1024 and 5000000",
+            ));
         }
         if self.max_context_chars < 4_000 {
             return Err(Error::msg("max_context_chars must be at least 4000"));
@@ -143,9 +164,18 @@ impl Config {
             "dark" | "light" => {}
             _ => return Err(Error::msg("theme must be \"dark\" or \"light\"")),
         }
+        if !is_supported_locale(&self.locale) {
+            return Err(Error::msg(
+                "locale must be a supported language code such as en, nl, es, fr, de, ja, or zh-CN",
+            ));
+        }
         match self.log_level.to_ascii_lowercase().as_str() {
             "error" | "warn" | "info" | "debug" | "trace" => {}
-            _ => return Err(Error::msg("log_level must be error, warn, info, debug, or trace")),
+            _ => {
+                return Err(Error::msg(
+                    "log_level must be error, warn, info, debug, or trace",
+                ))
+            }
         }
         Ok(())
     }
@@ -204,8 +234,9 @@ impl Config {
                 }
             }
             "permission" => {
-                self.permission = PermissionMode::parse(value)
-                    .ok_or_else(|| Error::msg("permission must be read_only, standard, restricted, or full"))?;
+                self.permission = PermissionMode::parse(value).ok_or_else(|| {
+                    Error::msg("permission must be read_only, standard, restricted, or full")
+                })?;
             }
             "command_timeout_secs" => {
                 self.command_timeout_secs = value
@@ -224,6 +255,7 @@ impl Config {
             }
             "log_level" => self.log_level = value.to_string(),
             "theme" => self.theme = value.to_string(),
+            "locale" => self.locale = value.trim().to_string(),
             "max_read_bytes" => {
                 self.max_read_bytes = value
                     .parse()
@@ -303,7 +335,11 @@ impl Config {
         std::env::var("ANTHROPIC_API_KEY")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .or_else(|| self.anthropic_api_key.clone().filter(|s| !s.trim().is_empty()))
+            .or_else(|| {
+                self.anthropic_api_key
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+            })
     }
 
     pub fn resolve_gemini_key(&self) -> Option<String> {
@@ -333,10 +369,29 @@ impl ProjectSettings {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&text).map_err(|err| {
-            Error::msg(format!("could not parse {}: {err}", path.display()))
-        })
+        serde_json::from_str(&text)
+            .map_err(|err| Error::msg(format!("could not parse {}: {err}", path.display())))
     }
+}
+
+fn is_supported_locale(value: &str) -> bool {
+    matches!(
+        value.trim(),
+        "en" | "es"
+            | "fr"
+            | "de"
+            | "pt-BR"
+            | "pt"
+            | "it"
+            | "nl"
+            | "pl"
+            | "ru"
+            | "tr"
+            | "ja"
+            | "ko"
+            | "zh-CN"
+            | "zh"
+    )
 }
 
 fn validate_base_url(name: &str, value: &str) -> Result<()> {
@@ -365,11 +420,16 @@ mod tests {
         assert_eq!(config.api_base_url, DEFAULT_API_BASE);
         config.set_field("permission", "restricted").unwrap();
         config.set_field("theme", "light").unwrap();
+        config.set_field("locale", "nl").unwrap();
         config.save(&paths.config_file).unwrap();
         let loaded = Config::load_or_create(&paths).unwrap();
+        assert_eq!(loaded.locale, "nl");
+        assert!(config.set_field("locale", "pirate").is_err());
         assert_eq!(loaded.permission, PermissionMode::Restricted);
         assert_eq!(loaded.theme, "light");
         assert!(config.set_field("theme", "neon").is_err());
-        assert!(config.set_field("api_base_url", "http://evil.example").is_err());
+        assert!(config
+            .set_field("api_base_url", "http://evil.example")
+            .is_err());
     }
 }

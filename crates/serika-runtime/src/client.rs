@@ -59,7 +59,9 @@ impl SerikaClient {
     }
 
     pub async fn usage(&self, token: &str) -> Result<UsageSnapshot> {
-        let value = self.get_json(&self.api("/api/chat/usage"), Some(token)).await?;
+        let value = self
+            .get_json(&self.api("/api/chat/usage"), Some(token))
+            .await?;
         Ok(serde_json::from_value(value)?)
     }
 
@@ -67,7 +69,33 @@ impl SerikaClient {
         let value = self
             .get_json(&self.accounts("/api/user/me"), Some(token))
             .await?;
-        AccountProfile::from_value(&value).ok_or_else(|| Error::msg("account response was missing a user"))
+        AccountProfile::from_value(&value)
+            .ok_or_else(|| Error::msg("account response was missing a user"))
+    }
+
+    /// Download a public https resource, such as an account avatar. Caps the body at 2 MB.
+    pub async fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let allowed = url.starts_with("https://")
+            || url.starts_with("http://127.0.0.1")
+            || url.starts_with("http://localhost");
+        if !allowed {
+            return Err(Error::msg("refusing to download a non-https URL"));
+        }
+        let response = self
+            .http
+            .get(url)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(Error::msg(format!("download failed ({status})")));
+        }
+        let bytes = response.bytes().await?;
+        if bytes.len() > 2_000_000 {
+            return Err(Error::msg("download is larger than 2 MB"));
+        }
+        Ok(bytes.to_vec())
     }
 
     pub async fn login_password(
@@ -102,7 +130,11 @@ impl SerikaClient {
             .to_string())
     }
 
-    pub async fn consume_magic_link(&self, token: &str, two_factor: Option<&str>) -> Result<LoginOutcome> {
+    pub async fn consume_magic_link(
+        &self,
+        token: &str,
+        two_factor: Option<&str>,
+    ) -> Result<LoginOutcome> {
         let mut body = json!({ "token": token, "rememberMe": true });
         if let Some(code) = two_factor {
             body["twoFactorCode"] = json!(code);
@@ -112,7 +144,10 @@ impl SerikaClient {
 
     pub async fn refresh(&self, refresh_token: &str) -> Result<(String, String)> {
         let value = self
-            .post_auth("/api/auth/refresh", json!({ "refreshToken": refresh_token }))
+            .post_auth(
+                "/api/auth/refresh",
+                json!({ "refreshToken": refresh_token }),
+            )
             .await?;
         let token = value
             .get("token")
@@ -274,7 +309,9 @@ impl SerikaClient {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         let value: Value = serde_json::from_str(&text).unwrap_or(Value::String(text.clone()));
-        if status.as_u16() == 403 && value.get("code").and_then(|c| c.as_str()) == Some("TWO_FACTOR_REQUIRED") {
+        if status.as_u16() == 403
+            && value.get("code").and_then(|c| c.as_str()) == Some("TWO_FACTOR_REQUIRED")
+        {
             return Ok(value);
         }
         if !status.is_success() {
@@ -289,8 +326,14 @@ impl SerikaClient {
                 message: message_of(&value),
             });
         }
-        let token = value.get("token").and_then(|item| item.as_str()).unwrap_or("");
-        let refresh = value.get("refreshToken").and_then(|item| item.as_str()).unwrap_or("");
+        let token = value
+            .get("token")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
+        let refresh = value
+            .get("refreshToken")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
         let profile = value.get("user").and_then(AccountProfile::from_value);
         if token.is_empty() || refresh.is_empty() || profile.is_none() {
             return Err(Error::Auth(message_of(&value)));
@@ -338,7 +381,8 @@ async fn decode_json(response: reqwest::Response) -> Result<Value> {
     if !status.is_success() {
         return Err(error_from_status(status.as_u16(), &text));
     }
-    serde_json::from_str(&text).map_err(|err| Error::msg(format!("invalid JSON from Serika ({err})")))
+    serde_json::from_str(&text)
+        .map_err(|err| Error::msg(format!("invalid JSON from Serika ({err})")))
 }
 
 pub fn error_from_status(status: u16, text: &str) -> Error {
@@ -357,7 +401,10 @@ pub fn error_from_status(status: u16, text: &str) -> Error {
     Error::Api {
         status,
         message: redact(&message_of(&value).if_empty(text)),
-        code: value.get("code").and_then(|code| code.as_str()).map(str::to_string),
+        code: value
+            .get("code")
+            .and_then(|code| code.as_str())
+            .map(str::to_string),
     }
 }
 
@@ -426,7 +473,7 @@ pub fn redact(text: &str) -> String {
 }
 
 fn looks_like_secret(token: &str) -> bool {
-    let token = token.trim_matches(|ch| matches!(ch, '"' | '\'' | ',' | ';' ));
+    let token = token.trim_matches(|ch| matches!(ch, '"' | '\'' | ',' | ';'));
     token.starts_with("sk-")
         || token.starts_with("ghp_")
         || token.starts_with("gho_")
@@ -471,7 +518,10 @@ fn parse_sse_events(raw: &str, out: &mut Vec<SseItem>) {
         return;
     };
     if let Some(message) = value.get("error").and_then(value_message) {
-        let details = value.get("details").and_then(|item| item.as_str()).unwrap_or("");
+        let details = value
+            .get("details")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
         if details.is_empty() {
             out.push(SseItem::Error(message));
         } else {
@@ -487,7 +537,10 @@ fn parse_sse_events(raw: &str, out: &mut Vec<SseItem>) {
             }
         }
     }
-    let content = value.get("content").and_then(|item| item.as_str()).unwrap_or("");
+    let content = value
+        .get("content")
+        .and_then(|item| item.as_str())
+        .unwrap_or("");
     if !content.is_empty() {
         out.push(SseItem::Content(content.to_string()));
     }
@@ -517,7 +570,10 @@ mod tests {
             r#"{"error":"You've used this week's free allowance.","code":"WEEKLY_LIMIT_REACHED","limitReached":true,"limit":10000,"used":10000}"#,
         );
         assert!(matches!(err, Error::UsageLimit(_)));
-        assert!(redact("header eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature tail").contains("[redacted]"));
+        assert!(
+            redact("header eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature tail")
+                .contains("[redacted]")
+        );
         assert!(!redact("normal sentence").contains("[redacted]"));
     }
 

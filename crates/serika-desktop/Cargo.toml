@@ -18,3 +18,4 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-util = "0.7"
 rfd = "0.17"
 zeroize = { version = "1", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

@@ -263,29 +263,108 @@ pub struct AccountProfile {
     pub is_premium: bool,
     pub is_verified: Option<bool>,
     pub subscription_status: Option<String>,
+    pub subscription_plan: Option<String>,
+    pub subscription_period_end: Option<String>,
     pub display_name: Option<String>,
+    pub avatar: Option<String>,
 }
 
 impl AccountProfile {
     pub fn from_value(value: &Value) -> Option<Self> {
-        let obj = value.as_object()?;
+        let obj = user_object(value, 0)?;
+        let id = first_present([obj.get("id"), obj.get("_id"), obj.get("userId")]);
+        let username = json_string(obj.get("username"));
+        if id.is_empty() && username.is_empty() {
+            return None;
+        }
         Some(Self {
-            id: json_string(obj.get("id")),
-            username: json_string(obj.get("username")),
+            id,
+            username,
             email: json_string(obj.get("email")),
-            is_premium: obj.get("isPremium").and_then(|v| v.as_bool()).unwrap_or(false),
+            is_premium: obj
+                .get("isPremium")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             is_verified: obj.get("isVerified").and_then(|v| v.as_bool()),
-            subscription_status: obj
-                .get("subscriptionStatus")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-            display_name: obj
-                .get("displayName")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .filter(|s| !s.is_empty()),
+            subscription_status: optional_string(obj.get("subscriptionStatus")),
+            subscription_plan: optional_string(obj.get("subscriptionPlan")),
+            subscription_period_end: optional_string(obj.get("subscriptionPeriodEnd")),
+            display_name: optional_string(obj.get("displayName")),
+            avatar: avatar_url(obj),
         })
     }
+}
+
+fn user_object(value: &Value, depth: u8) -> Option<&serde_json::Map<String, Value>> {
+    let obj = value.as_object()?;
+    let looks_like_user = obj.contains_key("username")
+        || obj.contains_key("avatar")
+        || obj.contains_key("avatarUrl")
+        || obj.contains_key("isPremium")
+        || obj.contains_key("email");
+    if looks_like_user {
+        return Some(obj);
+    }
+    if depth >= 3 {
+        return None;
+    }
+    for key in ["user", "account", "data", "profile"] {
+        if let Some(inner) = obj.get(key) {
+            if let Some(found) = user_object(inner, depth + 1) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn first_present<'a>(values: [Option<&'a Value>; 3]) -> String {
+    values
+        .into_iter()
+        .map(json_string)
+        .find(|text| !text.is_empty())
+        .unwrap_or_default()
+}
+
+fn optional_string(value: Option<&Value>) -> Option<String> {
+    let text = json_string(value);
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn avatar_url(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    for key in ["avatar", "avatarUrl", "profilePicture", "image", "photo"] {
+        match obj.get(key) {
+            Some(Value::String(text)) if !text.trim().is_empty() => {
+                return Some(text.trim().to_string());
+            }
+            Some(Value::Object(inner)) => {
+                if let Some(url) = optional_string(inner.get("url")) {
+                    return Some(url);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Turn a profile avatar into an https URL. Relative paths are served from serika.dev.
+pub fn absolute_avatar_url(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.starts_with("https://") {
+        return Some(raw.to_string());
+    }
+    if let Some(rest) = raw.strip_prefix("//") {
+        return Some(format!("https://{rest}"));
+    }
+    if let Some(path) = raw.strip_prefix('/') {
+        return Some(format!("https://serika.dev/{path}"));
+    }
+    None
 }
 
 fn json_string(value: Option<&Value>) -> String {
@@ -337,6 +416,32 @@ mod tests {
             Some("deepseek/deepseek-v4.1-flash")
         );
         assert!(catalog.find("x-ai/grok-build-0.1").unwrap().premium);
+
+        let nested = AccountProfile::from_value(&serde_json::json!({
+            "user": {
+                "id": 42,
+                "username": "pikachubolk",
+                "email": "ada@example.com",
+                "isPremium": true,
+                "avatar": "https://cdn.serika.dev/avatars/ada.png",
+                "subscriptionPlan": "AI Max",
+                "subscriptionPeriodEnd": "2026-12-01T00:00:00.000Z"
+            }
+        }))
+        .unwrap();
+        assert_eq!(nested.username, "pikachubolk");
+        assert_eq!(nested.id, "42");
+        assert_eq!(
+            nested.avatar.as_deref(),
+            Some("https://cdn.serika.dev/avatars/ada.png")
+        );
+        assert_eq!(nested.subscription_plan.as_deref(), Some("AI Max"));
+        assert!(nested.subscription_period_end.is_some());
+        assert_eq!(
+            absolute_avatar_url("/uploads/ada.png").as_deref(),
+            Some("https://serika.dev/uploads/ada.png")
+        );
+        assert!(AccountProfile::from_value(&serde_json::json!({"ok": true})).is_none());
 
         let usage: UsageSnapshot = serde_json::from_str(
             r#"{"totalMessages":3,"dailyMessages":1,"lastReset":null,"plan":{"tier":{"key":"free","name":"Free"},"isPremium":false,"weekly":{"limit":10000,"used":20,"remaining":9980,"resetsAt":"2026-11-06T00:00:00.000Z"},"session":{"limit":5000,"used":20,"remaining":4980,"windowHours":5}}}"#,

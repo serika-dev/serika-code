@@ -36,7 +36,10 @@ impl Runtime {
             return Err(Error::msg("the task is empty"));
         }
         let project = dunce::canonicalize(&request.project).map_err(|_| {
-            Error::msg(format!("project does not exist: {}", request.project.display()))
+            Error::msg(format!(
+                "project does not exist: {}",
+                request.project.display()
+            ))
         })?;
         if !project.is_dir() {
             return Err(Error::msg("the project path is not a directory"));
@@ -50,9 +53,19 @@ impl Runtime {
         exclusions.extend(project_settings.extra_exclusions);
         let model = self.resolve_model(request.model.as_deref()).await?;
         let session_id = self.open_session(&project, &request, &model, permission)?;
-        emit(&request.events, AgentEvent::Started { session_id: session_id.clone() });
-        emit(&request.events, AgentEvent::Status(format!("model {model} · {permission}")));
-        let turn_id = self.sessions.append_message(&session_id, "user", request.prompt.trim())?;
+        emit(
+            &request.events,
+            AgentEvent::Started {
+                session_id: session_id.clone(),
+            },
+        );
+        emit(
+            &request.events,
+            AgentEvent::Status(format!("model {model} · {permission}")),
+        );
+        let turn_id = self
+            .sessions
+            .append_message(&session_id, "user", request.prompt.trim())?;
 
         let mut changed = Vec::new();
         let files = context::snapshot(&project, &exclusions).unwrap_or_default();
@@ -71,9 +84,17 @@ impl Runtime {
                 "{}\n\nPermission mode: {permission}.\n{brief}",
                 protocol::tool_instructions()
             );
-            let (history, message) = pack_history(&stored, &instructions, self.config.max_context_chars);
+            let (history, message) =
+                pack_history(&stored, &instructions, self.config.max_context_chars);
             let (reply, streamed_reasoning) = self
-                .complete(&project, &model, &message, &history, &request.cancel, &request.events)
+                .complete(
+                    &project,
+                    &model,
+                    &message,
+                    &history,
+                    &request.cancel,
+                    &request.events,
+                )
                 .await?;
             let (visible, inline_reasoning, calls) = extract_reasoning_and_tool_calls(&reply);
 
@@ -92,11 +113,17 @@ impl Runtime {
                         .map(|c| {
                             if let Some(p) = c.arguments.get("path").and_then(|v| v.as_str()) {
                                 format!("{}({p})", c.name)
-                            } else if let Some(q) = c.arguments.get("query").and_then(|v| v.as_str()) {
+                            } else if let Some(q) =
+                                c.arguments.get("query").and_then(|v| v.as_str())
+                            {
                                 format!("{}(\"{q}\")", c.name)
-                            } else if let Some(pat) = c.arguments.get("pattern").and_then(|v| v.as_str()) {
+                            } else if let Some(pat) =
+                                c.arguments.get("pattern").and_then(|v| v.as_str())
+                            {
                                 format!("{}(\"{pat}\")", c.name)
-                            } else if let Some(cmd) = c.arguments.get("command").and_then(|v| v.as_str()) {
+                            } else if let Some(cmd) =
+                                c.arguments.get("command").and_then(|v| v.as_str())
+                            {
                                 format!("{}(\"{cmd}\")", c.name)
                             } else {
                                 c.name.clone()
@@ -104,9 +131,8 @@ impl Runtime {
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
-                    round_reasoning = format!(
-                        "Step {round}: Planning workspace inspection via {tool_summary}."
-                    );
+                    round_reasoning =
+                        format!("Step {round}: Planning workspace inspection via {tool_summary}.");
                     emit(
                         &request.events,
                         AgentEvent::ReasoningChunk {
@@ -147,10 +173,20 @@ impl Runtime {
                     Some(&accumulated_reasoning),
                 )?;
                 if !visible.is_empty() {
-                    emit(&request.events, AgentEvent::MessageCompleted { text: visible.clone() });
+                    emit(
+                        &request.events,
+                        AgentEvent::MessageCompleted {
+                            text: visible.clone(),
+                        },
+                    );
                 }
                 self.refresh_usage(&request.events).await;
-                emit(&request.events, AgentEvent::Completed { summary: visible.clone() });
+                emit(
+                    &request.events,
+                    AgentEvent::Completed {
+                        summary: visible.clone(),
+                    },
+                );
                 return Ok(TaskOutcome {
                     session_id,
                     summary: visible,
@@ -165,7 +201,12 @@ impl Runtime {
                 Some(&round_reasoning),
             )?;
             if !visible.is_empty() {
-                emit(&request.events, AgentEvent::MessageCompleted { text: visible.clone() });
+                emit(
+                    &request.events,
+                    AgentEvent::MessageCompleted {
+                        text: visible.clone(),
+                    },
+                );
             }
             let ctx = ToolContext {
                 root: &project,
@@ -193,7 +234,9 @@ impl Runtime {
                     } else {
                         (false, Vec::new())
                     };
-                    let _ = self.sessions.save_snapshot(&session_id, turn_id, &path, existed, &bytes);
+                    let _ =
+                        self.sessions
+                            .save_snapshot(&session_id, turn_id, &path, existed, &bytes);
                 }
                 let outcome = tools::execute(&call, &ctx).await;
                 if outcome.output == "cancelled" {
@@ -210,7 +253,8 @@ impl Runtime {
                     outcome.ok,
                 )?;
                 if let Some(diff) = &outcome.diff {
-                    self.sessions.record_change(&session_id, &diff.path, &diff.diff)?;
+                    self.sessions
+                        .record_change(&session_id, &diff.path, &diff.diff)?;
                     if !changed.contains(&diff.path) {
                         changed.push(diff.path.clone());
                     }
@@ -223,7 +267,12 @@ impl Runtime {
         let summary = format!(
             "Stopped after {max_rounds} tool rounds with the task unfinished. The last tool results are saved in the session."
         );
-        emit(&request.events, AgentEvent::Failed { message: summary.clone() });
+        emit(
+            &request.events,
+            AgentEvent::Failed {
+                message: summary.clone(),
+            },
+        );
         Ok(TaskOutcome {
             session_id,
             summary,
@@ -254,7 +303,8 @@ impl Runtime {
         }
         let id = Uuid::new_v4().simple().to_string();
         let title = title_from(&request.prompt);
-        self.sessions.create(&id, project, &title, model, permission)?;
+        self.sessions
+            .create(&id, project, &title, model, permission)?;
         Ok(id)
     }
 
@@ -287,9 +337,14 @@ impl Runtime {
             return Ok("local/workspace".to_string());
         }
         match self.client.models().await {
-            Ok(catalog) => catalog
-                .default_coding_model()
-                .ok_or_else(|| Error::msg("Serika returned no chat models")),
+            Ok(catalog) => {
+                if catalog.find("openrouter/free").is_some() {
+                    return Ok("openrouter/free".to_string());
+                }
+                catalog
+                    .default_coding_model()
+                    .ok_or_else(|| Error::msg("Serika returned no chat models"))
+            }
             Err(_) if !has_serika_session => Ok("local/workspace".to_string()),
             Err(err) => Err(err),
         }
@@ -310,77 +365,136 @@ impl Runtime {
 
         let mut reasoning_buf = String::new();
 
-        match ProviderKind::from_model_id(model) {
-            ProviderKind::Local => {
-                let reply = complete_local(
-                    self.client.http(),
-                    &self.config,
-                    model,
-                    project,
-                    message,
-                    history,
-                    cancel,
-                    |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
-                    |chunk| {
-                        reasoning_buf.push_str(chunk);
-                        emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() });
-                    },
-                )
-                .await?;
-                return Ok((reply, reasoning_buf));
+        // A signed-in session sends every non-local model through Serika Cloud,
+        // including catalog ids such as `anthropic/…` and `openai/…`. Direct
+        // provider SDKs stay available when nobody is signed in.
+        let kind = ProviderKind::from_model_id(model);
+        let prefer_serika_cloud =
+            !matches!(kind, ProviderKind::Local) && self.secrets.load().ok().flatten().is_some();
+
+        if prefer_serika_cloud {
+            // Fall through to `SerikaClient::chat` below.
+        } else {
+            match kind {
+                ProviderKind::Local => {
+                    let reply = complete_local(
+                        self.client.http(),
+                        &self.config,
+                        model,
+                        project,
+                        message,
+                        history,
+                        cancel,
+                        |chunk| {
+                            emit(
+                                events,
+                                AgentEvent::MessageChunk {
+                                    text: chunk.to_string(),
+                                },
+                            )
+                        },
+                        |chunk| {
+                            reasoning_buf.push_str(chunk);
+                            emit(
+                                events,
+                                AgentEvent::ReasoningChunk {
+                                    text: chunk.to_string(),
+                                },
+                            );
+                        },
+                    )
+                    .await?;
+                    return Ok((reply, reasoning_buf));
+                }
+                ProviderKind::OpenAi => {
+                    let reply = complete_openai(
+                        self.client.http(),
+                        &self.config,
+                        model,
+                        message,
+                        history,
+                        cancel,
+                        |chunk| {
+                            emit(
+                                events,
+                                AgentEvent::MessageChunk {
+                                    text: chunk.to_string(),
+                                },
+                            )
+                        },
+                        |chunk| {
+                            reasoning_buf.push_str(chunk);
+                            emit(
+                                events,
+                                AgentEvent::ReasoningChunk {
+                                    text: chunk.to_string(),
+                                },
+                            );
+                        },
+                    )
+                    .await?;
+                    return Ok((reply, reasoning_buf));
+                }
+                ProviderKind::Anthropic => {
+                    let reply = complete_anthropic(
+                        self.client.http(),
+                        &self.config,
+                        model,
+                        message,
+                        history,
+                        cancel,
+                        |chunk| {
+                            emit(
+                                events,
+                                AgentEvent::MessageChunk {
+                                    text: chunk.to_string(),
+                                },
+                            )
+                        },
+                        |chunk| {
+                            reasoning_buf.push_str(chunk);
+                            emit(
+                                events,
+                                AgentEvent::ReasoningChunk {
+                                    text: chunk.to_string(),
+                                },
+                            );
+                        },
+                    )
+                    .await?;
+                    return Ok((reply, reasoning_buf));
+                }
+                ProviderKind::Gemini => {
+                    let reply = complete_gemini(
+                        self.client.http(),
+                        &self.config,
+                        model,
+                        message,
+                        history,
+                        cancel,
+                        |chunk| {
+                            emit(
+                                events,
+                                AgentEvent::MessageChunk {
+                                    text: chunk.to_string(),
+                                },
+                            )
+                        },
+                        |chunk| {
+                            reasoning_buf.push_str(chunk);
+                            emit(
+                                events,
+                                AgentEvent::ReasoningChunk {
+                                    text: chunk.to_string(),
+                                },
+                            );
+                        },
+                    )
+                    .await?;
+                    return Ok((reply, reasoning_buf));
+                }
+                ProviderKind::Serika => {}
             }
-            ProviderKind::OpenAi => {
-                let reply = complete_openai(
-                    self.client.http(),
-                    &self.config,
-                    model,
-                    message,
-                    history,
-                    cancel,
-                    |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
-                    |chunk| {
-                        reasoning_buf.push_str(chunk);
-                        emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() });
-                    },
-                )
-                .await?;
-                return Ok((reply, reasoning_buf));
-            }
-            ProviderKind::Anthropic => {
-                let reply = complete_anthropic(
-                    self.client.http(),
-                    &self.config,
-                    model,
-                    message,
-                    history,
-                    cancel,
-                    |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
-                    |chunk| {
-                        reasoning_buf.push_str(chunk);
-                        emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() });
-                    },
-                )
-                .await?;
-                return Ok((reply, reasoning_buf));
-            }
-            ProviderKind::Gemini => {
-                let reply = complete_gemini(
-                    self.client.http(),
-                    &self.config,
-                    model,
-                    message,
-                    history,
-                    cancel,
-                    |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
-                    |chunk| {
-                        reasoning_buf.push_str(chunk);
-                        emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() });
-                    },
-                )
-                .await?;
-                return Ok((reply, reasoning_buf));
-            }
-            ProviderKind::Serika => {}
         }
 
         let Some(mut session) = self.secrets.load()? else {
@@ -394,10 +508,22 @@ impl Runtime {
                     message,
                     history,
                     cancel,
-                    |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
+                    |chunk| {
+                        emit(
+                            events,
+                            AgentEvent::MessageChunk {
+                                text: chunk.to_string(),
+                            },
+                        )
+                    },
                     |chunk| {
                         reasoning_buf.push_str(chunk);
-                        emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() });
+                        emit(
+                            events,
+                            AgentEvent::ReasoningChunk {
+                                text: chunk.to_string(),
+                            },
+                        );
                     },
                 )
                 .await?;
@@ -416,10 +542,22 @@ impl Runtime {
                     message,
                     history,
                     cancel,
-                    |chunk| emit(events, AgentEvent::MessageChunk { text: chunk.to_string() }),
+                    |chunk| {
+                        emit(
+                            events,
+                            AgentEvent::MessageChunk {
+                                text: chunk.to_string(),
+                            },
+                        )
+                    },
                     |chunk| {
                         reasoning_buf.push_str(chunk);
-                        emit(events, AgentEvent::ReasoningChunk { text: chunk.to_string() });
+                        emit(
+                            events,
+                            AgentEvent::ReasoningChunk {
+                                text: chunk.to_string(),
+                            },
+                        );
                     },
                 )
                 .await;
@@ -436,14 +574,19 @@ impl Runtime {
     }
 
     async fn refresh_usage(&self, events: &EventSender) {
-        let Ok(Some(session)) = self.secrets.load() else { return };
+        let Ok(Some(session)) = self.secrets.load() else {
+            return;
+        };
         if let Ok(usage) = self.client.usage(&session.token).await {
             emit(events, AgentEvent::UsageUpdated(usage));
         }
     }
 }
 
-async fn refresh_session(client: &crate::client::SerikaClient, mut session: StoredSession) -> Result<StoredSession> {
+async fn refresh_session(
+    client: &crate::client::SerikaClient,
+    mut session: StoredSession,
+) -> Result<StoredSession> {
     match client.refresh(&session.refresh_token).await {
         Ok((token, refresh)) => {
             session.token = token;
@@ -454,15 +597,26 @@ async fn refresh_session(client: &crate::client::SerikaClient, mut session: Stor
     }
 }
 
-fn pack_history(messages: &[crate::sessions::StoredMessage], instructions: &str, max_chars: usize) -> (Vec<ChatTurn>, String) {
-    let current = messages.last().map(|message| message.content.clone()).unwrap_or_default();
+fn pack_history(
+    messages: &[crate::sessions::StoredMessage],
+    instructions: &str,
+    max_chars: usize,
+) -> (Vec<ChatTurn>, String) {
+    let current = messages
+        .last()
+        .map(|message| message.content.clone())
+        .unwrap_or_default();
     let mut turns = vec![ChatTurn {
         role: "system".into(),
         content: instructions.to_string(),
     }];
     let prior = messages.len().saturating_sub(1);
     for message in &messages[..prior] {
-        let role = if message.role == "assistant" { "assistant" } else { "user" };
+        let role = if message.role == "assistant" {
+            "assistant"
+        } else {
+            "user"
+        };
         turns.push(ChatTurn {
             role: role.to_string(),
             content: message.content.clone(),
@@ -504,7 +658,10 @@ fn checkpoint_paths(call: &crate::protocol::ToolCall) -> Vec<String> {
 }
 
 fn title_from(prompt: &str) -> String {
-    let line = prompt.lines().find(|line| !line.trim().is_empty()).unwrap_or("New session");
+    let line = prompt
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("New session");
     let mut title = line.trim().chars().take(80).collect::<String>();
     if line.trim().chars().count() > 80 {
         title.push('…');
@@ -521,7 +678,8 @@ fn clip_chars(text: &str, max: usize) -> String {
 
 fn same_path(a: &str, b: &str) -> bool {
     if cfg!(windows) {
-        a.replace('/', "\\").eq_ignore_ascii_case(&b.replace('/', "\\"))
+        a.replace('/', "\\")
+            .eq_ignore_ascii_case(&b.replace('/', "\\"))
     } else {
         a == b
     }
