@@ -25,34 +25,38 @@ use serika_runtime::updater::{self, UpdateInfo};
 use serika_runtime::{AgentEvent, Runtime, TaskOutcome, TaskRequest};
 
 // =============================================================================
-// SerikaChat Carbon Monochrome Palette + Serika Code Semantic Accents
+// SerikaChat Official Carbon Palette (from chat-web/app/globals.css)
 // =============================================================================
-const BG_DEEP: Color32 = Color32::from_rgb(13, 13, 13); // #0D0D0D (SerikaChat Main Canvas)
-const BG_SIDEBAR: Color32 = Color32::from_rgb(10, 10, 10); // #0A0A0A (SerikaChat Sidebar)
-const BG_CARD: Color32 = Color32::from_rgb(23, 23, 23); // #171717 (SerikaChat Composer & Cards)
-const BG_ELEVATED: Color32 = Color32::from_rgb(30, 30, 30); // #1E1E1E (User Bubble & Elevated Pills)
-const BG_CARD_HOVER: Color32 = Color32::from_rgb(36, 36, 36); // #242424 (Hover Surface)
-const BG_INPUT: Color32 = Color32::from_rgb(20, 20, 20); // #141414 (Search & Input Surface)
-const BG_ACTIVE_ROW: Color32 = Color32::from_rgb(28, 28, 30); // #1C1C1E (Active Thread Row)
+const BG_DEEP: Color32 = Color32::from_rgb(15, 15, 16); // #0f0f10 (--c-bg: main canvas)
+const BG_SIDEBAR: Color32 = Color32::from_rgb(11, 11, 12); // #0b0b0c (--c-card: sidebar, panels)
+const BG_CARD: Color32 = Color32::from_rgb(24, 24, 27); // #18181b (--c-elevated: composer)
+const BG_ELEVATED: Color32 = Color32::from_rgb(28, 28, 31); // #1c1c1f (--c-raised: user bubble & menus)
+const BG_CARD_HOVER: Color32 = Color32::from_rgb(31, 31, 34); // #1f1f22 (--c-card-hover: hover on raised)
+const BG_INPUT: Color32 = Color32::from_rgb(23, 23, 25); // #171719 (--c-input: inputs)
+const BG_ACTIVE_ROW: Color32 = Color32::from_rgb(28, 28, 31); // #1c1c1f (Active thread row)
 
-const BORDER_HAIRLINE: Color32 = Color32::from_rgb(26, 26, 26); // #1A1A1A (1px Divider)
-const BORDER_SUBTLE: Color32 = Color32::from_rgb(38, 38, 38); // #262626 (Composer & Card Border)
-const BORDER_STRONG: Color32 = Color32::from_rgb(58, 58, 62); // #3A3A3E (Focused / Hover Border)
+const BORDER_HAIRLINE: Color32 = Color32::from_rgba_premultiplied(14, 14, 14, 14); // border-subtle (rgba 255, 255, 255, 0.055)
+const BORDER_SUBTLE: Color32 = Color32::from_rgba_premultiplied(20, 20, 20, 20); // border (rgba 255, 255, 255, 0.08)
+const BORDER_STRONG: Color32 = Color32::from_rgba_premultiplied(38, 38, 38, 38); // focus (rgba 255, 255, 255, 0.15)
 
-const TEXT_PRIMARY: Color32 = Color32::from_rgb(245, 245, 245); // #F5F5F5 (Crisp White)
-const TEXT_SECONDARY: Color32 = Color32::from_rgb(212, 212, 216); // #D4D4D8
-const TEXT_MUTED: Color32 = Color32::from_rgb(142, 142, 147); // #8E8E93
-const TEXT_DIM: Color32 = Color32::from_rgb(99, 99, 102); // #636366
+const TEXT_PRIMARY: Color32 = Color32::from_rgb(236, 236, 238); // #ececee (--text-primary)
+const TEXT_SECONDARY: Color32 = Color32::from_rgb(161, 161, 170); // #a1a1aa (--text-secondary)
+const TEXT_MUTED: Color32 = Color32::from_rgb(140, 140, 148);
+const TEXT_DIM: Color32 = Color32::from_rgb(113, 113, 122); // #71717a (--text-dim)
 
-const SERIKA_VIOLET: Color32 = Color32::from_rgb(228, 228, 231); // Crisp Monochrome Silver Accent
-const SERIKA_VIOLET_HOVER: Color32 = Color32::from_rgb(255, 255, 255);
-const SERIKA_VIOLET_LIGHT: Color32 = Color32::from_rgb(212, 212, 216);
-const SERIKA_VIOLET_SOFT: Color32 = Color32::from_rgb(34, 34, 38);
+const ACCENT_PURPLE: Color32 = Color32::from_rgb(139, 92, 246); // #8b5cf6 (--c-accent)
+const ACCENT_PURPLE_HOVER: Color32 = Color32::from_rgb(124, 58, 237); // #7c3aed (--c-accent-hover)
+const ACCENT_PURPLE_SEC: Color32 = Color32::from_rgb(167, 139, 250); // #a78bfa (--c-accent-secondary)
 
-const EMERALD: Color32 = Color32::from_rgb(16, 185, 129); // #10B981
+const SERIKA_VIOLET: Color32 = ACCENT_PURPLE;
+const SERIKA_VIOLET_HOVER: Color32 = ACCENT_PURPLE_HOVER;
+const SERIKA_VIOLET_LIGHT: Color32 = ACCENT_PURPLE_SEC;
+const SERIKA_VIOLET_SOFT: Color32 = Color32::from_rgba_premultiplied(21, 14, 37, 38); // accent/15
+
+const EMERALD: Color32 = Color32::from_rgb(52, 211, 153); // #34d399 (--success)
 const EMERALD_SOFT: Color32 = Color32::from_rgb(13, 38, 28);
-const AMBER: Color32 = Color32::from_rgb(245, 158, 11); // #F59E0B
-const ROSE: Color32 = Color32::from_rgb(244, 63, 94); // #F43F5E
+const AMBER: Color32 = Color32::from_rgb(251, 191, 36); // #fbbf24 (--warning)
+const ROSE: Color32 = Color32::from_rgb(244, 63, 94); // #f43f5e (--c-moe / --danger)
 const ROSE_SOFT: Color32 = Color32::from_rgb(46, 16, 24);
 
 #[derive(Default, Clone)]
@@ -94,6 +98,7 @@ enum Icon {
     Book,
     Globe,
     Microphone,
+    SoundWave,
 }
 
 fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -336,6 +341,18 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment([u3, u4], stroke);
             painter.line_segment([u4, u5], stroke);
             painter.line_segment([Pos2::new(c.x, c.y + r * 0.65), Pos2::new(c.x, c.y + r * 0.95)], stroke);
+        }
+        Icon::SoundWave => {
+            // M6 10v4M10 6v12M14 8.5v7M18 10.5v3 (4-bar wave from chat-web WaveIcon)
+            let stroke = Stroke::new(1.8, color);
+            let x0 = c.x - r * 0.54;
+            let x1 = c.x - r * 0.18;
+            let x2 = c.x + r * 0.18;
+            let x3 = c.x + r * 0.54;
+            painter.line_segment([Pos2::new(x0, c.y - r * 0.22), Pos2::new(x0, c.y + r * 0.22)], stroke);
+            painter.line_segment([Pos2::new(x1, c.y - r * 0.62), Pos2::new(x1, c.y + r * 0.62)], stroke);
+            painter.line_segment([Pos2::new(x2, c.y - r * 0.40), Pos2::new(x2, c.y + r * 0.40)], stroke);
+            painter.line_segment([Pos2::new(x3, c.y - r * 0.18), Pos2::new(x3, c.y + r * 0.18)], stroke);
         }
     }
 }
@@ -1688,6 +1705,32 @@ impl SerikaApp {
                         self.show_palette = true;
                     }
 
+                    // Centered ChatTitle (matches ChatTitle from chat-web)
+                    if let Some(active_id) = &self.active_session {
+                        if let Some(sess) = self.sessions.iter().find(|s| &s.id == active_id) {
+                            let title = if sess.title.chars().count() > 42 {
+                                let s: String = sess.title.chars().take(41).collect();
+                                format!("{s}...")
+                            } else {
+                                sess.title.clone()
+                            };
+                            let header_center_x = ui.max_rect().center().x;
+                            let title_galley = ui.painter().layout_no_wrap(
+                                title,
+                                FontId::proportional(13.5),
+                                TEXT_PRIMARY,
+                            );
+                            ui.painter().galley(
+                                Pos2::new(
+                                    header_center_x - title_galley.size().x * 0.5,
+                                    tr.center().y - title_galley.size().y * 0.5,
+                                ),
+                                title_galley,
+                                TEXT_PRIMARY,
+                            );
+                        }
+                    }
+
                     // Top-right controls: ONLY Eye icon and Three-dots menu `···`, exactly like web UI!
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
@@ -2167,7 +2210,7 @@ impl SerikaApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if self.running {
                             if white_circle_action_button(ui, Icon::Stop, true)
-                                .on_hover_text("Stop generation")
+                                .on_hover_text("Stop generation (Esc)")
                                 .clicked()
                             {
                                 if let Some(cancel) = &self.cancel {
@@ -2175,12 +2218,24 @@ impl SerikaApp {
                                 }
                             }
                         } else {
-                            let can_send = !self.prompt.trim().is_empty() || is_hero;
-                            if white_circle_action_button(ui, Icon::Send, can_send)
-                                .on_hover_text("Send message (Enter)")
-                                .clicked()
-                            {
-                                self.send_prompt();
+                            let has_text = !self.prompt.trim().is_empty();
+                            if has_text {
+                                if accent_circle_send_button(ui, Icon::Send)
+                                    .on_hover_text("Send message (Enter)")
+                                    .clicked()
+                                {
+                                    self.send_prompt();
+                                }
+                            } else {
+                                if white_circle_action_button(ui, Icon::SoundWave, true)
+                                    .on_hover_text(if is_hero { "Start session" } else { "Voice call" })
+                                    .clicked()
+                                {
+                                    if is_hero {
+                                        self.prompt = "Help me understand this codebase and inspect recent changes.".to_string();
+                                        self.send_prompt();
+                                    }
+                                }
                             }
                         }
 
@@ -3684,65 +3739,56 @@ fn draw_reasoning_trace(ui: &mut egui::Ui, msg_id: i64, reasoning: &str, is_stre
 
     let step_count = reasoning.lines().filter(|l| !l.trim().is_empty()).count().max(1);
     let title = if is_streaming {
-        "Thinking…".to_string()
+        "Thinking...".to_string()
     } else {
-        format!("Thought Process · {step_count} steps")
+        format!("Thought process · {step_count} steps")
     };
 
-    ui.add_space(4.0);
-    egui::Frame::NONE
-        .fill(BG_CARD)
-        .corner_radius(CornerRadius::same(8))
-        .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
-        .inner_margin(Margin::symmetric(10, 8))
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+    ui.add_space(2.0);
+    state.show_header(ui, |ui| {
+        ui.horizontal(|ui| {
+            let (ir, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+            paint_icon(ui.painter(), ir, Icon::Sparkle, TEXT_MUTED);
+            ui.label(
+                RichText::new(&title)
+                    .size(13.0)
+                    .color(if is_streaming { ACCENT_PURPLE_SEC } else { TEXT_MUTED }),
+            );
+            if is_streaming {
+                let (dr, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                ui.painter().circle_filled(dr.center(), 3.0, ACCENT_PURPLE);
+            }
+        });
+    })
+    .body(|ui| {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let line_rect = ui.allocate_space(Vec2::new(1.5, ui.available_height().max(16.0))).1;
+            ui.painter().rect_filled(line_rect, 1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 25));
+            ui.add_space(10.0);
 
-            state.show_header(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let (ir, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                    paint_icon(ui.painter(), ir, Icon::Sparkle, SERIKA_VIOLET_LIGHT);
-                    ui.label(
-                        RichText::new(&title)
-                            .size(12.0)
-                            .color(if is_streaming { SERIKA_VIOLET_LIGHT } else { TEXT_MUTED }),
-                    );
-                    if is_streaming {
-                        let (dr, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                        ui.painter().circle_filled(dr.center(), 3.0, SERIKA_VIOLET);
+            ui.vertical(|ui| {
+                for line in reasoning.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        ui.add_space(3.0);
+                        continue;
                     }
-                });
-            })
-            .body(|ui| {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let line_rect = ui.allocate_space(Vec2::new(2.0, ui.available_height().max(16.0))).1;
-                    ui.painter().rect_filled(line_rect, 1.0, SERIKA_VIOLET.gamma_multiply(0.45));
-                    ui.add_space(8.0);
-
-                    ui.vertical(|ui| {
-                        for line in reasoning.lines() {
-                            let trimmed = line.trim();
-                            if trimmed.is_empty() {
-                                ui.add_space(3.0);
-                                continue;
-                            }
-                            let is_header_step = trimmed.starts_with(|c: char| c.is_ascii_digit()) && trimmed.contains('.');
-                            let col = if is_header_step {
-                                TEXT_PRIMARY
-                            } else {
-                                TEXT_MUTED
-                            };
-                            ui.label(
-                                RichText::new(trimmed)
-                                    .size(12.0)
-                                    .color(col),
-                            );
-                        }
-                    });
-                });
+                    let is_header_step = trimmed.starts_with(|c: char| c.is_ascii_digit()) && trimmed.contains('.');
+                    let col = if is_header_step {
+                        TEXT_PRIMARY
+                    } else {
+                        TEXT_SECONDARY
+                    };
+                    ui.label(
+                        RichText::new(trimmed)
+                            .size(12.5)
+                            .color(col),
+                    );
+                }
             });
         });
+    });
     ui.add_space(4.0);
 }
 
@@ -3811,6 +3857,18 @@ fn white_circle_action_button(ui: &mut egui::Ui, icon: Icon, enabled: bool) -> e
     };
     let ir = rect.shrink(7.5);
     paint_icon(ui.painter(), ir, icon, fg);
+    resp
+}
+
+fn accent_circle_send_button(ui: &mut egui::Ui, icon: Icon) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+    let bg = if resp.hovered() {
+        ACCENT_PURPLE_HOVER
+    } else {
+        ACCENT_PURPLE
+    };
+    ui.painter().circle_filled(rect.center(), 14.0, bg);
+    paint_icon(ui.painter(), rect.shrink(7.0), icon, Color32::WHITE);
     resp
 }
 
