@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod shot;
 mod ui;
 
 #[cfg(target_os = "windows")]
@@ -32,14 +33,32 @@ fn main() {
             ensure_cli_output_visible();
             println!(
                 "Serika Code desktop\n\n  \
-                 serika-desktop              open the application\n  \
-                 serika-desktop --smoke      open and close immediately\n  \
-                 serika-desktop --setup      install binaries, PATH, and desktop shortcuts\n  \
-                 serika-desktop --uninstall  remove installed binaries and shortcuts\n  \
+                 serika-desktop                            open the application\n  \
+                 serika-desktop --smoke                    open and close immediately\n  \
+                 serika-desktop --screenshot <png> [view]  capture a UI screenshot (draft|thread|providers|cli)\n  \
+                 serika-desktop --setup                    install binaries, PATH, and desktop shortcuts\n  \
+                 serika-desktop --uninstall                remove installed binaries and shortcuts\n  \
                  serika-desktop --version"
             );
         }
-        Some("--smoke") => ui::launch(true),
+        Some("--smoke") => ui::launch(ui::LaunchConfig {
+            smoke: true,
+            screenshot_path: None,
+            screenshot_view: None,
+        }),
+        Some("--screenshot") => {
+            let Some(out_path) = args.next() else {
+                ensure_cli_output_visible();
+                eprintln!("serika-desktop --screenshot requires an output .png path");
+                std::process::exit(2);
+            };
+            let view = args.next();
+            ui::launch(ui::LaunchConfig {
+                smoke: false,
+                screenshot_path: Some(std::path::PathBuf::from(out_path)),
+                screenshot_view: view,
+            });
+        }
         Some("--setup") => {
             ensure_cli_output_visible();
             let paths = serika_runtime::AppPaths::resolve().unwrap_or_else(|err| {
@@ -80,6 +99,6 @@ fn main() {
             eprintln!("serika-desktop: unknown argument {other}");
             std::process::exit(2);
         }
-        None => ui::launch(false),
+        None => ui::launch(ui::LaunchConfig::default()),
     }
 }

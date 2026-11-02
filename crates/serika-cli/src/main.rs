@@ -1,5 +1,8 @@
+mod tui;
+
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use serika_runtime::{
@@ -8,14 +11,16 @@ use serika_runtime::{
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroize;
 
+use crate::tui::{Banner, Term, TurnRenderer};
+
 #[derive(Parser)]
 #[command(
     name = "serika",
     version,
-    about = "Serika Code — a native coding agent for SerikaAI"
+    about = "Serika Code — fast native coding agent for your terminal and desktop"
 )]
 struct Cli {
-    /// Model id from `serika models`. Defaults to a coding model in the live catalog.
+    /// Model id from `serika models`. Defaults to your configured model or `local/workspace`.
     #[arg(long, global = true)]
     model: Option<String>,
     /// read_only, standard, restricted, or full
@@ -36,7 +41,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Interactive session in the current project.
+    /// Interactive Codex-style session in the current project.
     Chat,
     /// Run one task and exit.
     Run { prompt: Vec<String> },
@@ -45,7 +50,7 @@ enum Commands {
         #[command(subcommand)]
         action: AuthCommand,
     },
-    /// List models the account can see.
+    /// List models discovered from local engines, provider APIs, and Serika Cloud.
     Models,
     /// Show the account usage returned by Serika.
     Usage,
@@ -177,17 +182,18 @@ async fn main() {
         Ok(runtime) => runtime,
         Err(err) => exit_error(err),
     };
-    let code = match dispatch(runtime, cli).await {
+    let term = Term::detect();
+    let code = match dispatch(runtime, cli, &term).await {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("serika: {err}");
+            tui::error_line(&term, &format!("serika: {err}"));
             err.exit_code()
         }
     };
     std::process::exit(code);
 }
 
-async fn dispatch(runtime: Runtime, cli: Cli) -> serika_runtime::Result<i32> {
+async fn dispatch(runtime: Runtime, cli: Cli, term: &Term) -> serika_runtime::Result<i32> {
     let project = project_path(cli.project)?;
     let permission = match cli.permission {
         Some(value) => Some(
@@ -197,19 +203,19 @@ async fn dispatch(runtime: Runtime, cli: Cli) -> serika_runtime::Result<i32> {
         None => None,
     };
     match cli.command {
-        None => repl(&runtime, &project, cli.model, permission, cli.yes, cli.session).await,
-        Some(Commands::Chat) => repl(&runtime, &project, cli.model, permission, cli.yes, cli.session).await,
+        None => repl(&runtime, &project, cli.model, permission, cli.yes, cli.session, term).await,
+        Some(Commands::Chat) => repl(&runtime, &project, cli.model, permission, cli.yes, cli.session, term).await,
         Some(Commands::Run { prompt }) => {
-            run_once(&runtime, &project, &prompt.join(" "), cli.model, permission, cli.yes, cli.session).await
+            run_once(&runtime, &project, &prompt.join(" "), cli.model, permission, cli.yes, cli.session, term).await
         }
         Some(Commands::Task(prompt)) => {
-            run_once(&runtime, &project, &prompt.join(" "), cli.model, permission, cli.yes, cli.session).await
+            run_once(&runtime, &project, &prompt.join(" "), cli.model, permission, cli.yes, cli.session, term).await
         }
-        Some(Commands::Auth { action }) => auth(&runtime, action).await,
-        Some(Commands::Models) => models(&runtime).await,
-        Some(Commands::Usage) => usage(&runtime).await,
+        Some(Commands::Auth { action }) => auth(&runtime, action, term).await,
+        Some(Commands::Models) => models(&runtime, term).await,
+        Some(Commands::Usage) => usage(&runtime, term).await,
         Some(Commands::Config { action }) => config_cmd(&runtime, action),
-        Some(Commands::Doctor) => doctor(&runtime).await,
+        Some(Commands::Doctor) => doctor(&runtime, term).await,
         Some(Commands::Resume { id }) => {
             let id = match id.or(cli.session) {
                 Some(id) => id,
@@ -221,12 +227,12 @@ async fn dispatch(runtime: Runtime, cli: Cli) -> serika_runtime::Result<i32> {
                     .map(|session| session.id)
                     .ok_or_else(|| Error::msg("this project has no saved sessions"))?,
             };
-            repl(&runtime, &project, cli.model, permission, cli.yes, Some(id)).await
+            repl(&runtime, &project, cli.model, permission, cli.yes, Some(id), term).await
         }
-        Some(Commands::Sessions { action }) => sessions(&runtime, &project, action),
-        Some(Commands::Review { ask, focus }) => review(&runtime, &project, ask, &focus, cli.model, cli.yes).await,
-        Some(Commands::Git { action }) => git_cmd(&runtime, &project, action).await,
-        Some(Commands::Update { check, force }) => update_cmd(check, force).await,
+        Some(Commands::Sessions { action }) => sessions(&runtime, &project, action, term),
+        Some(Commands::Review { ask, focus }) => review(&runtime, &project, ask, &focus, cli.model, cli.yes, term).await,
+        Some(Commands::Git { action }) => git_cmd(&runtime, &project, action, term).await,
+        Some(Commands::Update { check, force }) => update_cmd(check, force, term).await,
         Some(Commands::Setup {
             prefix,
             no_path,
@@ -234,7 +240,7 @@ async fn dispatch(runtime: Runtime, cli: Cli) -> serika_runtime::Result<i32> {
             uninstall,
             purge,
         }) => setup_cmd(&runtime, prefix, no_path, no_shortcuts, uninstall, purge),
-        Some(Commands::Desktop) => launch_desktop(&project),
+        Some(Commands::Desktop) => launch_desktop(&project, term),
     }
 }
 
@@ -246,66 +252,230 @@ fn project_path(project: Option<PathBuf>) -> serika_runtime::Result<PathBuf> {
     Ok(path)
 }
 
+fn active_account_label(runtime: &Runtime, model: &str) -> String {
+    let kind = serika_runtime::providers::ProviderKind::from_model_id(model);
+    match kind {
+        serika_runtime::providers::ProviderKind::Local => {
+            if let Some(sub) = &runtime.config.local_model {
+                format!("local workspace ({sub})")
+            } else {
+                "local workspace (no API key required)".into()
+            }
+        }
+        serika_runtime::providers::ProviderKind::OpenAi => {
+            if runtime.config.resolve_openai_key().is_some() {
+                "OpenAI API key configured".into()
+            } else {
+                "OpenAI API (set key via /model or config)".into()
+            }
+        }
+        serika_runtime::providers::ProviderKind::Anthropic => {
+            if runtime.config.resolve_anthropic_key().is_some() {
+                "Claude API key configured".into()
+            } else {
+                "Claude API (set key via /model or config)".into()
+            }
+        }
+        serika_runtime::providers::ProviderKind::Gemini => {
+            if runtime.config.resolve_gemini_key().is_some() {
+                "Gemini API key configured".into()
+            } else {
+                "Gemini API (set key via /model or config)".into()
+            }
+        }
+        serika_runtime::providers::ProviderKind::Serika => runtime
+            .signed_in()
+            .ok()
+            .flatten()
+            .map(|s| format!("{} (Serika Cloud)", s.username))
+            .unwrap_or_else(|| "not signed in".into()),
+    }
+}
+
 async fn repl(
     runtime: &Runtime,
     project: &PathBuf,
-    model: Option<String>,
-    permission: Option<PermissionMode>,
+    mut model: Option<String>,
+    mut permission: Option<PermissionMode>,
     yes: bool,
     mut session: Option<String>,
+    term: &Term,
 ) -> serika_runtime::Result<i32> {
     if !std::io::stdin().is_terminal() {
         return Err(Error::msg("no task was given and stdin is not a terminal"));
     }
-    let who = runtime
-        .signed_in()?
-        .map(|session| session.username.clone())
-        .unwrap_or_else(|| "not signed in".into());
-    println!("Serika Code {}", serika_runtime::client::VERSION);
-    println!("Project: {}", project.display());
-    println!("Account: {who}");
-    println!("Type a task, /exit to leave, /help for commands.");
+
+    let current_model = |m: &Option<String>| -> String {
+        m.clone()
+            .or_else(|| runtime.config.model.clone())
+            .unwrap_or_else(|| "local/workspace".into())
+    };
+    let current_perm = |p: &Option<PermissionMode>| -> PermissionMode {
+        p.unwrap_or(runtime.config.permission)
+    };
+
+    let m_label = current_model(&model);
+    let p_label = current_perm(&permission).as_str().to_string();
+    let who = active_account_label(runtime, &m_label);
+
+    tui::print_banner(
+        term,
+        &Banner {
+            version: serika_runtime::client::VERSION,
+            model: &m_label,
+            directory: project,
+            permission: &p_label,
+            account: &who,
+            session: session.as_deref(),
+        },
+    );
+
     loop {
-        print!("\n> ");
-        let _ = std::io::stdout().flush();
+        let m_now = current_model(&model);
+        let p_now = current_perm(&permission);
+        tui::draw_prompt(term, &m_now, p_now.as_str());
+
         let mut line = String::new();
         if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+            println!();
             break;
         }
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+        tui::echo_user(term, line);
+
         if line == "/exit" || line == "/quit" {
             break;
         }
         if line == "/help" {
-            println!("/exit  /usage  /models  /sessions");
-            println!("Ctrl+C cancels the current task.");
+            tui::print_help(term);
+            continue;
+        }
+        if line == "/clear" {
+            tui::clear_screen(term);
+            let who_now = active_account_label(runtime, &m_now);
+            tui::print_banner(
+                term,
+                &Banner {
+                    version: serika_runtime::client::VERSION,
+                    model: &m_now,
+                    directory: project,
+                    permission: p_now.as_str(),
+                    account: &who_now,
+                    session: session.as_deref(),
+                },
+            );
+            continue;
+        }
+        if line == "/new" {
+            session = None;
+            tui::info_line(term, "Started a fresh conversation thread.");
+            continue;
+        }
+        if line == "/status" {
+            let who_now = active_account_label(runtime, &m_now);
+            println!("  {}      {}", term.dim("model:"), term.accent(&m_now));
+            println!("  {}  {}", term.dim("directory:"), tui::pretty_path(project));
+            println!("  {}  {}", term.dim("approvals:"), p_now.as_str());
+            println!("  {}    {}", term.dim("account:"), who_now);
+            println!(
+                "  {}    {}",
+                term.dim("session:"),
+                session.as_deref().unwrap_or("(new thread)")
+            );
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("/model") {
+            let arg = rest.trim();
+            if arg.is_empty() || arg == "s" {
+                models(runtime, term).await?;
+                tui::info_line(term, "Tip: use `/model <id>` to switch models for this session.");
+            } else {
+                model = Some(arg.to_string());
+                let mut cfg = runtime.config.clone();
+                cfg.model = Some(arg.to_string());
+                let _ = cfg.save(&runtime.paths.config_file);
+                tui::info_line(term, &format!("Switched model to `{arg}`."));
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("/approvals") {
+            let arg = rest.trim();
+            if let Some(mode) = PermissionMode::parse(arg) {
+                permission = Some(mode);
+                tui::info_line(term, &format!("Approvals mode set to `{}`.", mode.as_str()));
+            } else {
+                tui::info_line(
+                    term,
+                    "Usage: /approvals <read_only|standard|restricted|full>",
+                );
+            }
+            continue;
+        }
+        if line == "/diff" {
+            let diff = serika_runtime::gitinfo::diff(project, None).await?;
+            if diff.trim().is_empty() {
+                tui::info_line(term, "Working tree has no uncommitted diff.");
+            } else {
+                tui::print_diff(term, &diff);
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("/review") {
+            let focus: Vec<String> = rest
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+            review(runtime, project, true, &focus, model.clone(), yes, term).await?;
             continue;
         }
         if line == "/usage" {
-            usage(runtime).await?;
-            continue;
-        }
-        if line == "/models" {
-            models(runtime).await?;
+            usage(runtime, term).await?;
             continue;
         }
         if line == "/sessions" {
-            sessions(runtime, project, SessionCommand::List)?;
+            sessions(runtime, project, SessionCommand::List, term)?;
             continue;
         }
-        match run_once(runtime, project, line, model.clone(), permission, yes, session.clone()).await {
+        if let Some(rest) = line.strip_prefix("/resume") {
+            let target = rest.trim();
+            if target.is_empty() {
+                sessions(runtime, project, SessionCommand::List, term)?;
+            } else {
+                session = Some(target.to_string());
+                tui::info_line(term, &format!("Resumed session `{target}`."));
+            }
+            continue;
+        }
+
+        match run_once(
+            runtime,
+            project,
+            line,
+            model.clone(),
+            permission,
+            yes,
+            session.clone(),
+            term,
+        )
+        .await
+        {
             Ok(0) => {
                 if session.is_none() {
-                    session = runtime.sessions.list(Some(project))?.into_iter().next().map(|item| item.id);
+                    session = runtime
+                        .sessions
+                        .list(Some(project))?
+                        .into_iter()
+                        .next()
+                        .map(|item| item.id);
                 }
             }
             Ok(code) => return Ok(code),
-            Err(Error::Cancelled) => println!("cancelled"),
+            Err(Error::Cancelled) => tui::info_line(term, "Interrupted."),
             Err(err) => {
-                eprintln!("serika: {err}");
+                tui::error_line(term, &format!("serika: {err}"));
                 if matches!(err, Error::AuthRequired | Error::Auth(_)) {
                     return Err(err);
                 }
@@ -315,6 +485,7 @@ async fn repl(
     Ok(0)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_once(
     runtime: &Runtime,
     project: &PathBuf,
@@ -323,6 +494,7 @@ async fn run_once(
     permission: Option<PermissionMode>,
     yes: bool,
     session: Option<String>,
+    term: &Term,
 ) -> serika_runtime::Result<i32> {
     if prompt.trim().is_empty() {
         return Err(Error::msg("give serika a task, for example: serika \"Explain this project\""));
@@ -343,18 +515,23 @@ async fn run_once(
     });
     tokio::pin!(task);
     let mut failed: Option<String> = None;
+    let mut renderer = TurnRenderer::new(*term);
+    let mut ticker = tokio::time::interval(Duration::from_millis(80));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             biased;
             _ = tokio::signal::ctrl_c() => {
                 cancel.cancel();
                 approvals.deny_all();
-                println!();
+                renderer.cancelled();
             }
             outcome = &mut task => {
                 while let Ok(event) = rx.try_recv() {
-                    render(event, &approvals, &mut failed);
+                    render_event(event, &mut renderer, term, &approvals, &mut failed);
                 }
+                renderer.finish();
                 return match outcome {
                     Ok(outcome) => {
                         if !outcome.finished {
@@ -366,107 +543,86 @@ async fn run_once(
                     }
                     Err(err) => {
                         if failed.is_none() {
-                            eprintln!("serika: {err}");
+                            tui::error_line(term, &format!("serika: {err}"));
                         }
                         Ok(err.exit_code())
                     }
                 };
             }
-            event = rx.recv() => {
-                match event {
-                    Some(event) => render(event, &approvals, &mut failed),
-                    None => {}
-                }
+            Some(event) = rx.recv() => {
+                render_event(event, &mut renderer, term, &approvals, &mut failed);
+            }
+            _ = ticker.tick() => {
+                renderer.tick();
             }
         }
     }
 }
 
-fn render(event: AgentEvent, approvals: &serika_runtime::ApprovalHub, failed: &mut Option<String>) {
+fn render_event(
+    event: AgentEvent,
+    renderer: &mut TurnRenderer,
+    term: &Term,
+    approvals: &serika_runtime::ApprovalHub,
+    failed: &mut Option<String>,
+) {
     match event {
-        AgentEvent::Started { session_id } => eprintln!("{}", dim(&format!("session {session_id}"))),
-        AgentEvent::Status(text) => eprintln!("{}", dim(&text)),
-        AgentEvent::MessageChunk { text } => {
-            print!("{text}");
-            let _ = std::io::stdout().flush();
+        AgentEvent::Started { session_id } => renderer.session_started(&session_id),
+        AgentEvent::Status(text) => renderer.set_status(&text),
+        AgentEvent::MessageChunk { text } => renderer.message_chunk(&text),
+        AgentEvent::ReasoningChunk { .. } => {
+            renderer.set_status("Thinking");
         }
-        AgentEvent::ReasoningChunk { .. } => {}
-        AgentEvent::MessageCompleted { .. } => println!(),
-        AgentEvent::ToolRequested { name, .. } => eprintln!("{}", dim(&format!("tool {name}"))),
-        AgentEvent::ApprovalRequired { id, title, detail, destructive } => {
-            let allow = ask_approval(&title, &detail, destructive);
+        AgentEvent::MessageCompleted { .. } => renderer.message_completed(),
+        AgentEvent::ToolRequested {
+            id,
+            name,
+            arguments,
+        } => renderer.tool_requested(&id, &name, &arguments),
+        AgentEvent::ApprovalRequired {
+            id,
+            title,
+            detail,
+            destructive,
+        } => {
+            renderer.suspend();
+            let allow = tui::ask_approval(term, &title, &detail, destructive);
             approvals.resolve(&id, allow);
+            renderer.resume();
         }
         AgentEvent::ToolStarted { .. } => {}
-        AgentEvent::ToolOutput { stream, .. } => eprintln!("{stream}"),
-        AgentEvent::ToolFinished { name, ok, summary, .. } => {
-            let mark = if ok { "ok" } else { "failed" };
-            eprintln!("{}", dim(&format!("{name} {mark}: {summary}")));
-        }
-        AgentEvent::FileChanged(diff) => {
-            eprintln!("{}", dim(&format!("changed {}", diff.path)));
-            print_diff(&diff.diff);
-        }
-        AgentEvent::UsageUpdated(usage) => eprintln!("{}", dim(&usage.summary_line())),
+        AgentEvent::ToolOutput { id, stream } => renderer.tool_output(&id, &stream),
+        AgentEvent::ToolFinished {
+            id,
+            name,
+            ok,
+            summary,
+        } => renderer.tool_finished(&id, &name, ok, &summary),
+        AgentEvent::FileChanged(diff) => renderer.file_changed(&diff.path, &diff.diff),
+        AgentEvent::UsageUpdated(usage) => renderer.usage(usage.summary_line()),
         AgentEvent::Completed { .. } => {}
         AgentEvent::Failed { message } => {
-            eprintln!("serika: {message}");
+            renderer.failed(&message);
             *failed = Some(message);
         }
-        AgentEvent::Cancelled => eprintln!("cancelled"),
+        AgentEvent::Cancelled => renderer.cancelled(),
     }
 }
 
-fn ask_approval(title: &str, detail: &str, destructive: bool) -> bool {
-    if !std::io::stdin().is_terminal() {
-        eprintln!("approval required to {title}: {detail}");
-        return false;
-    }
-    let kind = if destructive { "This can be destructive. " } else { "" };
-    eprint!("{kind}Allow {title}?\n{detail}\n[y/N] ");
-    let _ = std::io::stderr().flush();
-    let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
-    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-}
-
-fn print_diff(diff: &str) {
-    if !std::io::stdout().is_terminal() {
-        println!("{diff}");
-        return;
-    }
-    for line in diff.lines() {
-        if line.starts_with('+') && !line.starts_with("+++") {
-            println!("\x1b[32m{line}\x1b[0m");
-        } else if line.starts_with('-') && !line.starts_with("---") {
-            println!("\x1b[31m{line}\x1b[0m");
-        } else {
-            println!("{line}");
-        }
-    }
-}
-
-fn dim(text: &str) -> String {
-    if std::io::stderr().is_terminal() {
-        format!("\x1b[2m{text}\x1b[0m")
-    } else {
-        text.to_string()
-    }
-}
-
-async fn auth(runtime: &Runtime, action: AuthCommand) -> serika_runtime::Result<i32> {
+async fn auth(runtime: &Runtime, action: AuthCommand, term: &Term) -> serika_runtime::Result<i32> {
     match action {
         AuthCommand::Status => match runtime.signed_in()? {
             Some(session) => {
                 println!(
-                    "signed in as {} ({})",
-                    session.username,
+                    "{} signed in as {} ({})",
+                    term.green("●"),
+                    term.bold(&session.username),
                     if session.is_premium { "premium" } else { "free" }
                 );
                 Ok(0)
             }
             None => {
-                println!("not signed in");
+                println!("not signed in (using local workspace / direct provider keys)");
                 Ok(3)
             }
         },
@@ -552,17 +708,20 @@ async fn finish_factor(
     }
 }
 
-async fn models(runtime: &Runtime) -> serika_runtime::Result<i32> {
+async fn models(runtime: &Runtime, term: &Term) -> serika_runtime::Result<i32> {
     let report =
         serika_runtime::providers::discover_all_models(runtime.client.http(), &runtime.config)
             .await;
-    println!("local workspace & local models (no API required)");
+    println!(
+        "\n  {}",
+        term.bold("Local Workspace & Local Engines (No API Key Required)")
+    );
     for model in report
         .models
         .iter()
         .filter(|m| m.provider.as_deref() == Some("local"))
     {
-        print_model(model);
+        print_model(term, model);
     }
     let api_models: Vec<_> = report
         .models
@@ -570,40 +729,54 @@ async fn models(runtime: &Runtime) -> serika_runtime::Result<i32> {
         .filter(|m| m.provider.as_deref() != Some("local"))
         .collect();
     if !api_models.is_empty() {
-        println!("\nlive provider API models (OpenAI, Claude, Gemini)");
+        println!(
+            "\n  {}",
+            term.bold("Live Provider API Endpoints (/v1/models · /v1beta/models)")
+        );
         for model in api_models {
-            print_model(model);
+            print_model(term, model);
         }
     }
     if let Ok(catalog) = runtime.models().await {
-        println!("\nserika cloud (free)");
+        println!("\n  {}", term.bold("Serika Cloud (Free)"));
         for model in &catalog.free {
-            print_model(model);
+            print_model(term, model);
         }
-        println!("\nserika cloud (premium)");
+        println!("\n  {}", term.bold("Serika Cloud (Premium)"));
         for model in &catalog.premium {
-            print_model(model);
+            print_model(term, model);
         }
     }
+    println!();
     Ok(0)
 }
 
-fn print_model(model: &serika_runtime::ChatModel) {
+fn print_model(term: &Term, model: &serika_runtime::ChatModel) {
     let mult = model
         .usage_multiplier
         .map(|value| format!("  ×{value}"))
         .unwrap_or_default();
-    let mark = if model.is_default { "  default" } else { "" };
-    println!("  {}  {}{mult}{mark}", model.id, model.name);
+    let mark = if model.is_default {
+        format!("  {}", term.green("default"))
+    } else {
+        String::new()
+    };
+    println!(
+        "  {:<38} {}{}{}",
+        term.accent(&model.id),
+        model.name,
+        term.dim(&mult),
+        mark
+    );
 }
 
-async fn usage(runtime: &Runtime) -> serika_runtime::Result<i32> {
+async fn usage(runtime: &Runtime, term: &Term) -> serika_runtime::Result<i32> {
     let snapshot = runtime.usage().await?;
-    println!("{}", snapshot.summary_line());
+    println!("  {} {}", term.accent("•"), snapshot.summary_line());
     if let Some(plan) = &snapshot.plan {
         if let Some(offer) = &plan.reset_offer {
             if let Some(url) = &offer.url {
-                print!("weekly reset: {url}");
+                print!("  weekly reset: {url}");
                 if let Some(price) = &offer.price {
                     print!(" ({price})");
                 }
@@ -611,7 +784,7 @@ async fn usage(runtime: &Runtime) -> serika_runtime::Result<i32> {
             }
         }
         if plan.byok == Some(true) {
-            println!("bring-your-own-key is enabled on this account; those requests are not metered");
+            println!("  {}", term.dim("bring-your-own-key is enabled on this account; those requests are not metered"));
         }
     }
     Ok(0)
@@ -637,13 +810,32 @@ fn config_cmd(runtime: &Runtime, action: ConfigCommand) -> serika_runtime::Resul
     }
 }
 
-async fn doctor(runtime: &Runtime) -> serika_runtime::Result<i32> {
+async fn doctor(runtime: &Runtime, term: &Term) -> serika_runtime::Result<i32> {
     let report = runtime.doctor().await?;
-    print!("{}", report.render());
+    if !term.fancy {
+        print!("{}", report.render());
+    } else {
+        println!("\n  {}", term.bold("Serika Code Environment Check"));
+        for line in report.render().lines() {
+            if line.starts_with("ok ") || line.contains("[ok]") {
+                println!("  {} {}", term.green("✔"), line);
+            } else if line.starts_with("warn") || line.contains("[warn]") {
+                println!("  {} {}", term.amber("▲"), line);
+            } else {
+                println!("  {} {}", term.accent("•"), line);
+            }
+        }
+        println!();
+    }
     Ok(if report.ok() { 0 } else { 1 })
 }
 
-fn sessions(runtime: &Runtime, project: &PathBuf, action: SessionCommand) -> serika_runtime::Result<i32> {
+fn sessions(
+    runtime: &Runtime,
+    project: &PathBuf,
+    action: SessionCommand,
+    term: &Term,
+) -> serika_runtime::Result<i32> {
     match action {
         SessionCommand::List => {
             let list = runtime.sessions.list(Some(project))?;
@@ -652,7 +844,12 @@ fn sessions(runtime: &Runtime, project: &PathBuf, action: SessionCommand) -> ser
                 return Ok(0);
             }
             for session in list {
-                println!("{}  {}  {}", session.id, session.permission, session.title);
+                println!(
+                    "  {}  {}  {}",
+                    term.accent(&session.id),
+                    term.dim(&session.permission),
+                    session.title
+                );
             }
             Ok(0)
         }
@@ -676,6 +873,7 @@ async fn review(
     focus: &[String],
     model: Option<String>,
     yes: bool,
+    term: &Term,
 ) -> serika_runtime::Result<i32> {
     let status = serika_runtime::gitinfo::status(project).await?;
     let diff = serika_runtime::gitinfo::diff(project, None).await?;
@@ -683,7 +881,7 @@ async fn review(
     if diff.trim().is_empty() || diff.contains("not a git") {
         println!("{diff}");
     } else {
-        print_diff(&diff);
+        tui::print_diff(term, &diff);
     }
     if !ask {
         return Ok(0);
@@ -693,13 +891,24 @@ async fn review(
     } else {
         format!("Review the current git diff with this focus: {}. Do not edit files.", focus.join(" "))
     };
-    run_once(runtime, project, &focus, model, Some(PermissionMode::ReadOnly), yes, None).await
+    run_once(
+        runtime,
+        project,
+        &focus,
+        model,
+        Some(PermissionMode::ReadOnly),
+        yes,
+        None,
+        term,
+    )
+    .await
 }
 
 async fn git_cmd(
     runtime: &Runtime,
     project: &PathBuf,
     action: GitCommand,
+    term: &Term,
 ) -> serika_runtime::Result<i32> {
     use serika_runtime::gitinfo;
     match action {
@@ -710,11 +919,13 @@ async fn git_cmd(
                 return Ok(1);
             }
             println!(
-                "branch: {}  (ahead {}, behind {})",
-                snap.branch, snap.ahead, snap.behind
+                "  {} {}  {}",
+                term.dim("branch:"),
+                term.accent(&snap.branch),
+                term.dim(&format!("(ahead {}, behind {})", snap.ahead, snap.behind))
             );
             if snap.entries.is_empty() {
-                println!("working tree clean");
+                println!("  {} working tree clean", term.green("✔"));
             } else {
                 for entry in &snap.entries {
                     let state = if entry.staged && entry.has_unstaged_changes() {
@@ -726,7 +937,12 @@ async fn git_cmd(
                     } else {
                         "modified"
                     };
-                    println!("  [{}] {:<15} {}", entry.badge(), state, entry.path);
+                    let badge = if entry.staged {
+                        term.green(&format!("[{}]", entry.badge()))
+                    } else {
+                        term.amber(&format!("[{}]", entry.badge()))
+                    };
+                    println!("  {badge} {:<15} {}", term.dim(state), entry.path);
                 }
             }
             Ok(0)
@@ -734,8 +950,11 @@ async fn git_cmd(
         GitCommand::Branches => {
             let snap = gitinfo::snapshot(project).await?;
             for b in snap.branches {
-                let mark = if b == snap.branch { "*" } else { " " };
-                println!("{mark} {b}");
+                if b == snap.branch {
+                    println!("* {}", term.accent(&b));
+                } else {
+                    println!("  {b}");
+                }
             }
             Ok(0)
         }
@@ -793,12 +1012,21 @@ async fn git_cmd(
     }
 }
 
-async fn update_cmd(check: bool, force: bool) -> serika_runtime::Result<i32> {
+async fn update_cmd(check: bool, force: bool, term: &Term) -> serika_runtime::Result<i32> {
     let info = serika_runtime::updater::check_for_update().await?;
-    println!("current version : {}", info.current_version);
-    println!("latest version  : {} ({})", info.latest_version, info.tag_name);
+    println!("  {} {}", term.dim("current version :"), info.current_version);
+    println!(
+        "  {} {} ({})",
+        term.dim("latest version  :"),
+        term.accent(&info.latest_version),
+        info.tag_name
+    );
     if !info.notes.trim().is_empty() {
-        println!("notes           : {}", info.notes.lines().next().unwrap_or(""));
+        println!(
+            "  {} {}",
+            term.dim("notes           :"),
+            info.notes.lines().next().unwrap_or("")
+        );
     }
     if check {
         if info.update_available {
@@ -864,7 +1092,7 @@ fn setup_cmd(
     Ok(0)
 }
 
-fn launch_desktop(project: &PathBuf) -> serika_runtime::Result<i32> {
+fn launch_desktop(project: &PathBuf, term: &Term) -> serika_runtime::Result<i32> {
     let bin_name = if cfg!(windows) {
         "serika-desktop.exe"
     } else {
@@ -880,7 +1108,11 @@ fn launch_desktop(project: &PathBuf) -> serika_runtime::Result<i32> {
         .current_dir(project)
         .spawn()
         .map_err(|err| Error::msg(format!("could not start serika-desktop: {err}")))?;
-    println!("started Serika Code desktop in {}", project.display());
+    println!(
+        "{} started Serika Code desktop in {}",
+        term.green("●"),
+        project.display()
+    );
     Ok(0)
 }
 

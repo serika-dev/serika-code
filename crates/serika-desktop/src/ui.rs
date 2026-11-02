@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use serika_runtime::client::LoginOutcome;
 use serika_runtime::credentials::StoredSession;
-use serika_runtime::gitinfo::{self, GitRepoSnapshot};
+use serika_runtime::gitinfo::{self, GitFileEntry, GitRepoSnapshot};
 use serika_runtime::model::{AccountProfile, ChatModel, ModelCatalog, UsageSnapshot};
 use serika_runtime::permissions::PermissionMode;
 use serika_runtime::providers::{
@@ -27,28 +27,40 @@ use serika_runtime::{AgentEvent, Runtime, TaskOutcome, TaskRequest};
 // =============================================================================
 // Serika Brand Guidelines Palette (`serika-accounts/app/globals.css` + T3 Code)
 // =============================================================================
-const BG_DEEP: Color32 = Color32::from_rgb(12, 12, 14);
-const BG_SIDEBAR: Color32 = Color32::from_rgb(12, 12, 14);
-const BG_CARD: Color32 = Color32::from_rgb(20, 20, 22);
-const BG_CARD_HOVER: Color32 = Color32::from_rgb(28, 28, 32);
-const BG_INPUT: Color32 = Color32::from_rgb(16, 16, 18);
-const BG_ACTIVE_ROW: Color32 = Color32::from_rgb(32, 32, 36);
+const BG_DEEP: Color32 = Color32::from_rgb(9, 9, 11); // #09090B (--color-bg)
+const BG_SIDEBAR: Color32 = Color32::from_rgb(12, 12, 16); // #0C0C10 (Sidebar & Inspector)
+const BG_CARD: Color32 = Color32::from_rgb(18, 18, 23); // #121217 (--color-bg-card)
+const BG_ELEVATED: Color32 = Color32::from_rgb(24, 24, 31); // #18181F (Elevated pills/headers)
+const BG_CARD_HOVER: Color32 = Color32::from_rgb(30, 30, 39); // #1E1E27 (--color-bg-card-hover)
+const BG_INPUT: Color32 = Color32::from_rgb(15, 15, 20); // #0F0F14 (--color-bg-input)
+const BG_ACTIVE_ROW: Color32 = Color32::from_rgb(32, 24, 56); // Serika violet active tint
 
-const BORDER_SUBTLE: Color32 = Color32::from_rgb(36, 36, 40);
-const BORDER_STRONG: Color32 = Color32::from_rgb(54, 54, 60);
+const BORDER_HAIRLINE: Color32 = Color32::from_rgb(28, 28, 36); // Crisp 1px panel divider
+const BORDER_SUBTLE: Color32 = Color32::from_rgb(39, 39, 50); // Card & control border
+const BORDER_STRONG: Color32 = Color32::from_rgb(60, 60, 76); // Hover / emphasized border
 
-const TEXT_PRIMARY: Color32 = Color32::from_rgb(236, 236, 238);
-const TEXT_MUTED: Color32 = Color32::from_rgb(154, 154, 162);
-const TEXT_DIM: Color32 = Color32::from_rgb(108, 108, 116);
+const TEXT_PRIMARY: Color32 = Color32::from_rgb(244, 244, 245); // #F4F4F5 (--color-text)
+const TEXT_SECONDARY: Color32 = Color32::from_rgb(212, 212, 216); // #D4D4D8
+const TEXT_MUTED: Color32 = Color32::from_rgb(161, 161, 170); // #A1A1AA (--color-text-muted)
+const TEXT_DIM: Color32 = Color32::from_rgb(113, 113, 122); // #71717A (--color-text-dim)
 
 const SERIKA_VIOLET: Color32 = Color32::from_rgb(139, 92, 246); // #8B5CF6 (--color-primary)
 const SERIKA_VIOLET_HOVER: Color32 = Color32::from_rgb(124, 58, 237); // #7C3AED (--color-primary-hover)
 const SERIKA_VIOLET_LIGHT: Color32 = Color32::from_rgb(167, 139, 250); // #A78BFA (--color-secondary)
-const SERIKA_VIOLET_SOFT: Color32 = Color32::from_rgb(28, 20, 48);
+const SERIKA_VIOLET_SOFT: Color32 = Color32::from_rgb(30, 21, 54);
 
 const EMERALD: Color32 = Color32::from_rgb(16, 185, 129); // #10B981 (--color-success)
+const EMERALD_SOFT: Color32 = Color32::from_rgb(13, 38, 28);
 const AMBER: Color32 = Color32::from_rgb(245, 158, 11); // #F59E0B (--color-warning)
 const ROSE: Color32 = Color32::from_rgb(244, 63, 94); // #F43F5E (--color-danger)
+const ROSE_SOFT: Color32 = Color32::from_rgb(46, 16, 24);
+
+#[derive(Default, Clone)]
+pub struct LaunchConfig {
+    pub smoke: bool,
+    pub screenshot_path: Option<PathBuf>,
+    pub screenshot_view: Option<String>,
+}
 
 // =============================================================================
 // Custom Anti-Aliased Vector Icon Renderer (Zero Missing Glyph `▯` Boxes!)
@@ -72,6 +84,10 @@ enum Icon {
     Refresh,
     Terminal,
     Close,
+    ChevronDown,
+    Rewind,
+    Shield,
+    Code,
 }
 
 fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -87,181 +103,201 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             let left = Pos2::new(c.x - r * 1.05, c.y);
             painter.add(egui::Shape::convex_polygon(
                 vec![top, right, bottom, left],
-                color,
-                Stroke::NONE,
+                color.gamma_multiply(0.22),
+                Stroke::new(1.6, color),
             ));
-            let inner_r = r * 0.45;
-            painter.add(egui::Shape::convex_polygon(
-                vec![
-                    Pos2::new(c.x, c.y - inner_r),
-                    Pos2::new(c.x + inner_r, c.y),
-                    Pos2::new(c.x, c.y + inner_r),
-                    Pos2::new(c.x - inner_r, c.y),
-                ],
-                BG_DEEP,
-                Stroke::NONE,
-            ));
+            painter.circle_filled(c, (r * 0.30).max(1.5), Color32::WHITE);
         }
         Icon::Plus => {
             painter.line_segment([Pos2::new(c.x - r, c.y), Pos2::new(c.x + r, c.y)], stroke);
             painter.line_segment([Pos2::new(c.x, c.y - r), Pos2::new(c.x, c.y + r)], stroke);
         }
         Icon::Folder => {
-            let box_rect =
-                Rect::from_center_size(Pos2::new(c.x, c.y + 1.0), Vec2::new(r * 2.1, r * 1.5));
-            let tab_rect = Rect::from_min_size(
-                Pos2::new(box_rect.left(), box_rect.top() - r * 0.35),
-                Vec2::new(r * 0.9, r * 0.45),
+            let body = Rect::from_min_max(
+                Pos2::new(c.x - r * 1.1, c.y - r * 0.55),
+                Pos2::new(c.x + r * 1.1, c.y + r * 0.85),
             );
-            painter.rect_stroke(tab_rect, 1.5, stroke, StrokeKind::Inside);
-            painter.rect_stroke(box_rect, 2.0, stroke, StrokeKind::Inside);
+            let tab = Rect::from_min_max(
+                Pos2::new(c.x - r * 1.1, c.y - r * 0.85),
+                Pos2::new(c.x - r * 0.15, c.y - r * 0.45),
+            );
+            painter.rect_stroke(body, 2.0, stroke, StrokeKind::Inside);
+            painter.rect_filled(tab, 1.5, color);
         }
         Icon::GitBranch => {
-            let top_left = Pos2::new(c.x - r * 0.55, c.y - r * 0.75);
-            let bot_left = Pos2::new(c.x - r * 0.55, c.y + r * 0.75);
-            let top_right = Pos2::new(c.x + r * 0.6, c.y - r * 0.25);
-            painter.line_segment([top_left, bot_left], stroke);
-            painter.line_segment([Pos2::new(c.x - r * 0.55, c.y + r * 0.15), top_right], stroke);
-            painter.circle_filled(top_left, 2.2, color);
-            painter.circle_filled(bot_left, 2.2, color);
-            painter.circle_filled(top_right, 2.2, color);
+            let top_l = Pos2::new(c.x - r * 0.55, c.y - r * 0.75);
+            let bot_l = Pos2::new(c.x - r * 0.55, c.y + r * 0.75);
+            let top_r = Pos2::new(c.x + r * 0.55, c.y - r * 0.35);
+            painter.line_segment([top_l, bot_l], stroke);
+            painter.line_segment([Pos2::new(c.x - r * 0.55, c.y + r * 0.15), top_r], stroke);
+            painter.circle_filled(top_l, 2.2, color);
+            painter.circle_filled(bot_l, 2.2, color);
+            painter.circle_filled(top_r, 2.2, color);
         }
         Icon::Worktree => {
-            let root = Pos2::new(c.x, c.y + r * 0.8);
-            let left = Pos2::new(c.x - r * 0.7, c.y - r * 0.6);
-            let right = Pos2::new(c.x + r * 0.7, c.y - r * 0.6);
-            painter.line_segment([root, left], stroke);
-            painter.line_segment([root, right], stroke);
-            painter.circle_filled(root, 2.2, color);
-            painter.circle_filled(left, 2.2, color);
-            painter.circle_filled(right, 2.2, color);
+            let top = Pos2::new(c.x, c.y - r * 0.85);
+            let left = Pos2::new(c.x - r * 0.75, c.y + r * 0.7);
+            let right = Pos2::new(c.x + r * 0.75, c.y + r * 0.7);
+            painter.line_segment([top, left], stroke);
+            painter.line_segment([top, right], stroke);
+            painter.circle_filled(top, 2.3, color);
+            painter.circle_filled(left, 2.3, color);
+            painter.circle_filled(right, 2.3, color);
         }
         Icon::Search => {
-            let circle_c = Pos2::new(c.x - r * 0.18, c.y - r * 0.18);
-            painter.circle_stroke(circle_c, r * 0.68, stroke);
+            let sc = Pos2::new(c.x - r * 0.15, c.y - r * 0.15);
+            painter.circle_stroke(sc, r * 0.68, stroke);
             painter.line_segment(
                 [
-                    Pos2::new(circle_c.x + r * 0.48, circle_c.y + r * 0.48),
-                    Pos2::new(c.x + r * 0.85, c.y + r * 0.85),
+                    Pos2::new(sc.x + r * 0.48, sc.y + r * 0.48),
+                    Pos2::new(c.x + r * 0.95, c.y + r * 0.95),
                 ],
                 stroke,
             );
         }
         Icon::Send => {
-            let top = Pos2::new(c.x, c.y - r * 0.85);
-            let bot = Pos2::new(c.x, c.y + r * 0.85);
-            let wing_l = Pos2::new(c.x - r * 0.65, c.y - r * 0.15);
-            let wing_r = Pos2::new(c.x + r * 0.65, c.y - r * 0.15);
-            let s = Stroke::new(1.8, color);
-            painter.line_segment([bot, top], s);
-            painter.line_segment([top, wing_l], s);
-            painter.line_segment([top, wing_r], s);
+            let tip = Pos2::new(c.x + r * 0.95, c.y);
+            let tail = Pos2::new(c.x - r * 0.85, c.y);
+            let wing_t = Pos2::new(c.x + r * 0.15, c.y - r * 0.75);
+            let wing_b = Pos2::new(c.x + r * 0.15, c.y + r * 0.75);
+            let s = Stroke::new(1.7, color);
+            painter.line_segment([tail, tip], s);
+            painter.line_segment([wing_t, tip], s);
+            painter.line_segment([wing_b, tip], s);
         }
         Icon::Stop => {
-            let sq = Rect::from_center_size(c, Vec2::splat(r * 1.35));
+            let sq = Rect::from_center_size(c, Vec2::splat(r * 1.25));
             painter.rect_filled(sq, 2.0, color);
         }
         Icon::Sliders => {
-            let y1 = c.y - r * 0.45;
-            let y2 = c.y + r * 0.45;
-            painter.line_segment([Pos2::new(c.x - r, y1), Pos2::new(c.x + r, y1)], stroke);
-            painter.line_segment([Pos2::new(c.x - r, y2), Pos2::new(c.x + r, y2)], stroke);
-            painter.circle_filled(Pos2::new(c.x - r * 0.3, y1), 2.5, color);
-            painter.circle_filled(Pos2::new(c.x + r * 0.35, y2), 2.5, color);
+            for (i, frac) in [-0.6f32, 0.0, 0.6].iter().enumerate() {
+                let y = c.y + frac * r * 1.2;
+                painter.line_segment(
+                    [Pos2::new(c.x - r, y), Pos2::new(c.x + r, y)],
+                    Stroke::new(1.3, color),
+                );
+                let kx = if i == 1 { c.x + r * 0.35 } else { c.x - r * 0.35 };
+                painter.circle_filled(Pos2::new(kx, y), 2.3, color);
+            }
         }
         Icon::Key => {
-            let head = Pos2::new(c.x - r * 0.35, c.y);
-            painter.circle_stroke(head, r * 0.5, stroke);
+            let kc = Pos2::new(c.x - r * 0.4, c.y);
+            painter.circle_stroke(kc, r * 0.55, stroke);
+            painter.line_segment([Pos2::new(kc.x + r * 0.55, c.y), Pos2::new(c.x + r, c.y)], stroke);
             painter.line_segment(
-                [Pos2::new(head.x + r * 0.5, c.y), Pos2::new(c.x + r * 0.9, c.y)],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(c.x + r * 0.55, c.y),
-                    Pos2::new(c.x + r * 0.55, c.y + r * 0.4),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    Pos2::new(c.x + r * 0.85, c.y),
-                    Pos2::new(c.x + r * 0.85, c.y + r * 0.4),
-                ],
+                [Pos2::new(c.x + r * 0.75, c.y), Pos2::new(c.x + r * 0.75, c.y + r * 0.45)],
                 stroke,
             );
         }
         Icon::PanelRight => {
-            let box_rect = Rect::from_center_size(c, Vec2::new(r * 2.1, r * 1.65));
-            painter.rect_stroke(box_rect, 2.0, stroke, StrokeKind::Inside);
-            let split_x = box_rect.right() - box_rect.width() * 0.35;
+            let box_r = Rect::from_center_size(c, Vec2::new(r * 2.1, r * 1.7));
+            painter.rect_stroke(box_r, 2.5, stroke, StrokeKind::Inside);
+            let split_x = box_r.right() - box_r.width() * 0.35;
             painter.line_segment(
-                [
-                    Pos2::new(split_x, box_rect.top()),
-                    Pos2::new(split_x, box_rect.bottom()),
-                ],
+                [Pos2::new(split_x, box_r.top()), Pos2::new(split_x, box_r.bottom())],
                 stroke,
             );
         }
         Icon::Sparkle => {
-            painter.line_segment([Pos2::new(c.x - r, c.y), Pos2::new(c.x + r, c.y)], stroke);
             painter.line_segment([Pos2::new(c.x, c.y - r), Pos2::new(c.x, c.y + r)], stroke);
-            let d = r * 0.55;
+            painter.line_segment([Pos2::new(c.x - r, c.y), Pos2::new(c.x + r, c.y)], stroke);
+            let d = r * 0.58;
             painter.line_segment(
                 [Pos2::new(c.x - d, c.y - d), Pos2::new(c.x + d, c.y + d)],
-                Stroke::new(1.1, color),
+                Stroke::new(1.2, color),
             );
             painter.line_segment(
-                [Pos2::new(c.x - d, c.y + d), Pos2::new(c.x + d, c.y - d)],
-                Stroke::new(1.1, color),
+                [Pos2::new(c.x + d, c.y - d), Pos2::new(c.x - d, c.y + d)],
+                Stroke::new(1.2, color),
             );
         }
         Icon::Check => {
-            let p1 = Pos2::new(c.x - r * 0.75, c.y + r * 0.05);
-            let p2 = Pos2::new(c.x - r * 0.15, c.y + r * 0.65);
-            let p3 = Pos2::new(c.x + r * 0.85, c.y - r * 0.55);
-            let s = Stroke::new(1.8, color);
-            painter.line_segment([p1, p2], s);
-            painter.line_segment([p2, p3], s);
+            let p1 = Pos2::new(c.x - r * 0.8, c.y + r * 0.05);
+            let p2 = Pos2::new(c.x - r * 0.2, c.y + r * 0.65);
+            let p3 = Pos2::new(c.x + r * 0.85, c.y - r * 0.65);
+            painter.line_segment([p1, p2], Stroke::new(1.8, color));
+            painter.line_segment([p2, p3], Stroke::new(1.8, color));
         }
         Icon::Refresh => {
-            painter.circle_stroke(c, r * 0.75, stroke);
-            painter.circle_filled(Pos2::new(c.x + r * 0.65, c.y - r * 0.35), 2.2, color);
+            painter.circle_stroke(c, r * 0.8, stroke);
+            painter.circle_filled(Pos2::new(c.x + r * 0.65, c.y - r * 0.45), 2.2, color);
         }
         Icon::Terminal => {
-            let p1 = Pos2::new(c.x - r * 0.75, c.y - r * 0.45);
+            let box_r = Rect::from_center_size(c, Vec2::new(r * 2.1, r * 1.7));
+            painter.rect_stroke(box_r, 2.5, stroke, StrokeKind::Inside);
+            let p1 = Pos2::new(c.x - r * 0.55, c.y - r * 0.35);
             let p2 = Pos2::new(c.x - r * 0.15, c.y);
-            let p3 = Pos2::new(c.x - r * 0.75, c.y + r * 0.45);
+            let p3 = Pos2::new(c.x - r * 0.55, c.y + r * 0.35);
             painter.line_segment([p1, p2], stroke);
             painter.line_segment([p2, p3], stroke);
+        }
+        Icon::Close => {
+            let d = r * 0.7;
+            painter.line_segment([Pos2::new(c.x - d, c.y - d), Pos2::new(c.x + d, c.y + d)], stroke);
+            painter.line_segment([Pos2::new(c.x + d, c.y - d), Pos2::new(c.x - d, c.y + d)], stroke);
+        }
+        Icon::ChevronDown => {
+            let p1 = Pos2::new(c.x - r * 0.65, c.y - r * 0.25);
+            let p2 = Pos2::new(c.x, c.y + r * 0.40);
+            let p3 = Pos2::new(c.x + r * 0.65, c.y - r * 0.25);
+            painter.line_segment([p1, p2], stroke);
+            painter.line_segment([p2, p3], stroke);
+        }
+        Icon::Rewind => {
+            let tip = Pos2::new(c.x - r * 0.85, c.y - r * 0.2);
+            let w1 = Pos2::new(c.x - r * 0.25, c.y - r * 0.75);
+            let w2 = Pos2::new(c.x - r * 0.25, c.y + r * 0.35);
+            painter.line_segment([tip, w1], stroke);
+            painter.line_segment([tip, w2], stroke);
+            painter.line_segment([tip, Pos2::new(c.x + r * 0.75, c.y - r * 0.2)], stroke);
             painter.line_segment(
-                [
-                    Pos2::new(c.x + r * 0.05, c.y + r * 0.45),
-                    Pos2::new(c.x + r * 0.75, c.y + r * 0.45),
-                ],
+                [Pos2::new(c.x + r * 0.75, c.y - r * 0.2), Pos2::new(c.x + r * 0.75, c.y + r * 0.65)],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(c.x + r * 0.75, c.y + r * 0.65), Pos2::new(c.x - r * 0.3, c.y + r * 0.65)],
                 stroke,
             );
         }
-        Icon::Close => {
-            let d = r * 0.65;
-            painter.line_segment([Pos2::new(c.x - d, c.y - d), Pos2::new(c.x + d, c.y + d)], stroke);
-            painter.line_segment([Pos2::new(c.x - d, c.y + d), Pos2::new(c.x + d, c.y - d)], stroke);
+        Icon::Shield => {
+            let top = Pos2::new(c.x, c.y - r * 0.95);
+            let tr = Pos2::new(c.x + r * 0.85, c.y - r * 0.55);
+            let br = Pos2::new(c.x + r * 0.65, c.y + r * 0.35);
+            let bot = Pos2::new(c.x, c.y + r * 0.98);
+            let bl = Pos2::new(c.x - r * 0.65, c.y + r * 0.35);
+            let tl = Pos2::new(c.x - r * 0.85, c.y - r * 0.55);
+            painter.add(egui::Shape::closed_line(
+                vec![top, tr, br, bot, bl, tl],
+                stroke,
+            ));
+        }
+        Icon::Code => {
+            let l1 = Pos2::new(c.x - r * 0.35, c.y - r * 0.65);
+            let l2 = Pos2::new(c.x - r * 0.95, c.y);
+            let l3 = Pos2::new(c.x - r * 0.35, c.y + r * 0.65);
+            let r1 = Pos2::new(c.x + r * 0.35, c.y - r * 0.65);
+            let r2 = Pos2::new(c.x + r * 0.95, c.y);
+            let r3 = Pos2::new(c.x + r * 0.35, c.y + r * 0.65);
+            painter.line_segment([l1, l2], stroke);
+            painter.line_segment([l2, l3], stroke);
+            painter.line_segment([r1, r2], stroke);
+            painter.line_segment([r2, r3], stroke);
         }
     }
 }
 
-pub fn launch(smoke: bool) {
+pub fn launch(cfg: LaunchConfig) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Serika Code")
-            .with_inner_size([1380.0, 860.0])
-            .with_min_inner_size([960.0, 620.0]),
+            .with_inner_size([1420.0, 880.0])
+            .with_min_inner_size([980.0, 640.0]),
         ..Default::default()
     };
     let result = eframe::run_native(
         "Serika Code",
         options,
-        Box::new(move |cc| Ok(Box::new(SerikaApp::new(cc, smoke)))),
+        Box::new(move |cc| Ok(Box::new(SerikaApp::new(cc, cfg)))),
     );
     if let Err(err) = result {
         eprintln!("serika-desktop failed to start: {err}");
@@ -269,6 +305,7 @@ pub fn launch(smoke: bool) {
     }
 }
 
+#[allow(dead_code)]
 enum UiNotice {
     ModelsDiscovered(ProviderDiscoveryReport),
     Catalog(Result<ModelCatalog, String>),
@@ -303,8 +340,14 @@ enum ComposerMode {
     Plan,
 }
 
+#[allow(dead_code)]
 struct SerikaApp {
     smoke: bool,
+    screenshot_path: Option<PathBuf>,
+    screenshot_view: Option<String>,
+    screenshot_frames: u32,
+    screenshot_requested: bool,
+
     tokio: tokio::runtime::Runtime,
     core: Option<Arc<Runtime>>,
     startup_error: Option<String>,
@@ -383,7 +426,7 @@ struct SerikaApp {
 }
 
 impl SerikaApp {
-    fn new(cc: &eframe::CreationContext<'_>, smoke: bool) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, cfg: LaunchConfig) -> Self {
         install_system_fonts(&cc.egui_ctx);
         apply_serika_theme(&cc.egui_ctx);
 
@@ -460,11 +503,14 @@ impl SerikaApp {
             .unwrap_or_default();
 
         let git = gitinfo::snapshot_sync(&project).unwrap_or_default();
-        // Only auto-open the right inspector if there are uncommitted changes in a Git repo
         let show_inspector = git.is_repo && !git.entries.is_empty();
 
         let mut app = Self {
-            smoke,
+            smoke: cfg.smoke,
+            screenshot_path: cfg.screenshot_path,
+            screenshot_view: cfg.screenshot_view,
+            screenshot_frames: 0,
+            screenshot_requested: false,
             tokio,
             core,
             startup_error,
@@ -527,8 +573,122 @@ impl SerikaApp {
             update_info: None,
             setup_status: String::new(),
         };
-        app.refresh_remote();
+        if app.screenshot_path.is_some() {
+            app.prepare_screenshot_preset();
+        } else {
+            app.refresh_remote();
+        }
         app
+    }
+
+    fn prepare_screenshot_preset(&mut self) {
+        let now = 1_793_500_000i64;
+        self.discovery_report.local_count = 6;
+        self.discovery_report.anthropic_count = 4;
+        self.discovery_report.openai_count = 5;
+        self.discovery_report.gemini_count = 4;
+        self.sessions = vec![
+            SessionSummary {
+                id: "sess_01".into(),
+                title: "Live /models API discovery".into(),
+                project_path: self.project.display().to_string(),
+                model_id: "local/workspace".into(),
+                permission: "standard".into(),
+                updated_at: now - 30,
+            },
+            SessionSummary {
+                id: "sess_02".into(),
+                title: "Codex-style CLI & diff gutter".into(),
+                project_path: self.project.display().to_string(),
+                model_id: "claude/claude-sonnet-4-5".into(),
+                permission: "standard".into(),
+                updated_at: now - 420,
+            },
+            SessionSummary {
+                id: "sess_03".into(),
+                title: "Rewind turn & restore files".into(),
+                project_path: self.project.display().to_string(),
+                model_id: "local/ollama:qwen2.5-coder:32b".into(),
+                permission: "standard".into(),
+                updated_at: now - 3600,
+            },
+        ];
+
+        match self.screenshot_view.as_deref() {
+            Some("thread") => {
+                self.active_session = Some("sess_01".into());
+                self.show_inspector = true;
+                self.inspector_tab = InspectorTab::Diffs;
+                self.git.is_repo = true;
+                self.git.branch = "main".into();
+                self.git.entries = vec![
+                    GitFileEntry {
+                        path: "crates/serika-runtime/src/providers.rs".into(),
+                        index_status: 'M',
+                        worktree_status: ' ',
+                        staged: true,
+                        untracked: false,
+                    },
+                    GitFileEntry {
+                        path: "crates/serika-cli/src/tui.rs".into(),
+                        index_status: ' ',
+                        worktree_status: 'M',
+                        staged: false,
+                        untracked: false,
+                    },
+                ];
+                self.messages = vec![
+                    StoredMessage {
+                        id: 1,
+                        role: "user".into(),
+                        content: "Query live /models endpoints for OpenAI, Claude, and Gemini, and let Local Workspace bind to any discovered Ollama or Local Server model.".into(),
+                        created_at: now - 90,
+                    },
+                    StoredMessage {
+                        id: 2,
+                        role: "assistant".into(),
+                        content: "### Live `/models` Endpoint Discovery & Local Workspace Binding\n\nI updated `serika-runtime` and `serika-desktop` so all model lists are queried live from each provider's API:\n\n- **Local Workspace & Ollama**: Queries `GET /api/tags` (`ollama list` fallback) and `GET /v1/models` on your local server.\n- **Cloud Provider Endpoints**: Concurrently queries OpenAI `GET /v1/models`, Anthropic `GET /v1/models`, and Gemini `GET /v1beta/models`.\n\n```rust\npub async fn discover_all_models(http: &Client, cfg: &Config) -> Report {\n    let (ollama, local_srv, openai, claude, gemini) = tokio::join!(\n        fetch_ollama_models(http, cfg), fetch_openai_models(http, cfg),\n        fetch_anthropic_models(http, cfg), fetch_gemini_models(http, cfg),\n    );\n    ProviderDiscoveryReport::merge(ollama, local_srv, openai, claude, gemini)\n}\n```".into(),
+                        created_at: now - 40,
+                    },
+                ];
+                self.tools = vec![
+                    ToolRun {
+                        name: "read_file".into(),
+                        arguments: r#"{"path":"crates/serika-runtime/src/providers.rs"}"#.into(),
+                        output: "Read 142 lines from crates/serika-runtime/src/providers.rs".into(),
+                        ok: true,
+                        created_at: now - 75,
+                    },
+                    ToolRun {
+                        name: "replace_in_file".into(),
+                        arguments: r#"{"path":"crates/serika-runtime/src/providers.rs"}"#.into(),
+                        output: "Updated crates/serika-runtime/src/providers.rs (+28 -4)".into(),
+                        ok: true,
+                        created_at: now - 60,
+                    },
+                    ToolRun {
+                        name: "run_command".into(),
+                        arguments: r#"{"command":"cargo test --workspace"}"#.into(),
+                        output: "test result: ok. 37 passed; 0 failed; finished in 1.74s".into(),
+                        ok: true,
+                        created_at: now - 45,
+                    },
+                ];
+                self.diffs = vec![(
+                    "crates/serika-runtime/src/providers.rs".into(),
+                    "@@ -172,6 +172,18 @@ pub async fn discover_all_models(\n-    let models = builtin_static_models();\n+    let (ollama, local_srv, openai, anthropic, gemini) = tokio::join!(\n+        fetch_ollama_models(http, config),\n+        fetch_local_openai_models(http, config),\n+        fetch_openai_models(http, config),\n+        fetch_anthropic_models(http, config),\n+        fetch_gemini_models(http, config),\n+    );\n+    let mut report = ProviderDiscoveryReport::default();\n+    report.extend_local(ollama, local_srv);\n+    report.extend_cloud(openai, anthropic, gemini);\n     report\n }\n".into(),
+                )];
+            }
+            Some("providers") => {
+                self.show_inspector = false;
+                self.show_providers = true;
+            }
+            _ => {
+                self.active_session = None;
+                self.show_inspector = true;
+                self.inspector_tab = InspectorTab::Git;
+            }
+        }
     }
 
     fn refresh_remote(&mut self) {
@@ -629,58 +789,6 @@ impl SerikaApp {
         self.rewind_confirm = None;
     }
 
-    fn draw_turn(&mut self, ui: &mut egui::Ui, msg: &StoredMessage) {
-        ui.add_space(8.0);
-        if msg.role == "user" {
-            let confirming = self.rewind_confirm == Some(msg.id);
-            egui::Frame::NONE
-                .fill(BG_CARD)
-                .corner_radius(CornerRadius::same(8))
-                .inner_margin(Margin::symmetric(12, 8))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("You").size(12.0).color(TEXT_DIM));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if !self.running
-                                && ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new("Rewind").size(12.0).color(TEXT_PRIMARY),
-                                        )
-                                        .frame(false),
-                                    )
-                                    .on_hover_text("Put files back and drop this message and everything after it")
-                                    .clicked()
-                            {
-                                self.rewind_confirm = Some(msg.id);
-                            }
-                        });
-                    });
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(&msg.content).size(15.0).color(TEXT_PRIMARY));
-                    if confirming {
-                        ui.add_space(8.0);
-                        ui.label(
-                            RichText::new("Restore files to before this message and remove it from the thread?")
-                                .size(12.0)
-                                .color(TEXT_MUTED),
-                        );
-                        ui.horizontal(|ui| {
-                            if ui.button("Rewind").clicked() {
-                                let id = msg.id;
-                                self.apply_rewind(id);
-                            }
-                            if ui.button("Cancel").clicked() {
-                                self.rewind_confirm = None;
-                            }
-                        });
-                    }
-                });
-        } else {
-            ui.label(RichText::new(&msg.content).size(14.5).color(TEXT_PRIMARY));
-        }
-    }
-
     fn apply_rewind(&mut self, message_id: i64) {
         self.rewind_confirm = None;
         if self.running {
@@ -759,7 +867,6 @@ impl SerikaApp {
                 UiNotice::ModelsDiscovered(report) => {
                     self.discovering_models = false;
                     self.provider_models = report.models.clone();
-                    // If user hadn't explicitly saved a model and we discovered live API or local LLM models, keep selection valid
                     if self
                         .core
                         .as_ref()
@@ -970,10 +1077,14 @@ impl eframe::App for SerikaApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        self.drain_channels();
+        if self.screenshot_path.is_none() {
+            self.drain_channels();
+        }
         if self.running {
             ctx.request_repaint_after(Duration::from_millis(16));
-        } else if self.last_git_poll.elapsed() > Duration::from_secs(8) {
+        } else if self.screenshot_path.is_none()
+            && self.last_git_poll.elapsed() > Duration::from_secs(8)
+        {
             self.refresh_git_async();
         }
 
@@ -990,83 +1101,237 @@ impl eframe::App for SerikaApp {
             }
         });
 
-        self.draw_sidebar(root_ui);
-        if self.show_inspector {
-            self.draw_inspector(root_ui);
-        }
-        self.draw_main_canvas(root_ui);
+        if self.screenshot_view.as_deref() == Some("cli") {
+            self.draw_codex_cli_showcase(root_ui);
+        } else {
+            self.draw_sidebar(root_ui);
+            if self.show_inspector {
+                self.draw_inspector(root_ui);
+            }
+            self.draw_main_canvas(root_ui);
 
-        self.draw_approval_modal(&ctx);
-        self.draw_providers_modal(&ctx);
-        self.draw_settings_modal(&ctx);
-        self.draw_palette_modal(&ctx);
+            if self.show_providers
+                || self.show_settings
+                || self.show_palette
+                || self.pending_approval.is_some()
+            {
+                let screen = ctx.content_rect();
+                egui::Area::new(egui::Id::unique("modal_backdrop"))
+                    .order(egui::Order::Middle)
+                    .fixed_pos(screen.min)
+                    .show(&ctx, |ui| {
+                        let (r, _) = ui.allocate_exact_size(screen.size(), Sense::hover());
+                        ui.painter()
+                            .rect_filled(r, 0.0, Color32::from_black_alpha(155));
+                    });
+            }
+
+            self.draw_approval_modal(&ctx);
+            self.draw_providers_modal(&ctx);
+            self.draw_settings_modal(&ctx);
+            self.draw_palette_modal(&ctx);
+        }
+
+        if let Some(out_path) = self.screenshot_path.clone() {
+            self.screenshot_frames += 1;
+            ctx.request_repaint();
+            if self.screenshot_frames == 4 && !self.screenshot_requested {
+                self.screenshot_requested = true;
+                let ctx_close = ctx.clone();
+                ctx.request_screenshot(move |image| {
+                    let [w, h] = image.size;
+                    let mut rgba = Vec::with_capacity(w * h * 4);
+                    for px in &image.pixels {
+                        rgba.extend_from_slice(&px.to_srgba_unmultiplied());
+                    }
+                    let _ = crate::shot::write_png(&out_path, w, h, &rgba);
+                    ctx_close.send_viewport_cmd(egui::ViewportCommand::Close);
+                });
+            }
+        }
     }
 }
 
 // =============================================================================
-// UI Layout Sections (T3 Code + Serika Brand Guidelines)
+// UI Layout Sections (T3 Code + Linear + Serika Brand Guidelines)
 // =============================================================================
 impl SerikaApp {
     fn draw_sidebar(&mut self, root_ui: &mut egui::Ui) {
         egui::Panel::left("t3_sidebar")
             .resizable(true)
-            .default_size(248.0)
-            .size_range(200.0..=320.0)
+            .default_size(268.0)
+            .size_range(220.0..=340.0)
             .frame(
                 egui::Frame::NONE
                     .fill(BG_SIDEBAR)
-                    .inner_margin(Margin::symmetric(10, 12))
-                    .stroke(Stroke::new(1.0, BORDER_SUBTLE)),
+                    .inner_margin(Margin::symmetric(12, 12))
+                    .stroke(Stroke::new(1.0, BORDER_HAIRLINE)),
             )
             .show(root_ui, |ui| {
-                let project_label = workspace_display_name(&self.project, &self.core);
+                // 1. Brand Header Row
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new(&project_label)
-                                    .size(13.0)
-                                    .color(TEXT_PRIMARY),
-                            )
-                            .frame(false),
-                        )
-                        .on_hover_text(self.project.display().to_string())
-                        .clicked()
-                    {
-                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.switch_project(folder);
-                        }
-                    }
+                    let (logo_rect, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                    ui.painter().rect_filled(logo_rect, 7.0, SERIKA_VIOLET_SOFT);
+                    ui.painter().rect_stroke(
+                        logo_rect,
+                        7.0,
+                        Stroke::new(1.0, SERIKA_VIOLET.gamma_multiply(0.6)),
+                        StrokeKind::Inside,
+                    );
+                    paint_icon(
+                        ui.painter(),
+                        logo_rect.shrink(4.0),
+                        Icon::SerikaMark,
+                        SERIKA_VIOLET_LIGHT,
+                    );
+
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new("Serika")
+                            .strong()
+                            .size(15.0)
+                            .color(TEXT_PRIMARY),
+                    );
+                    ui.label(
+                        RichText::new("Code")
+                            .strong()
+                            .size(15.0)
+                            .color(SERIKA_VIOLET_LIGHT),
+                    );
+                    egui::Frame::NONE
+                        .fill(BG_ELEVATED)
+                        .corner_radius(CornerRadius::same(4))
+                        .inner_margin(Margin::symmetric(5, 1))
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(format!("v{}", serika_runtime::client::VERSION))
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(TEXT_DIM),
+                            );
+                        });
+
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new("+").size(16.0).color(TEXT_MUTED))
-                                    .frame(false),
-                            )
-                            .on_hover_text("New thread")
-                            .clicked()
-                        {
+                        if icon_button(ui, Icon::Plus, "New Thread (Ctrl+N)", true).clicked() {
                             self.new_thread();
+                        }
+                        if icon_button(ui, Icon::Folder, "Open Project Folder", false).clicked() {
+                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                self.switch_project(folder);
+                            }
                         }
                     });
                 });
-                if self.git.is_repo && !self.git.branch.is_empty() {
-                    ui.label(
-                        RichText::new(&self.git.branch)
-                            .size(11.0)
-                            .color(TEXT_DIM),
-                    );
-                }
-                ui.add_space(10.0);
-                ui.add(
-                    TextEdit::singleline(&mut self.session_filter)
-                        .hint_text("Search")
-                        .desired_width(f32::INFINITY)
-                        .font(FontId::proportional(12.5)),
-                );
-                ui.add_space(8.0);
 
-                // 4. Thread List
+                ui.add_space(10.0);
+
+                // 2. Active Workspace Card
+                let project_label = workspace_display_name(&self.project, &self.core);
+                egui::Frame::NONE
+                    .fill(BG_CARD)
+                    .corner_radius(CornerRadius::same(9))
+                    .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (fr, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                            paint_icon(ui.painter(), fr, Icon::Folder, SERIKA_VIOLET_LIGHT);
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        RichText::new(&project_label)
+                                            .strong()
+                                            .size(12.5)
+                                            .color(TEXT_PRIMARY),
+                                    )
+                                    .frame(false),
+                                )
+                                .on_hover_text(format!(
+                                    "{}\nClick to switch project folder",
+                                    self.project.display()
+                                ))
+                                .clicked()
+                            {
+                                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                    self.switch_project(folder);
+                                }
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Scratch")
+                                                .size(10.5)
+                                                .color(TEXT_MUTED),
+                                        )
+                                        .fill(BG_ELEVATED)
+                                        .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                                        .corner_radius(CornerRadius::same(5)),
+                                    )
+                                    .on_hover_text("Open isolated Scratch workspace")
+                                    .clicked()
+                                {
+                                    if let Some(core) = &self.core {
+                                        let scratch = core.paths.scratch_dir();
+                                        let _ = std::fs::create_dir_all(&scratch);
+                                        self.switch_project(scratch);
+                                    }
+                                }
+                            });
+                        });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let (gr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                            paint_icon(ui.painter(), gr, Icon::GitBranch, TEXT_DIM);
+                            if self.git.is_repo && !self.git.branch.is_empty() {
+                                ui.label(
+                                    RichText::new(&self.git.branch)
+                                        .monospace()
+                                        .size(11.0)
+                                        .color(TEXT_MUTED),
+                                );
+                                let (badge_txt, badge_col) = if self.git.entries.is_empty() {
+                                    ("clean".to_string(), EMERALD)
+                                } else {
+                                    (format!("{} dirty", self.git.entries.len()), AMBER)
+                                };
+                                ui.label(RichText::new("·").size(11.0).color(TEXT_DIM));
+                                ui.label(RichText::new(badge_txt).size(11.0).color(badge_col));
+                            } else {
+                                ui.label(
+                                    RichText::new("Local folder (no Git)")
+                                        .size(11.0)
+                                        .color(TEXT_DIM),
+                                );
+                            }
+                        });
+                    });
+
+                ui.add_space(10.0);
+
+                // 3. Search / Filter Threads Box
+                egui::Frame::NONE
+                    .fill(BG_INPUT)
+                    .corner_radius(CornerRadius::same(8))
+                    .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                    .inner_margin(Margin::symmetric(9, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (ir, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+                            paint_icon(ui.painter(), ir, Icon::Search, TEXT_DIM);
+                            ui.add(
+                                TextEdit::singleline(&mut self.session_filter)
+                                    .hint_text("Search threads…")
+                                    .frame(egui::Frame::NONE)
+                                    .font(FontId::proportional(12.0))
+                                    .desired_width(f32::INFINITY),
+                            );
+                        });
+                    });
+
+                ui.add_space(12.0);
+
+                // 4. Threads Section Header
                 let q = self.session_filter.to_ascii_lowercase();
                 let filtered: Vec<SessionSummary> = self
                     .sessions
@@ -1075,22 +1340,50 @@ impl SerikaApp {
                     .cloned()
                     .collect();
 
-                let footer_reserve = 88.0;
-                let list_h = (ui.available_height() - footer_reserve).max(100.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("THREADS")
+                            .size(10.5)
+                            .strong()
+                            .color(TEXT_DIM),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(filtered.len().to_string())
+                                .monospace()
+                                .size(10.5)
+                                .color(TEXT_DIM),
+                        );
+                    });
+                });
+                ui.add_space(4.0);
+
+                let footer_reserve = 96.0;
+                let list_h = (ui.available_height() - footer_reserve).max(90.0);
                 ScrollArea::vertical()
                     .id_salt("t3_thread_scroll")
                     .max_height(list_h)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if filtered.is_empty() {
-                            ui.add_space(14.0);
-                            ui.label(
-                                RichText::new(
-                                    "No threads yet. Start typing in the composer to begin.",
-                                )
-                                .size(11.5)
-                                .color(TEXT_DIM),
-                            );
+                            egui::Frame::NONE
+                                .fill(BG_CARD)
+                                .corner_radius(CornerRadius::same(8))
+                                .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
+                                .inner_margin(Margin::symmetric(10, 12))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new("No threads in this workspace yet.")
+                                            .size(12.0)
+                                            .color(TEXT_MUTED),
+                                    );
+                                    ui.add_space(2.0);
+                                    ui.label(
+                                        RichText::new("Send a prompt or pick a starter card to begin.")
+                                            .size(11.0)
+                                            .color(TEXT_DIM),
+                                    );
+                                });
                         }
                         let mut to_select = None;
                         let mut to_delete = None;
@@ -1104,6 +1397,7 @@ impl SerikaApp {
                             if row_resp.1 {
                                 to_delete = Some(item.id.clone());
                             }
+                            ui.add_space(2.0);
                         }
                         if let Some(id) = to_select {
                             self.select_session(&id);
@@ -1119,9 +1413,14 @@ impl SerikaApp {
                         }
 
                         if self.recent_projects.len() > 1 {
-                            ui.add_space(16.0);
-                            ui.label(RichText::new("Recent").size(11.0).color(TEXT_DIM));
-                            ui.add_space(2.0);
+                            ui.add_space(12.0);
+                            ui.label(
+                                RichText::new("RECENT WORKSPACES")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(TEXT_DIM),
+                            );
+                            ui.add_space(4.0);
                             let mut switch_to = None;
                             for rp in &self.recent_projects {
                                 if rp == &self.project {
@@ -1131,14 +1430,7 @@ impl SerikaApp {
                                     .file_name()
                                     .and_then(|n| n.to_str())
                                     .unwrap_or("project");
-                                if ui
-                                    .add(
-                                        egui::Button::new(
-                                            RichText::new(name).size(11.5).color(TEXT_MUTED),
-                                        )
-                                        .fill(Color32::TRANSPARENT)
-                                        .frame(false),
-                                    )
+                                if pill_icon_button(ui, Icon::Folder, name, false)
                                     .on_hover_text(rp.display().to_string())
                                     .clicked()
                                 {
@@ -1151,24 +1443,25 @@ impl SerikaApp {
                         }
                     });
 
-                // 5. Sidebar Footer (Provider Pill + Quick Actions)
+                // 5. Sidebar Footer (Live Provider Status Card + Quick Actions)
                 ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 12.0;
-                        if ui
-                            .add(egui::Button::new(RichText::new("Account").size(12.0).color(TEXT_MUTED)).frame(false))
-                            .clicked()
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        if pill_icon_button(ui, Icon::Key, "Providers", self.show_providers).clicked()
                         {
                             self.show_providers = !self.show_providers;
                         }
-                        if ui
-                            .add(egui::Button::new(RichText::new("Settings").size(12.0).color(TEXT_MUTED)).frame(false))
-                            .clicked()
+                        if pill_icon_button(ui, Icon::Sliders, "Settings", self.show_settings).clicked()
                         {
                             self.show_settings = !self.show_settings;
                         }
+                        if pill_icon_button(ui, Icon::Search, "Ctrl+K", self.show_palette).clicked()
+                        {
+                            self.show_palette = !self.show_palette;
+                        }
                     });
                     ui.add_space(6.0);
+
                     let active_provider = ProviderKind::from_model_id(&self.selected_model);
                     let provider_ready = match active_provider {
                         ProviderKind::Local => true,
@@ -1189,12 +1482,49 @@ impl SerikaApp {
                             .is_some(),
                         ProviderKind::Serika => self.session.is_some(),
                     };
-                    let who = if provider_ready {
-                        active_provider.label().to_string()
-                    } else {
-                        format!("{} · sign in", active_provider.label())
+                    let dot_col = if provider_ready { EMERALD } else { AMBER };
+                    let rep = &self.discovery_report;
+                    let total_api = rep.openai_count + rep.anthropic_count + rep.gemini_count;
+
+                    let short_provider = match active_provider {
+                        ProviderKind::Local => "Local Workspace",
+                        ProviderKind::OpenAi => "OpenAI API",
+                        ProviderKind::Anthropic => "Claude API",
+                        ProviderKind::Gemini => "Gemini API",
+                        ProviderKind::Serika => "Serika Cloud",
                     };
-                    ui.label(RichText::new(who).size(11.5).color(TEXT_DIM));
+
+                    egui::Frame::NONE
+                        .fill(BG_CARD)
+                        .corner_radius(CornerRadius::same(8))
+                        .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                        .inner_margin(Margin::symmetric(10, 7))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let (dr, _) =
+                                    ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                                ui.painter().circle_filled(dr.center(), 3.5, dot_col);
+                                ui.label(
+                                    RichText::new(short_provider)
+                                        .size(11.5)
+                                        .strong()
+                                        .color(TEXT_PRIMARY),
+                                );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} local · {} API",
+                                            rep.local_count.max(1),
+                                            total_api
+                                        ))
+                                        .monospace()
+                                        .size(10.5)
+                                        .color(TEXT_DIM),
+                                    );
+                                });
+                            });
+                        });
                 });
             });
     }
@@ -1203,17 +1533,15 @@ impl SerikaApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(BG_DEEP))
             .show(root_ui, |ui| {
-                let is_draft = self.messages.is_empty() && !self.running;
-                if !is_draft {
-                    self.draw_top_header(ui);
-                }
+                self.draw_top_header(ui);
 
                 if let Some(err) = &self.startup_error {
-                    ui.add_space(12.0);
+                    ui.add_space(16.0);
                     ui.colored_label(ROSE, format!("Runtime error: {err}"));
                     return;
                 }
 
+                let is_draft = self.messages.is_empty() && !self.running;
                 if is_draft {
                     self.draw_t3_draft_hero(ui);
                 } else {
@@ -1224,157 +1552,259 @@ impl SerikaApp {
 
     fn draw_top_header(&mut self, ui: &mut egui::Ui) {
         egui::Frame::NONE
-            .fill(BG_DEEP)
-            .inner_margin(Margin::symmetric(28, 10))
+            .fill(BG_SIDEBAR)
+            .inner_margin(Margin::symmetric(20, 9))
+            .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    let (fr, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+                    paint_icon(ui.painter(), fr, Icon::Folder, SERIKA_VIOLET_LIGHT);
                     let proj_name = workspace_display_name(&self.project, &self.core);
-                    ui.label(RichText::new(proj_name).size(12.0).color(TEXT_DIM));
-                    ui.label(RichText::new("/").size(12.0).color(TEXT_DIM));
-                    let thread_title = self
+                    ui.label(
+                        RichText::new(proj_name)
+                            .strong()
+                            .size(12.5)
+                            .color(TEXT_SECONDARY),
+                    );
+                    ui.label(RichText::new("/").size(12.5).color(TEXT_DIM));
+                    let thread_title_raw = self
                         .active_session
                         .as_ref()
                         .and_then(|id| self.sessions.iter().find(|s| &s.id == id))
                         .map(|s| s.title.as_str())
-                        .unwrap_or("New thread");
-                    ui.label(RichText::new(thread_title).size(12.0).color(TEXT_PRIMARY));
-                    if self.git.is_repo && !self.git.entries.is_empty() {
-                        ui.label(
-                            RichText::new(format!("{} changed", self.git.entries.len()))
-                                .size(12.0)
-                                .color(TEXT_DIM),
-                        );
-                    }
+                        .unwrap_or("New Thread");
+                    let thread_title = if thread_title_raw.chars().count() > 28 {
+                        let s: String = thread_title_raw.chars().take(27).collect();
+                        format!("{s}…")
+                    } else {
+                        thread_title_raw.to_string()
+                    };
+                    ui.label(
+                        RichText::new(thread_title)
+                            .strong()
+                            .size(12.5)
+                            .color(TEXT_PRIMARY),
+                    );
+
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.spacing_mut().item_spacing.x = 14.0;
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(if self.show_inspector { "Hide" } else { "Changes" })
-                                        .size(12.0)
-                                        .color(TEXT_MUTED),
-                                )
-                                .frame(false),
-                            )
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let insp_label = if self.diffs.is_empty() {
+                            "Inspector".to_string()
+                        } else {
+                            format!("Inspector ({})", self.diffs.len())
+                        };
+                        if pill_icon_button(ui, Icon::PanelRight, &insp_label, self.show_inspector)
+                            .on_hover_text("Toggle Source Control & Diffs Inspector (Ctrl+B)")
                             .clicked()
                         {
                             self.show_inspector = !self.show_inspector;
                         }
+
+                        if pill_icon_button(ui, Icon::Key, "Models & Keys", self.show_providers)
+                            .clicked()
+                        {
+                            self.show_providers = !self.show_providers;
+                        }
+
+                        // Compact custom-painted Status Pill (never expands width!)
+                        let status_col = if self.running {
+                            SERIKA_VIOLET_LIGHT
+                        } else {
+                            EMERALD
+                        };
+                        draw_status_badge(ui, status_col, &self.status);
                     });
                 });
             });
     }
 
     fn draw_t3_draft_hero(&mut self, ui: &mut egui::Ui) {
-        let avail = ui.available_size();
-        let top_pad = ((avail.y - 180.0) * 0.42).max(24.0);
-        ui.add_space(top_pad);
-        ui.vertical_centered(|ui| {
-            let lane_w = (ui.available_width() - 48.0).clamp(420.0, 720.0);
-            ui.allocate_ui_with_layout(
-                Vec2::new(lane_w, 10.0),
-                Layout::top_down(Align::LEFT),
-                |ui| {
-                    let name = workspace_display_name(&self.project, &self.core);
-                    ui.label(RichText::new(name).size(13.0).color(TEXT_DIM));
-                    ui.add_space(10.0);
-                    self.draw_composer_card(ui, true);
-                },
-            );
-        });
+        ScrollArea::vertical()
+            .id_salt("draft_hero_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let avail_h = ui.available_height();
+                let top_pad = ((avail_h - 500.0) * 0.35).clamp(24.0, 72.0);
+                ui.add_space(top_pad);
+
+                ui.vertical_centered(|ui| {
+                    let lane_w = (ui.available_width() - 48.0).clamp(460.0, 720.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(lane_w, 10.0),
+                        Layout::top_down(Align::LEFT),
+                        |ui| {
+                            // 1. Hero Brand Emblem + Headline
+                            ui.horizontal(|ui| {
+                                let (badge_rect, _) =
+                                    ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
+                                ui.painter()
+                                    .rect_filled(badge_rect, 11.0, SERIKA_VIOLET_SOFT);
+                                ui.painter().rect_stroke(
+                                    badge_rect,
+                                    11.0,
+                                    Stroke::new(1.2, SERIKA_VIOLET),
+                                    StrokeKind::Inside,
+                                );
+                                paint_icon(
+                                    ui.painter(),
+                                    badge_rect.shrink(8.0),
+                                    Icon::SerikaMark,
+                                    SERIKA_VIOLET_LIGHT,
+                                );
+
+                                ui.add_space(6.0);
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 2.0;
+                                    ui.label(
+                                        RichText::new("What should we build or fix?")
+                                            .strong()
+                                            .size(21.0)
+                                            .color(TEXT_PRIMARY),
+                                    );
+                                    ui.label(
+                                        RichText::new(
+                                            "Native Rust agent harness · Zero-API Local Workspace or live OpenAI, Claude & Gemini endpoints",
+                                        )
+                                        .size(12.5)
+                                        .color(TEXT_MUTED),
+                                    );
+                                });
+                            });
+
+                            ui.add_space(14.0);
+                            self.draw_t3_context_strip(ui);
+                            ui.add_space(12.0);
+
+                            // 2. Unified T3 Composer Card
+                            self.draw_composer_card(ui, true);
+
+                            ui.add_space(18.0);
+
+                            // 3. 2x2 Actionable Starter Prompt Grid
+                            ui.label(
+                                RichText::new("QUICK WORKFLOWS")
+                                    .size(10.5)
+                                    .strong()
+                                    .color(TEXT_DIM),
+                            );
+                            ui.add_space(6.0);
+
+                            let col_w = (lane_w - 12.0) * 0.5;
+                            let starters = [
+                                (
+                                    Icon::Sparkle,
+                                    "Architecture Overview",
+                                    "Map crates, entrypoints, and data flow.",
+                                    "Give me a concise architecture overview of this repository, its crates, and key entrypoints.",
+                                ),
+                                (
+                                    Icon::GitBranch,
+                                    "Review Uncommitted Diff",
+                                    "Inspect git status and uncommitted diffs.",
+                                    "Review the current git status and uncommitted diff. Point out any bugs or missing tests.",
+                                ),
+                                (
+                                    Icon::Terminal,
+                                    "Run & Verify Test Suite",
+                                    "Execute workspace tests and fix failures.",
+                                    "Run the test suite in this workspace and verify all unit and integration tests pass.",
+                                ),
+                                (
+                                    Icon::Code,
+                                    "Refactor & Polish Hotspots",
+                                    "Audit error handling and clean up hotspots.",
+                                    "Inspect the codebase for error-handling gaps or performance hotspots and suggest concrete improvements.",
+                                ),
+                            ];
+
+                            let mut chosen_prompt = None;
+                            for pair in starters.chunks(2) {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 12.0;
+                                    for &(icon, title, subtitle, prompt_text) in pair {
+                                        if draw_starter_card(ui, col_w, icon, title, subtitle) {
+                                            chosen_prompt = Some(prompt_text.to_string());
+                                        }
+                                    }
+                                });
+                                ui.add_space(10.0);
+                            }
+
+                            if let Some(p) = chosen_prompt {
+                                self.prompt = p;
+                                self.send_prompt();
+                            }
+                        },
+                    );
+                });
+                ui.add_space(24.0);
+            });
     }
 
-    #[allow(dead_code)]
     fn draw_t3_context_strip(&mut self, ui: &mut egui::Ui) {
         let proj_name = workspace_display_name(&self.project, &self.core);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let (fr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                paint_icon(ui.painter(), fr, Icon::Folder, TEXT_DIM);
-                if ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new(format!("Project: {proj_name}"))
-                                .size(11.0)
-                                .color(TEXT_MUTED),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_text("Click to select a project directory")
-                    .clicked()
-                {
-                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        self.switch_project(folder);
-                    }
+        let active_kind = ProviderKind::from_model_id(&self.selected_model);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            if pill_icon_button(ui, Icon::Folder, &format!("Workspace: {proj_name}"), false)
+                .on_hover_text("Click to switch workspace directory")
+                .clicked()
+            {
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    self.switch_project(folder);
                 }
-            });
+            }
 
-            ui.label(RichText::new("·").size(11.0).color(TEXT_DIM));
+            let git_label = if self.git.is_repo && !self.git.branch.is_empty() {
+                format!("Branch: {}", self.git.branch)
+            } else {
+                "No Git repo".to_string()
+            };
+            if pill_icon_button(ui, Icon::GitBranch, &git_label, false)
+                .on_hover_text("Open Source Control in Inspector")
+                .clicked()
+            {
+                self.show_inspector = true;
+                self.inspector_tab = InspectorTab::Git;
+            }
 
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let (gr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                paint_icon(ui.painter(), gr, Icon::GitBranch, TEXT_DIM);
-                let git_txt = if self.git.is_repo {
-                    format!("Branch: {}", self.git.branch)
-                } else {
-                    "No Git repo (Local folder)".to_string()
-                };
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new(git_txt).size(11.0).color(TEXT_MUTED))
-                            .frame(false),
-                    )
+            if self.git.is_repo
+                && pill_icon_button(ui, Icon::Worktree, "Isolate Worktree", false)
+                    .on_hover_text("Create an isolated git worktree for parallel agent runs")
                     .clicked()
-                {
-                    self.show_inspector = true;
-                    self.inspector_tab = InspectorTab::Git;
-                }
-            });
+            {
+                self.show_inspector = true;
+                self.inspector_tab = InspectorTab::Git;
+            }
 
-            if self.git.is_repo {
-                ui.label(RichText::new("·").size(11.0).color(TEXT_DIM));
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    let (wr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                    paint_icon(ui.painter(), wr, Icon::Worktree, TEXT_DIM);
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Create isolated worktree")
-                                    .size(11.0)
-                                    .color(SERIKA_VIOLET_LIGHT),
-                            )
-                            .frame(false),
-                        )
-                        .on_hover_text("Create an isolated git worktree for parallel agent work")
-                        .clicked()
-                    {
-                        self.show_inspector = true;
-                        self.inspector_tab = InspectorTab::Git;
-                    }
-                });
+            if pill_icon_button(
+                ui,
+                Icon::Sparkle,
+                &format!("Engine: {}", active_kind.label()),
+                true,
+            )
+            .on_hover_text("Configure live /models endpoints & local engines")
+            .clicked()
+            {
+                self.show_providers = true;
             }
         });
     }
 
     fn draw_active_thread_canvas(&mut self, ui: &mut egui::Ui) {
         let avail_h = ui.available_height();
-        let composer_reserve = 148.0;
+        let composer_reserve = 152.0;
         let scroll_h = (avail_h - composer_reserve).max(120.0);
 
         ScrollArea::vertical()
             .id_salt("t3_active_thread_scroll")
             .max_height(scroll_h)
-            .stick_to_bottom(true)
+            .stick_to_bottom(self.running)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(16.0);
                 ui.vertical_centered(|ui| {
-                    let lane_w = ui.available_width().min(720.0);
+                    let lane_w = (ui.available_width() - 40.0).clamp(440.0, 740.0);
                     ui.allocate_ui_with_layout(
                         Vec2::new(lane_w, 10.0),
                         Layout::top_down(Align::LEFT),
@@ -1385,45 +1815,52 @@ impl SerikaApp {
                                 .filter(|msg| !msg.content.starts_with("Tool results:\n"))
                                 .cloned()
                                 .collect();
-                            for msg in turns {
-                                self.draw_turn(ui, &msg);
-                            }
 
-                            if !self.tools.is_empty() {
-                                ui.add_space(2.0);
-                                let mut open_diff_idx = None;
-                                for tool in self.tools.iter().rev().take(6).rev() {
-                                    let diff_idx =
-                                        self.diffs.iter().position(|(_, d)| !d.is_empty());
-                                    if draw_tool_pill(ui, tool, diff_idx.is_some()) {
-                                        open_diff_idx = diff_idx;
-                                    }
-                                    ui.add_space(4.0);
+                            let mut rendered_tools = false;
+                            for msg in &turns {
+                                self.draw_turn(ui, msg);
+                                if msg.role == "user" && !rendered_tools && !self.tools.is_empty() {
+                                    rendered_tools = true;
+                                    ui.add_space(8.0);
+                                    self.draw_tool_timeline(ui);
                                 }
-                                if let Some(idx) = open_diff_idx {
-                                    self.selected_diff = idx;
-                                    self.show_inspector = true;
-                                    self.inspector_tab = InspectorTab::Diffs;
-                                }
-                                ui.add_space(6.0);
+                            }
+                            if !rendered_tools && !self.tools.is_empty() {
+                                ui.add_space(8.0);
+                                self.draw_tool_timeline(ui);
                             }
 
                             if !self.streaming_reasoning.is_empty() {
-                                ui.label(RichText::new("Thinking").size(12.0).color(TEXT_DIM));
-                                ui.label(
-                                    RichText::new(&self.streaming_reasoning)
-                                        .size(13.0)
-                                        .color(TEXT_MUTED),
-                                );
-                                ui.add_space(12.0);
+                                ui.add_space(8.0);
+                                egui::Frame::NONE
+                                    .fill(BG_CARD)
+                                    .corner_radius(CornerRadius::same(8))
+                                    .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
+                                    .inner_margin(Margin::symmetric(12, 8))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new("REASONING")
+                                                .size(10.0)
+                                                .strong()
+                                                .color(SERIKA_VIOLET_LIGHT),
+                                        );
+                                        ui.label(
+                                            RichText::new(&self.streaming_reasoning)
+                                                .size(12.5)
+                                                .color(TEXT_MUTED),
+                                        );
+                                    });
                             }
 
                             if !self.streaming_reply.is_empty() {
-                                ui.label(
-                                    RichText::new(&self.streaming_reply)
-                                        .size(14.5)
-                                        .color(TEXT_PRIMARY),
-                                );
+                                ui.add_space(8.0);
+                                let temp_msg = StoredMessage {
+                                    id: -1,
+                                    role: "assistant".into(),
+                                    content: self.streaming_reply.clone(),
+                                    created_at: 0,
+                                };
+                                self.draw_turn(ui, &temp_msg);
                             }
                         },
                     );
@@ -1432,31 +1869,184 @@ impl SerikaApp {
             });
 
         // Bottom Docked Composer Lane
-        ui.vertical_centered(|ui| {
-            let lane_w = ui.available_width().min(720.0);
-            ui.allocate_ui_with_layout(
-                Vec2::new(lane_w, 10.0),
-                Layout::top_down(Align::LEFT),
-                |ui| {
-                    self.draw_composer_card(ui, false);
-                },
-            );
-        });
+        egui::Frame::NONE
+            .fill(BG_DEEP)
+            .inner_margin(Margin::symmetric(0, 6))
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    let lane_w = (ui.available_width() - 40.0).clamp(440.0, 740.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(lane_w, 10.0),
+                        Layout::top_down(Align::LEFT),
+                        |ui| {
+                            self.draw_composer_card(ui, false);
+                        },
+                    );
+                });
+            });
+    }
+
+    fn draw_tool_timeline(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::NONE
+            .fill(BG_SIDEBAR)
+            .corner_radius(CornerRadius::same(9))
+            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+            .inner_margin(Margin::symmetric(12, 9))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let (tr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    paint_icon(ui.painter(), tr, Icon::Terminal, SERIKA_VIOLET_LIGHT);
+                    ui.label(
+                        RichText::new(format!("AGENT ACTIONS ({})", self.tools.len()))
+                            .size(10.5)
+                            .strong()
+                            .color(TEXT_MUTED),
+                    );
+                });
+                ui.add_space(4.0);
+                let mut open_diff_idx = None;
+                for tool in self.tools.iter().rev().take(6).rev() {
+                    let diff_idx = self.diffs.iter().position(|(_, d)| !d.is_empty());
+                    if draw_tool_pill(ui, tool, diff_idx.is_some()) {
+                        open_diff_idx = diff_idx;
+                    }
+                    ui.add_space(3.0);
+                }
+                if let Some(idx) = open_diff_idx {
+                    self.selected_diff = idx;
+                    self.show_inspector = true;
+                    self.inspector_tab = InspectorTab::Diffs;
+                }
+            });
+    }
+
+    fn draw_turn(&mut self, ui: &mut egui::Ui, msg: &StoredMessage) {
+        ui.add_space(10.0);
+        if msg.role == "user" {
+            let confirming = self.rewind_confirm == Some(msg.id);
+            egui::Frame::NONE
+                .fill(BG_CARD)
+                .corner_radius(CornerRadius::same(10))
+                .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                .inner_margin(Margin::symmetric(14, 11))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        egui::Frame::NONE
+                            .fill(SERIKA_VIOLET_SOFT)
+                            .corner_radius(CornerRadius::same(4))
+                            .inner_margin(Margin::symmetric(6, 2))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new("YOU")
+                                        .size(10.0)
+                                        .strong()
+                                        .color(SERIKA_VIOLET_LIGHT),
+                                );
+                            });
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if !self.running
+                                && msg.id > 0
+                                && pill_icon_button(ui, Icon::Rewind, "Rewind", confirming)
+                                    .on_hover_text(
+                                        "Restore files to before this message and rewind the thread",
+                                    )
+                                    .clicked()
+                            {
+                                self.rewind_confirm = Some(msg.id);
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(&msg.content).size(14.0).color(TEXT_PRIMARY));
+                    if confirming {
+                        ui.add_space(8.0);
+                        egui::Frame::NONE
+                            .fill(BG_ELEVATED)
+                            .corner_radius(CornerRadius::same(7))
+                            .stroke(Stroke::new(1.0, AMBER))
+                            .inner_margin(Margin::symmetric(10, 8))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(
+                                            "Restore edited files to before this turn and rewind?",
+                                        )
+                                        .size(12.0)
+                                        .color(TEXT_PRIMARY),
+                                    );
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if ui.button("Cancel").clicked() {
+                                            self.rewind_confirm = None;
+                                        }
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    RichText::new("Confirm Rewind")
+                                                        .size(11.5)
+                                                        .strong()
+                                                        .color(Color32::WHITE),
+                                                )
+                                                .fill(SERIKA_VIOLET)
+                                                .corner_radius(CornerRadius::same(6)),
+                                            )
+                                            .clicked()
+                                        {
+                                            let id = msg.id;
+                                            self.apply_rewind(id);
+                                        }
+                                    });
+                                });
+                            });
+                    }
+                });
+        } else {
+            egui::Frame::NONE
+                .fill(BG_SIDEBAR)
+                .corner_radius(CornerRadius::same(10))
+                .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
+                .inner_margin(Margin::symmetric(14, 12))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let (ar, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                        ui.painter().rect_filled(ar, 5.0, SERIKA_VIOLET_SOFT);
+                        paint_icon(
+                            ui.painter(),
+                            ar.shrink(3.0),
+                            Icon::SerikaMark,
+                            SERIKA_VIOLET_LIGHT,
+                        );
+                        ui.label(
+                            RichText::new("Serika Code")
+                                .strong()
+                                .size(12.5)
+                                .color(TEXT_PRIMARY),
+                        );
+                        ui.label(
+                            RichText::new(&self.selected_model)
+                                .monospace()
+                                .size(11.0)
+                                .color(TEXT_DIM),
+                        );
+                    });
+                    ui.add_space(8.0);
+                    draw_rich_markdown(ui, &msg.content);
+                });
+        }
     }
 
     fn draw_composer_card(&mut self, ui: &mut egui::Ui, is_hero: bool) {
         let border_col = if self.running {
             SERIKA_VIOLET
         } else if is_hero {
-            BORDER_STRONG
+            SERIKA_VIOLET.gamma_multiply(0.55)
         } else {
-            BORDER_SUBTLE
+            BORDER_STRONG
         };
 
         egui::Frame::NONE
             .fill(BG_CARD)
             .corner_radius(CornerRadius::same(12))
-            .stroke(Stroke::new(1.0, border_col))
+            .stroke(Stroke::new(1.2, border_col))
             .inner_margin(Margin::symmetric(14, 12))
             .show(ui, |ui| {
                 let rows = if is_hero { 3 } else { 2 };
@@ -1465,8 +2055,10 @@ impl SerikaApp {
                         .desired_rows(rows)
                         .desired_width(f32::INFINITY)
                         .frame(egui::Frame::NONE)
-                        .font(FontId::proportional(15.0))
-                        .hint_text("Ask Serika to change this project"),
+                        .font(FontId::proportional(14.0))
+                        .hint_text(
+                            "Ask Serika to inspect files, implement a feature, run tests, or review diffs… (Ctrl+Enter to send)",
+                        ),
                 );
                 if resp.has_focus()
                     && ui.input(|i| i.key_pressed(Key::Enter) && i.modifiers.command)
@@ -1474,13 +2066,31 @@ impl SerikaApp {
                     self.send_prompt();
                 }
 
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(6.0);
+                ui.add_space(8.0);
+                let sep_rect = ui.allocate_space(Vec2::new(ui.available_width(), 1.0)).1;
+                ui.painter().rect_filled(sep_rect, 0.0, BORDER_HAIRLINE);
+                ui.add_space(8.0);
 
                 // T3 Composer Footer Controls
                 ui.horizontal(|ui| {
-                    // 1. Live Provider & Model Selector (Populated from API /models & Local Discovery)
+                    ui.spacing_mut().item_spacing.x = 8.0;
+
+                    // 1. Build / Plan Mode Pill
+                    let (mode_icon, mode_label, mode_active) = match self.composer_mode {
+                        ComposerMode::Build => (Icon::Sparkle, "Build", true),
+                        ComposerMode::Plan => (Icon::Code, "Plan", false),
+                    };
+                    if pill_icon_button(ui, mode_icon, mode_label, mode_active)
+                        .on_hover_text("Toggle between Build (read/write) and Plan (read-only architecture plan)")
+                        .clicked()
+                    {
+                        self.composer_mode = match self.composer_mode {
+                            ComposerMode::Build => ComposerMode::Plan,
+                            ComposerMode::Plan => ComposerMode::Build,
+                        };
+                    }
+
+                    // 2. Live Provider & Model Selector
                     let current_kind = ProviderKind::from_model_id(&self.selected_model);
                     let display_model = self
                         .provider_models
@@ -1500,7 +2110,7 @@ impl SerikaApp {
                     } else {
                         "dock_model_combo"
                     })
-                    .width(235.0)
+                    .width(220.0)
                     .selected_text(RichText::new(display_model).size(11.5).color(TEXT_PRIMARY))
                     .show_ui(ui, |ui| {
                         ui.set_min_width(340.0);
@@ -1537,7 +2147,6 @@ impl SerikaApp {
                             ui.separator();
                         }
 
-                        // Group 1: Local Workspace & Local Models (Ollama /api/tags, Local Server /v1/models, Local CLIs)
                         ui.label(
                             RichText::new("LOCAL WORKSPACE & LOCAL ENGINES (NO API KEY)")
                                 .size(10.0)
@@ -1567,7 +2176,6 @@ impl SerikaApp {
 
                         ui.separator();
 
-                        // Group 2: Live Cloud API Models (fetched from /v1/models & /v1beta/models)
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new("LIVE API ENDPOINTS (CLAUDE · OPENAI · GEMINI)")
@@ -1575,10 +2183,7 @@ impl SerikaApp {
                                     .strong()
                                     .color(SERIKA_VIOLET_LIGHT),
                             );
-                            if ui
-                                .small_button("Configure Keys…")
-                                .clicked()
-                            {
+                            if ui.small_button("Configure Keys…").clicked() {
                                 open_providers_modal = true;
                             }
                         });
@@ -1597,7 +2202,7 @@ impl SerikaApp {
                         if api_models.is_empty() {
                             ui.label(
                                 RichText::new(
-                                    "Add an OpenAI, Claude, or Gemini key in Providers & Keys to list live /models.",
+                                    "Add an OpenAI, Claude, or Gemini key in Models & Keys to query live /models.",
                                 )
                                 .size(11.0)
                                 .color(TEXT_DIM),
@@ -1647,8 +2252,7 @@ impl SerikaApp {
                         self.show_providers = true;
                     }
 
-                    // 1b. Local Workspace / Local CLI Model Selector Pill!
-                    // When in Local Workspace or Local CLI mode, let the user pick which model the local workspace/CLI uses!
+                    // 2b. Local Workspace / CLI Sub-Model Selector Pill
                     if current_kind == ProviderKind::Local {
                         let local_sub_label = if self.local_model_input.trim().is_empty() {
                             "Model: Auto".to_string()
@@ -1661,7 +2265,7 @@ impl SerikaApp {
                         } else {
                             "dock_local_submodel_combo"
                         })
-                        .width(152.0)
+                        .width(136.0)
                         .selected_text(
                             RichText::new(local_sub_label)
                                 .size(11.0)
@@ -1697,7 +2301,6 @@ impl SerikaApp {
                                 save_local_sub = true;
                             }
 
-                            // List all discovered Ollama, Local Server & OpenCode models so user can bind them to Local Workspace!
                             for m in self.provider_models.iter().filter(|m| {
                                 m.id.starts_with("local/ollama:")
                                     || m.id.starts_with("local/server:")
@@ -1726,36 +2329,13 @@ impl SerikaApp {
                         }
                     }
 
-                    // 2. Build / Plan Mode Toggle Pill (like T3 Code)
-                    let (mode_label, mode_col) = match self.composer_mode {
-                        ComposerMode::Build => ("Build", SERIKA_VIOLET_LIGHT),
-                        ComposerMode::Plan => ("Plan", AMBER),
-                    };
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new(mode_label).size(11.5).strong().color(mode_col),
-                            )
-                            .fill(BG_INPUT)
-                            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-                            .corner_radius(CornerRadius::same(7)),
-                        )
-                        .on_hover_text("Toggle between Build (execute edits) and Plan (read-only architecture plan)")
-                        .clicked()
-                    {
-                        self.composer_mode = match self.composer_mode {
-                            ComposerMode::Build => ComposerMode::Plan,
-                            ComposerMode::Plan => ComposerMode::Build,
-                        };
-                    }
-
                     // 3. Permission Selector Pill
                     egui::ComboBox::from_id_salt(if is_hero {
                         "hero_perm_combo"
                     } else {
                         "dock_perm_combo"
                     })
-                    .width(102.0)
+                    .width(96.0)
                     .selected_text(
                         RichText::new(self.permission.as_str())
                             .size(11.5)
@@ -1772,34 +2352,24 @@ impl SerikaApp {
                         }
                     });
 
-                    // 4. Right-aligned Send / Stop Button
+                    // 4. Right-aligned Vector Send / Stop Button (Zero missing glyphs!)
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if self.running {
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new("Stop").size(12.5).color(TEXT_PRIMARY))
-                                        .fill(BG_INPUT)
-                                        .corner_radius(CornerRadius::same(8)),
-                                )
-                                .clicked()
-                            {
+                            if primary_action_button(ui, Icon::Stop, "Stop", ROSE, true).clicked() {
                                 if let Some(cancel) = &self.cancel {
                                     cancel.cancel();
                                 }
                             }
                         } else {
-                            let can_send = !self.prompt.trim().is_empty();
-                            let fill = if can_send { TEXT_PRIMARY } else { BG_INPUT };
-                            let ink = if can_send { BG_DEEP } else { TEXT_DIM };
-                            if ui
-                                .add_sized(
-                                    [28.0, 28.0],
-                                    egui::Button::new(RichText::new("↑").size(16.0).color(ink))
-                                        .fill(fill)
-                                        .corner_radius(CornerRadius::same(8)),
-                                )
-                                .clicked()
-                                && can_send
+                            let can_send = !self.prompt.trim().is_empty() || is_hero;
+                            if primary_action_button(
+                                ui,
+                                Icon::Send,
+                                "Send",
+                                SERIKA_VIOLET,
+                                can_send,
+                            )
+                            .clicked()
                             {
                                 self.send_prompt();
                             }
@@ -1812,30 +2382,24 @@ impl SerikaApp {
     fn draw_inspector(&mut self, root_ui: &mut egui::Ui) {
         egui::Panel::right("t3_inspector")
             .resizable(true)
-            .default_size(340.0)
-            .size_range(280.0..=520.0)
+            .default_size(368.0)
+            .size_range(290.0..=540.0)
             .frame(
                 egui::Frame::NONE
                     .fill(BG_SIDEBAR)
                     .inner_margin(Margin::same(12))
-                    .stroke(Stroke::new(1.0, BORDER_SUBTLE)),
+                    .stroke(Stroke::new(1.0, BORDER_HAIRLINE)),
             )
             .show(root_ui, |ui| {
                 ui.horizontal(|ui| {
-                    for (tab, label) in [
-                        (InspectorTab::Git, "Source Control"),
-                        (InspectorTab::Diffs, "Diffs"),
-                        (InspectorTab::Activity, "Activity"),
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    for (tab, icon, label) in [
+                        (InspectorTab::Git, Icon::GitBranch, "Source Control"),
+                        (InspectorTab::Diffs, Icon::Code, "Diffs"),
+                        (InspectorTab::Activity, Icon::Terminal, "Activity"),
                     ] {
                         let active = self.inspector_tab == tab;
-                        let col = if active { TEXT_PRIMARY } else { TEXT_DIM };
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new(label).size(12.5).color(col))
-                                    .frame(false),
-                            )
-                            .clicked()
-                        {
+                        if pill_icon_button(ui, icon, label, active).clicked() {
                             self.inspector_tab = tab;
                         }
                     }
@@ -1847,9 +2411,10 @@ impl SerikaApp {
                     });
                 });
 
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(6.0);
+                ui.add_space(10.0);
+                let sep = ui.allocate_space(Vec2::new(ui.available_width(), 1.0)).1;
+                ui.painter().rect_filled(sep, 0.0, BORDER_HAIRLINE);
+                ui.add_space(10.0);
 
                 match self.inspector_tab {
                     InspectorTab::Git => self.draw_git_tab(ui),
@@ -1877,7 +2442,7 @@ impl SerikaApp {
             let (gr, _) = ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
             paint_icon(ui.painter(), gr, Icon::GitBranch, SERIKA_VIOLET_LIGHT);
             egui::ComboBox::from_id_salt("git_branch_combo")
-                .width(150.0)
+                .width(175.0)
                 .selected_text(
                     RichText::new(&self.git.branch)
                         .size(12.0)
@@ -1909,32 +2474,23 @@ impl SerikaApp {
             }
         });
 
-        ui.add_space(8.0);
+        ui.add_space(10.0);
 
         // Commit Box
         egui::Frame::NONE
             .fill(BG_CARD)
-            .corner_radius(CornerRadius::same(8))
+            .corner_radius(CornerRadius::same(9))
             .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-            .inner_margin(Margin::same(8))
+            .inner_margin(Margin::same(10))
             .show(ui, |ui| {
                 ui.add(
                     TextEdit::singleline(&mut self.commit_message)
                         .hint_text("Commit message…")
                         .desired_width(f32::INFINITY),
                 );
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Stage All").size(11.0).color(TEXT_PRIMARY),
-                            )
-                            .fill(BG_INPUT)
-                            .corner_radius(CornerRadius::same(6)),
-                        )
-                        .clicked()
-                    {
+                    if pill_icon_button(ui, Icon::Plus, "Stage All", false).clicked() {
                         let proj = self.project.clone();
                         let tx = self.tx.clone();
                         self.tokio.spawn(async move {
@@ -1945,18 +2501,14 @@ impl SerikaApp {
                             let _ = tx.send(UiNotice::GitActionDone(res));
                         });
                     }
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Commit")
-                                    .size(11.0)
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            )
-                            .fill(SERIKA_VIOLET)
-                            .corner_radius(CornerRadius::same(6)),
-                        )
-                        .clicked()
+                    if primary_action_button(
+                        ui,
+                        Icon::Check,
+                        "Commit",
+                        SERIKA_VIOLET,
+                        !self.commit_message.trim().is_empty(),
+                    )
+                    .clicked()
                         && !self.commit_message.trim().is_empty()
                     {
                         let proj = self.project.clone();
@@ -1973,132 +2525,206 @@ impl SerikaApp {
                 });
             });
 
-        ui.add_space(10.0);
+        ui.add_space(12.0);
         ui.label(
             RichText::new(format!("WORKING TREE ({})", self.git.entries.len()))
                 .size(10.5)
                 .strong()
                 .color(TEXT_DIM),
         );
-        ui.add_space(4.0);
+        ui.add_space(6.0);
 
         ScrollArea::vertical()
             .id_salt("git_entries_scroll")
-            .max_height(240.0)
+            .max_height(260.0)
             .show(ui, |ui| {
                 if self.git.entries.is_empty() {
-                    ui.label(RichText::new("Working tree is clean.").size(11.5).color(EMERALD));
+                    egui::Frame::NONE
+                        .fill(EMERALD_SOFT)
+                        .corner_radius(CornerRadius::same(7))
+                        .stroke(Stroke::new(1.0, EMERALD.gamma_multiply(0.45)))
+                        .inner_margin(Margin::symmetric(10, 8))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let (cr, _) =
+                                    ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                                paint_icon(ui.painter(), cr, Icon::Check, EMERALD);
+                                ui.label(
+                                    RichText::new("Working tree is clean.")
+                                        .size(11.5)
+                                        .color(EMERALD),
+                                );
+                            });
+                        });
                 }
                 let entries = self.git.entries.clone();
                 for entry in entries {
-                    ui.horizontal(|ui| {
-                        let col = if entry.staged { EMERALD } else { AMBER };
-                        ui.label(
-                            RichText::new(entry.badge())
-                                .monospace()
-                                .size(11.0)
-                                .strong()
-                                .color(col),
-                        );
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(&entry.path).size(11.5).color(TEXT_PRIMARY),
-                                )
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
-                            let proj = self.project.clone();
-                            let path = entry.path.clone();
-                            let staged = entry.staged;
-                            let tx = self.tx.clone();
-                            self.tokio.spawn(async move {
-                                if let Ok(d) = gitinfo::file_diff(&proj, &path, staged).await {
-                                    let _ = tx.send(UiNotice::DiffLoaded((path, d)));
+                    egui::Frame::NONE
+                        .fill(BG_CARD)
+                        .corner_radius(CornerRadius::same(6))
+                        .inner_margin(Margin::symmetric(8, 5))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let col = if entry.staged { EMERALD } else { AMBER };
+                                ui.label(
+                                    RichText::new(format!("[{}]", entry.badge()))
+                                        .monospace()
+                                        .size(11.0)
+                                        .strong()
+                                        .color(col),
+                                );
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(&entry.path)
+                                                .monospace()
+                                                .size(11.5)
+                                                .color(TEXT_PRIMARY),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .clicked()
+                                {
+                                    let proj = self.project.clone();
+                                    let path = entry.path.clone();
+                                    let staged = entry.staged;
+                                    let tx = self.tx.clone();
+                                    self.tokio.spawn(async move {
+                                        if let Ok(d) = gitinfo::file_diff(&proj, &path, staged).await
+                                        {
+                                            let _ = tx.send(UiNotice::DiffLoaded((path, d)));
+                                        }
+                                    });
                                 }
                             });
-                        }
-                    });
+                        });
+                    ui.add_space(3.0);
                 }
             });
 
-        ui.add_space(10.0);
-        ui.collapsing(
-            RichText::new(format!("Worktrees ({})", self.git.worktrees.len()))
-                .size(11.5)
-                .color(TEXT_MUTED),
-            |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        TextEdit::singleline(&mut self.worktree_branch_input)
-                            .hint_text("feat/agent-branch")
-                            .desired_width(150.0),
-                    );
-                    if ui.button("Isolate").clicked()
-                        && !self.worktree_branch_input.trim().is_empty()
-                    {
-                        if let Some(core) = &self.core {
-                            let base = core.paths.data_dir.join("worktrees");
-                            let branch = self.worktree_branch_input.trim().to_string();
-                            self.worktree_branch_input.clear();
-                            let proj = self.project.clone();
-                            let tx = self.tx.clone();
-                            self.tokio.spawn(async move {
-                                let res = gitinfo::create_worktree(&proj, &base, &branch)
-                                    .await
-                                    .map_err(|e| e.to_string());
-                                let _ = tx.send(UiNotice::WorktreeCreated(res));
-                            });
-                        }
-                    }
-                });
-            },
+        ui.add_space(12.0);
+        ui.label(
+            RichText::new(format!("ISOLATED WORKTREES ({})", self.git.worktrees.len()))
+                .size(10.5)
+                .strong()
+                .color(TEXT_DIM),
         );
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add(
+                TextEdit::singleline(&mut self.worktree_branch_input)
+                    .hint_text("feat/agent-branch")
+                    .desired_width(175.0),
+            );
+            if pill_icon_button(ui, Icon::Worktree, "Isolate", false).clicked()
+                && !self.worktree_branch_input.trim().is_empty()
+            {
+                if let Some(core) = &self.core {
+                    let base = core.paths.data_dir.join("worktrees");
+                    let branch = self.worktree_branch_input.trim().to_string();
+                    self.worktree_branch_input.clear();
+                    let proj = self.project.clone();
+                    let tx = self.tx.clone();
+                    self.tokio.spawn(async move {
+                        let res = gitinfo::create_worktree(&proj, &base, &branch)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = tx.send(UiNotice::WorktreeCreated(res));
+                    });
+                }
+            }
+        });
     }
 
     fn draw_diffs_tab(&mut self, ui: &mut egui::Ui) {
         if self.diffs.is_empty() {
-            ui.label(
-                RichText::new("No diffs recorded in this thread yet.")
-                    .size(12.0)
-                    .color(TEXT_DIM),
-            );
+            egui::Frame::NONE
+                .fill(BG_CARD)
+                .corner_radius(CornerRadius::same(8))
+                .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
+                .inner_margin(Margin::same(12))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("No turn diffs recorded in this thread yet.")
+                            .size(12.0)
+                            .color(TEXT_MUTED),
+                    );
+                    ui.label(
+                        RichText::new(
+                            "Click any modified file in Source Control or run an edit prompt to inspect line-by-line diffs.",
+                        )
+                        .size(11.0)
+                        .color(TEXT_DIM),
+                    );
+                });
             return;
         }
         ui.horizontal_wrapped(|ui| {
             for (idx, (path, _)) in self.diffs.iter().enumerate() {
                 let active = idx == self.selected_diff;
-                let fill = if active { SERIKA_VIOLET } else { BG_CARD };
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new(path).size(11.0).color(TEXT_PRIMARY))
-                            .fill(fill)
-                            .corner_radius(CornerRadius::same(6)),
-                    )
+                let short = path.rsplit('/').next().unwrap_or(path);
+                if pill_icon_button(ui, Icon::Code, short, active)
+                    .on_hover_text(path)
                     .clicked()
                 {
                     self.selected_diff = idx;
                 }
             }
         });
-        ui.separator();
-        if let Some((_, diff)) = self.diffs.get(self.selected_diff) {
-            ScrollArea::vertical()
-                .id_salt("inspector_diff_scroll")
+        ui.add_space(8.0);
+        if let Some((path, diff)) = self.diffs.get(self.selected_diff) {
+            egui::Frame::NONE
+                .fill(BG_DEEP)
+                .corner_radius(CornerRadius::same(9))
+                .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                .inner_margin(Margin::symmetric(10, 8))
                 .show(ui, |ui| {
-                    for line in diff.lines() {
-                        let color = if line.starts_with('+') {
-                            EMERALD
-                        } else if line.starts_with('-') {
-                            ROSE
-                        } else if line.starts_with("@@") {
-                            SERIKA_VIOLET_LIGHT
-                        } else {
-                            TEXT_MUTED
-                        };
-                        ui.label(RichText::new(line).monospace().size(11.5).color(color));
-                    }
+                    ui.label(
+                        RichText::new(path)
+                            .monospace()
+                            .size(11.0)
+                            .strong()
+                            .color(SERIKA_VIOLET_LIGHT),
+                    );
+                    ui.add_space(6.0);
+                    ScrollArea::vertical()
+                        .id_salt("inspector_diff_scroll")
+                        .show(ui, |ui| {
+                            let mut line_no = 1usize;
+                            for line in diff.lines() {
+                                let (bg, fg) = if line.starts_with('+') && !line.starts_with("+++") {
+                                    (EMERALD_SOFT, EMERALD)
+                                } else if line.starts_with('-') && !line.starts_with("---") {
+                                    (ROSE_SOFT, ROSE)
+                                } else if line.starts_with("@@") {
+                                    (SERIKA_VIOLET_SOFT, SERIKA_VIOLET_LIGHT)
+                                } else {
+                                    (Color32::TRANSPARENT, TEXT_MUTED)
+                                };
+                                egui::Frame::NONE
+                                    .fill(bg)
+                                    .corner_radius(CornerRadius::same(3))
+                                    .inner_margin(Margin::symmetric(6, 2))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(format!("{line_no:>3}"))
+                                                    .monospace()
+                                                    .size(10.5)
+                                                    .color(TEXT_DIM),
+                                            );
+                                            ui.label(
+                                                RichText::new(line)
+                                                    .monospace()
+                                                    .size(11.0)
+                                                    .color(fg),
+                                            );
+                                        });
+                                    });
+                                line_no += 1;
+                            }
+                        });
                 });
         }
     }
@@ -2120,7 +2746,7 @@ impl SerikaApp {
                         .fill(BG_CARD)
                         .corner_radius(CornerRadius::same(8))
                         .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-                        .inner_margin(Margin::same(8))
+                        .inner_margin(Margin::same(10))
                         .show(ui, |ui| {
                             let c = if tool.ok { EMERALD } else { ROSE };
                             ui.label(
@@ -2130,6 +2756,7 @@ impl SerikaApp {
                                     .strong()
                                     .color(c),
                             );
+                            ui.add_space(2.0);
                             ui.label(
                                 RichText::new(&tool.output)
                                     .monospace()
@@ -2153,115 +2780,134 @@ impl SerikaApp {
         let style = ctx.style_of(Theme::Dark);
         egui::Window::new("Providers & Live Model Endpoints")
             .open(&mut open)
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .collapsible(false)
             .resizable(false)
-            .default_width(540.0)
+            .default_width(580.0)
             .frame(
                 egui::Frame::window(&style)
                     .fill(BG_CARD)
-                    .stroke(Stroke::new(1.0, BORDER_STRONG))
+                    .stroke(Stroke::new(1.5, SERIKA_VIOLET))
                     .corner_radius(CornerRadius::same(14))
-                    .inner_margin(Margin::same(16)),
+                    .inner_margin(Margin::same(18)),
             )
             .show(ctx, |ui| {
-                // Top Live Endpoint Discovery Status Bar
-                ui.horizontal(|ui| {
-                    let rep = &self.discovery_report;
-                    ui.label(
-                        RichText::new(format!(
-                            "Discovered — Local: {} · Claude: {} · OpenAI: {} · Gemini: {}",
-                            rep.local_count,
-                            rep.anthropic_count,
-                            rep.openai_count,
-                            rep.gemini_count
-                        ))
-                        .size(11.5)
-                        .strong()
-                        .color(SERIKA_VIOLET_LIGHT),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let btn_label = if self.discovering_models {
-                            "Fetching /models…"
-                        } else {
-                            "Refresh All Endpoints"
-                        };
-                        if ui.button(btn_label).clicked() {
-                            self.refresh_remote();
-                        }
+                egui::Frame::NONE
+                    .fill(SERIKA_VIOLET_SOFT)
+                    .corner_radius(CornerRadius::same(8))
+                    .stroke(Stroke::new(1.0, SERIKA_VIOLET.gamma_multiply(0.5)))
+                    .inner_margin(Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let rep = &self.discovery_report;
+                            let (sr, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                            paint_icon(ui.painter(), sr, Icon::Sparkle, SERIKA_VIOLET_LIGHT);
+                            ui.label(
+                                RichText::new(format!(
+                                    "Live Endpoints — Local: {} · Claude: {} · OpenAI: {} · Gemini: {}",
+                                    rep.local_count.max(1),
+                                    rep.anthropic_count,
+                                    rep.openai_count,
+                                    rep.gemini_count
+                                ))
+                                .size(12.0)
+                                .strong()
+                                .color(TEXT_PRIMARY),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let btn_label = if self.discovering_models {
+                                    "Syncing…"
+                                } else {
+                                    "Refresh All"
+                                };
+                                if pill_icon_button(ui, Icon::Refresh, btn_label, false).clicked() {
+                                    self.refresh_remote();
+                                }
+                            });
+                        });
                     });
-                });
+
                 for err in &self.discovery_report.errors {
                     ui.label(RichText::new(err).size(11.0).color(AMBER));
                 }
 
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(6.0);
+                ui.add_space(10.0);
 
                 ui.label(
-                    RichText::new("1. Local Workspace & Local Model Endpoints (No API Key Required)")
+                    RichText::new("1. Local Workspace & Local Model Endpoints (Zero API Key Required)")
                         .strong()
                         .size(13.0)
                         .color(EMERALD),
                 );
                 ui.label(
                     RichText::new(
-                        "Select a local workspace profile, discovered Ollama / Local Server model, or pass a custom model to your local CLI.",
+                        "Pick a Local Workspace profile, discovered Ollama / Local Server model, or bind a custom model ID.",
                     )
                     .size(11.5)
                     .color(TEXT_MUTED),
                 );
                 ui.add_space(6.0);
 
-                ScrollArea::vertical()
-                    .id_salt("providers_local_models_scroll")
-                    .max_height(135.0)
+                egui::Frame::NONE
+                    .fill(BG_DEEP)
+                    .corner_radius(CornerRadius::same(8))
+                    .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                    .inner_margin(Margin::same(8))
                     .show(ui, |ui| {
-                        for m in self
-                            .provider_models
-                            .iter()
-                            .filter(|m| m.provider.as_deref() == Some("local"))
-                        {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("LOCAL")
-                                        .monospace()
-                                        .size(10.0)
-                                        .strong()
-                                        .color(EMERALD),
-                                );
-                                if ui
-                                    .selectable_label(self.selected_model == m.id, &m.name)
-                                    .clicked()
+                        ScrollArea::vertical()
+                            .id_salt("providers_local_models_scroll")
+                            .max_height(120.0)
+                            .show(ui, |ui| {
+                                for m in self
+                                    .provider_models
+                                    .iter()
+                                    .filter(|m| m.provider.as_deref() == Some("local"))
                                 {
-                                    self.selected_model = m.id.clone();
-                                }
-                                if let Some(desc) = &m.description {
-                                    ui.label(RichText::new(desc).size(10.5).color(TEXT_DIM));
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new("LOCAL")
+                                                .monospace()
+                                                .size(10.0)
+                                                .strong()
+                                                .color(EMERALD),
+                                        );
+                                        if ui
+                                            .selectable_label(self.selected_model == m.id, &m.name)
+                                            .clicked()
+                                        {
+                                            self.selected_model = m.id.clone();
+                                        }
+                                        if let Some(desc) = &m.description {
+                                            ui.label(
+                                                RichText::new(desc).size(10.5).color(TEXT_DIM),
+                                            );
+                                        }
+                                    });
                                 }
                             });
-                        }
                     });
 
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new("Local Workspace / CLI Model:")
                             .size(11.5)
-                            .color(TEXT_MUTED),
+                            .color(TEXT_SECONDARY),
                     );
                     ui.add(
                         TextEdit::singleline(&mut self.local_model_input)
-                            .hint_text("auto, ollama:qwen2.5-coder, server:llama-3.3, sonnet…")
+                            .hint_text("auto, ollama:qwen2.5-coder:32b, server:llama-3.3, sonnet…")
                             .desired_width(f32::INFINITY),
                     );
                 });
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Ollama URL:").size(11.0).color(TEXT_DIM));
                     ui.add(
                         TextEdit::singleline(&mut self.ollama_base_input)
                             .hint_text(DEFAULT_OLLAMA_BASE)
-                            .desired_width(175.0),
+                            .desired_width(185.0),
                     );
                     ui.label(RichText::new("Local Server:").size(11.0).color(TEXT_DIM));
                     ui.add(
@@ -2271,24 +2917,17 @@ impl SerikaApp {
                     );
                 });
 
-                ui.add_space(10.0);
+                ui.add_space(12.0);
                 ui.separator();
                 ui.add_space(8.0);
 
                 ui.label(
-                    RichText::new("2. Optional Cloud APIs (Fetched Live from Provider /models Endpoints)")
+                    RichText::new("2. Optional Cloud APIs (Queried Live from /v1/models & /v1beta/models)")
                         .strong()
                         .size(13.0)
                         .color(SERIKA_VIOLET_LIGHT),
                 );
-                ui.label(
-                    RichText::new(
-                        "No hardcoded model lists: adding an API key queries GET /v1/models or GET /v1beta/models live.",
-                    )
-                    .size(11.5)
-                    .color(TEXT_MUTED),
-                );
-                ui.add_space(8.0);
+                ui.add_space(6.0);
 
                 ui.label(
                     RichText::new(format!(
@@ -2296,7 +2935,7 @@ impl SerikaApp {
                         self.discovery_report.anthropic_count
                     ))
                     .size(11.5)
-                    .color(TEXT_MUTED),
+                    .color(TEXT_SECONDARY),
                 );
                 ui.add(
                     TextEdit::singleline(&mut self.anthropic_key_input)
@@ -2312,7 +2951,7 @@ impl SerikaApp {
                         self.discovery_report.openai_count
                     ))
                     .size(11.5)
-                    .color(TEXT_MUTED),
+                    .color(TEXT_SECONDARY),
                 );
                 ui.add(
                     TextEdit::singleline(&mut self.openai_key_input)
@@ -2328,7 +2967,7 @@ impl SerikaApp {
                         self.discovery_report.gemini_count
                     ))
                     .size(11.5)
-                    .color(TEXT_MUTED),
+                    .color(TEXT_SECONDARY),
                 );
                 ui.add(
                     TextEdit::singleline(&mut self.gemini_key_input)
@@ -2339,77 +2978,18 @@ impl SerikaApp {
 
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Save & Fetch Live /models")
-                                    .size(12.0)
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            )
-                            .fill(SERIKA_VIOLET)
-                            .corner_radius(CornerRadius::same(8)),
-                        )
-                        .clicked()
+                    if primary_action_button(
+                        ui,
+                        Icon::Check,
+                        "Save & Fetch Live /models",
+                        SERIKA_VIOLET,
+                        true,
+                    )
+                    .clicked()
                     {
                         self.save_providers_and_settings();
                     }
                 });
-
-                ui.add_space(10.0);
-                ui.collapsing(
-                    RichText::new("Optional: Serika Cloud Account (/api/chat/models)")
-                        .size(12.0)
-                        .color(TEXT_MUTED),
-                    |ui| {
-                        if let Some(session) = self.session.clone() {
-                            ui.label(format!(
-                                "Signed in as {} ({})",
-                                session.username, session.email
-                            ));
-                            if ui.button("Sign out").clicked() {
-                                if let Some(core) = &self.core {
-                                    let _ = core.secrets.clear();
-                                }
-                                self.session = None;
-                            }
-                        } else {
-                            ui.add(
-                                TextEdit::singleline(&mut self.email_input)
-                                    .hint_text("Email")
-                                    .desired_width(f32::INFINITY),
-                            );
-                            ui.add(
-                                TextEdit::singleline(&mut self.password_input)
-                                    .password(true)
-                                    .hint_text("Password")
-                                    .desired_width(f32::INFINITY),
-                            );
-                            if ui.button("Sign in to Serika Cloud").clicked() {
-                                if let Some(core) = self.core.clone() {
-                                    let email = self.email_input.trim().to_string();
-                                    let password = self.password_input.clone();
-                                    let tx = self.tx.clone();
-                                    self.tokio.spawn(async move {
-                                        let res = core
-                                            .client
-                                            .login_password(&email, &password, None)
-                                            .await
-                                            .map_err(|e| e.to_string());
-                                        let _ = tx.send(UiNotice::LoggedIn(res));
-                                    });
-                                }
-                            }
-                            if !self.auth_notice.is_empty() {
-                                ui.label(
-                                    RichText::new(&self.auth_notice)
-                                        .size(11.0)
-                                        .color(SERIKA_VIOLET_LIGHT),
-                                );
-                            }
-                        }
-                    },
-                );
             });
         self.show_providers = open;
     }
@@ -2422,35 +3002,33 @@ impl SerikaApp {
         let style = ctx.style_of(Theme::Dark);
         egui::Window::new("Settings & System Setup")
             .open(&mut open)
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .collapsible(false)
             .resizable(false)
             .default_width(460.0)
             .frame(
                 egui::Frame::window(&style)
                     .fill(BG_CARD)
-                    .stroke(Stroke::new(1.0, BORDER_STRONG))
+                    .stroke(Stroke::new(1.5, BORDER_STRONG))
                     .corner_radius(CornerRadius::same(14))
-                    .inner_margin(Margin::same(16)),
+                    .inner_margin(Margin::same(18)),
             )
             .show(ctx, |ui| {
                 ui.checkbox(
                     &mut self.auto_approve_session,
                     "Auto-approve file edits and shell commands in this session",
                 );
-                ui.add_space(10.0);
+                ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Re-run System Setup & Shortcuts")
-                                    .size(12.0)
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            )
-                            .fill(SERIKA_VIOLET)
-                            .corner_radius(CornerRadius::same(8)),
-                        )
-                        .clicked()
+                    if primary_action_button(
+                        ui,
+                        Icon::Check,
+                        "Re-run System Setup & Shortcuts",
+                        SERIKA_VIOLET,
+                        true,
+                    )
+                    .clicked()
                     {
                         if let Some(core) = self.core.clone() {
                             let tx = self.tx.clone();
@@ -2466,12 +3044,12 @@ impl SerikaApp {
                             });
                         }
                     }
-                    if ui.button("Check for Updates").clicked() {
+                    if pill_icon_button(ui, Icon::Refresh, "Check Updates", false).clicked() {
                         self.check_updates_async();
                     }
                 });
                 if !self.setup_status.is_empty() {
-                    ui.add_space(6.0);
+                    ui.add_space(8.0);
                     ui.label(
                         RichText::new(&self.setup_status)
                             .monospace()
@@ -2491,16 +3069,17 @@ impl SerikaApp {
         let style = ctx.style_of(Theme::Dark);
         egui::Window::new("Command Palette")
             .open(&mut open)
+            .order(egui::Order::Foreground)
             .collapsible(false)
             .resizable(false)
-            .default_width(440.0)
-            .anchor(egui::Align2::CENTER_TOP, [0.0, 80.0])
+            .default_width(460.0)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 90.0])
             .frame(
                 egui::Frame::window(&style)
                     .fill(BG_CARD)
-                    .stroke(Stroke::new(1.0, SERIKA_VIOLET))
+                    .stroke(Stroke::new(1.5, SERIKA_VIOLET))
                     .corner_radius(CornerRadius::same(12))
-                    .inner_margin(Margin::same(12)),
+                    .inner_margin(Margin::same(14)),
             )
             .show(ctx, |ui| {
                 let resp = ui.add(
@@ -2509,7 +3088,7 @@ impl SerikaApp {
                         .desired_width(f32::INFINITY),
                 );
                 resp.request_focus();
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 let q = self.palette_query.to_ascii_lowercase();
                 for (id, label) in [
                     ("new", "New Thread (Ctrl+N)"),
@@ -2517,9 +3096,9 @@ impl SerikaApp {
                     ("scratch", "Switch to Scratch Workspace"),
                     (
                         "providers",
-                        "Configure Providers & Optional API Keys (OpenAI / Gemini / Claude)",
+                        "Configure Providers & Live /models Endpoints",
                     ),
-                    ("inspector", "Toggle Git & Diffs Inspector (Ctrl+B)"),
+                    ("inspector", "Toggle Source Control & Diffs Inspector (Ctrl+B)"),
                     ("update", "Check for Updates"),
                 ] {
                     if !q.is_empty() && !label.to_ascii_lowercase().contains(&q) {
@@ -2527,7 +3106,7 @@ impl SerikaApp {
                     }
                     if ui
                         .add_sized(
-                            [ui.available_width(), 28.0],
+                            [ui.available_width(), 30.0],
                             egui::Button::new(RichText::new(label).size(12.0).color(TEXT_PRIMARY))
                                 .fill(BG_INPUT)
                                 .corner_radius(CornerRadius::same(6)),
@@ -2568,6 +3147,7 @@ impl SerikaApp {
         let mut choice = None;
         let style = ctx.style_of(Theme::Dark);
         egui::Window::new("Approve Tool Execution")
+            .order(egui::Order::Foreground)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -2594,31 +3174,10 @@ impl SerikaApp {
                 );
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Approve")
-                                    .size(12.0)
-                                    .strong()
-                                    .color(Color32::WHITE),
-                            )
-                            .fill(EMERALD)
-                            .corner_radius(CornerRadius::same(8)),
-                        )
-                        .clicked()
-                    {
+                    if primary_action_button(ui, Icon::Check, "Approve", EMERALD, true).clicked() {
                         choice = Some(true);
                     }
-                    if ui
-                        .add(
-                            egui::Button::new(
-                                RichText::new("Deny").size(12.0).strong().color(Color32::WHITE),
-                            )
-                            .fill(ROSE)
-                            .corner_radius(CornerRadius::same(8)),
-                        )
-                        .clicked()
-                    {
+                    if primary_action_button(ui, Icon::Close, "Deny", ROSE, true).clicked() {
                         choice = Some(false);
                     }
                 });
@@ -2631,13 +3190,547 @@ impl SerikaApp {
             }
         }
     }
+
+    // =========================================================================
+    // Codex-CLI Terminal Showcase Renderer (for `--screenshot <png> cli`)
+    // =========================================================================
+    fn draw_codex_cli_showcase(&mut self, root_ui: &mut egui::Ui) {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(Color32::from_rgb(7, 7, 10)).inner_margin(Margin::same(28)))
+            .show(root_ui, |ui| {
+                egui::Frame::NONE
+                    .fill(BG_DEEP)
+                    .corner_radius(CornerRadius::same(12))
+                    .stroke(Stroke::new(1.2, BORDER_SUBTLE))
+                    .inner_margin(Margin::same(0))
+                    .show(ui, |ui| {
+                        // Terminal Window Titlebar
+                        egui::Frame::NONE
+                            .fill(BG_SIDEBAR)
+                            .corner_radius(CornerRadius {
+                                nw: 12,
+                                ne: 12,
+                                sw: 0,
+                                se: 0,
+                            })
+                            .inner_margin(Margin::symmetric(16, 10))
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    for col in [ROSE, AMBER, EMERALD] {
+                                        let (r, _) =
+                                            ui.allocate_exact_size(Vec2::splat(11.0), Sense::hover());
+                                        ui.painter().circle_filled(r.center(), 5.0, col);
+                                    }
+                                    ui.add_space(10.0);
+                                    let (tr, _) =
+                                        ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover());
+                                    paint_icon(ui.painter(), tr, Icon::Terminal, SERIKA_VIOLET_LIGHT);
+                                    ui.label(
+                                        RichText::new("serika — ~/Documents/Github/SerikaCode (Codex-Style Interactive CLI)")
+                                            .monospace()
+                                            .size(12.0)
+                                            .color(TEXT_MUTED),
+                                    );
+                                });
+                            });
+
+                        let sep = ui.allocate_space(Vec2::new(ui.available_width(), 1.0)).1;
+                        ui.painter().rect_filled(sep, 0.0, BORDER_HAIRLINE);
+
+                        egui::Frame::NONE
+                            .inner_margin(Margin::symmetric(24, 18))
+                            .show(ui, |ui| {
+                                // 1. Codex-style Header Box
+                                egui::Frame::NONE
+                                    .fill(BG_CARD)
+                                    .corner_radius(CornerRadius::same(8))
+                                    .stroke(Stroke::new(1.0, BORDER_STRONG))
+                                    .inner_margin(Margin::symmetric(16, 12))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(640.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(">_")
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(13.5)
+                                                    .color(SERIKA_VIOLET),
+                                            );
+                                            ui.label(
+                                                RichText::new("Serika Code")
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(13.5)
+                                                    .color(TEXT_PRIMARY),
+                                            );
+                                            ui.label(
+                                                RichText::new(format!(
+                                                    "(v{})",
+                                                    serika_runtime::client::VERSION
+                                                ))
+                                                .monospace()
+                                                .size(13.0)
+                                                .color(TEXT_DIM),
+                                            );
+                                        });
+                                        ui.add_space(6.0);
+                                        for (k, v, hint) in [
+                                            ("model:", "local/workspace (ollama:qwen2.5-coder:32b)", "/model to change"),
+                                            ("directory:", "~/Documents/Github/SerikaCode", ""),
+                                            ("approvals:", "standard", "/approvals to change"),
+                                            ("account:", "local workspace (no API key required)", ""),
+                                        ] {
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new(format!("{k:<12}"))
+                                                        .monospace()
+                                                        .size(12.5)
+                                                        .color(TEXT_DIM),
+                                                );
+                                                ui.label(
+                                                    RichText::new(v)
+                                                        .monospace()
+                                                        .size(12.5)
+                                                        .color(TEXT_PRIMARY),
+                                                );
+                                                if !hint.is_empty() {
+                                                    ui.add_space(12.0);
+                                                    ui.label(
+                                                        RichText::new(hint)
+                                                            .monospace()
+                                                            .size(12.0)
+                                                            .color(SERIKA_VIOLET_LIGHT),
+                                                    );
+                                                }
+                                            });
+                                        }
+                                    });
+
+                                ui.add_space(10.0);
+                                ui.label(
+                                    RichText::new("  To get started, describe a task or try one of these commands:")
+                                        .monospace()
+                                        .size(12.0)
+                                        .color(TEXT_DIM),
+                                );
+                                ui.add_space(4.0);
+                                for (cmd, desc) in [
+                                    ("/model", "choose what model or live API endpoint to use"),
+                                    ("/status", "show the current session configuration"),
+                                    ("/diff", "show the git diff, including untracked files"),
+                                    ("/review", "review the current changes and find issues"),
+                                ] {
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(format!("  {cmd:<12}"))
+                                                .monospace()
+                                                .size(12.0)
+                                                .color(SERIKA_VIOLET_LIGHT),
+                                        );
+                                        ui.label(
+                                            RichText::new(desc)
+                                                .monospace()
+                                                .size(12.0)
+                                                .color(TEXT_DIM),
+                                        );
+                                    });
+                                }
+
+                                ui.add_space(12.0);
+
+                                // 2. Highlighted User Prompt Cell (`› ...`)
+                                egui::Frame::NONE
+                                    .fill(BG_ELEVATED)
+                                    .corner_radius(CornerRadius::same(6))
+                                    .inner_margin(Margin::symmetric(12, 7))
+                                    .show(ui, |ui| {
+                                        ui.set_min_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new("›")
+                                                    .monospace()
+                                                    .strong()
+                                                    .size(13.5)
+                                                    .color(SERIKA_VIOLET),
+                                            );
+                                            ui.label(
+                                                RichText::new(
+                                                    "Query live /models endpoints for OpenAI, Claude & Gemini and run workspace tests",
+                                                )
+                                                .monospace()
+                                                .strong()
+                                                .size(13.0)
+                                                .color(TEXT_PRIMARY),
+                                            );
+                                        });
+                                    });
+
+                                ui.add_space(10.0);
+
+                                // 3. Tool Cells (`• Explored`, `• Edited`, `• Ran`)
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("•").monospace().strong().size(13.0).color(EMERALD));
+                                    ui.label(RichText::new("Read").monospace().strong().size(12.5).color(TEXT_PRIMARY));
+                                    ui.label(
+                                        RichText::new("crates/serika-runtime/src/providers.rs")
+                                            .monospace()
+                                            .size(12.5)
+                                            .color(TEXT_MUTED),
+                                    );
+                                });
+                                ui.add_space(4.0);
+
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("•").monospace().strong().size(13.0).color(EMERALD));
+                                    ui.label(RichText::new("Edited").monospace().strong().size(12.5).color(TEXT_PRIMARY));
+                                    ui.label(
+                                        RichText::new("crates/serika-runtime/src/providers.rs")
+                                            .monospace()
+                                            .size(12.5)
+                                            .color(TEXT_PRIMARY),
+                                    );
+                                    ui.label(RichText::new("(+18").monospace().size(12.0).color(EMERALD));
+                                    ui.label(RichText::new("-3)").monospace().size(12.0).color(ROSE));
+                                });
+
+                                for (ln, sign, code, bg, fg) in [
+                                    ("172", " ", "pub async fn discover_all_models(http: &Client, cfg: &Config) -> Report {", Color32::TRANSPARENT, TEXT_DIM),
+                                    ("173", "-", "    let models = builtin_static_models();", ROSE_SOFT, ROSE),
+                                    ("173", "+", "    let (ollama, local_srv, openai, claude, gemini) = tokio::join!(", EMERALD_SOFT, EMERALD),
+                                    ("174", "+", "        fetch_ollama_models(http, cfg), fetch_openai_models(http, cfg),", EMERALD_SOFT, EMERALD),
+                                    ("175", "+", "        fetch_anthropic_models(http, cfg), fetch_gemini_models(http, cfg),", EMERALD_SOFT, EMERALD),
+                                    ("176", "+", "    );", EMERALD_SOFT, EMERALD),
+                                ] {
+                                    egui::Frame::NONE
+                                        .fill(bg)
+                                        .corner_radius(CornerRadius::same(3))
+                                        .inner_margin(Margin::symmetric(8, 1))
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new(format!("  {ln:>4}"))
+                                                        .monospace()
+                                                        .size(11.5)
+                                                        .color(TEXT_DIM),
+                                                );
+                                                ui.label(
+                                                    RichText::new(format!("{sign}{code}"))
+                                                        .monospace()
+                                                        .size(11.5)
+                                                        .color(fg),
+                                                );
+                                            });
+                                        });
+                                }
+
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("•").monospace().strong().size(13.0).color(EMERALD));
+                                    ui.label(RichText::new("Ran").monospace().strong().size(12.5).color(TEXT_PRIMARY));
+                                    ui.label(
+                                        RichText::new("cargo test --workspace")
+                                            .monospace()
+                                            .size(12.5)
+                                            .color(SERIKA_VIOLET_LIGHT),
+                                    );
+                                });
+                                ui.label(
+                                    RichText::new("  └ test result: ok. 41 passed; 0 failed; finished in 1.74s")
+                                        .monospace()
+                                        .size(12.0)
+                                        .color(TEXT_DIM),
+                                );
+
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("•")
+                                            .monospace()
+                                            .strong()
+                                            .size(13.0)
+                                            .color(SERIKA_VIOLET_LIGHT),
+                                    );
+                                    ui.label(
+                                        RichText::new(
+                                            "All provider /models endpoints and Local Workspace sub-models are now queried live.",
+                                        )
+                                        .monospace()
+                                        .size(12.5)
+                                        .color(TEXT_PRIMARY),
+                                    );
+                                });
+
+                                ui.add_space(8.0);
+                                ui.label(
+                                    RichText::new(
+                                        "─────────────────────────────── Worked for 1.7s ───────────────────────────────",
+                                    )
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(TEXT_DIM),
+                                );
+
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("›")
+                                            .monospace()
+                                            .strong()
+                                            .size(14.0)
+                                            .color(SERIKA_VIOLET),
+                                    );
+                                    ui.label(
+                                        RichText::new("Ask Serika a follow-up or run a /command…")
+                                            .monospace()
+                                            .size(12.5)
+                                            .color(TEXT_DIM),
+                                    );
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.label(
+                                            RichText::new("local/workspace · standard · Ctrl+C interrupt")
+                                                .monospace()
+                                                .size(11.5)
+                                                .color(TEXT_DIM),
+                                        );
+                                    });
+                                });
+                            });
+                    });
+            });
+    }
 }
 
 // =============================================================================
 // Helper Components & Theme Setup
 // =============================================================================
 
-/// Prevent starting in `C:\Users\...\AppData\Local\Programs\Serika Code\bin` when launched from a shortcut.
+fn draw_rich_markdown(ui: &mut egui::Ui, content: &str) {
+    let mut in_code = false;
+    let mut code_lang = String::new();
+    let mut code_buf = String::new();
+
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim_start();
+        if let Some(fence_rest) = trimmed.strip_prefix("```") {
+            if in_code {
+                draw_code_block_card(ui, &code_lang, &code_buf);
+                code_buf.clear();
+                code_lang.clear();
+                in_code = false;
+            } else {
+                code_lang = fence_rest.trim().to_string();
+                in_code = true;
+            }
+            continue;
+        }
+        if in_code {
+            if !code_buf.is_empty() {
+                code_buf.push('\n');
+            }
+            code_buf.push_str(raw_line);
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            ui.add_space(4.0);
+            continue;
+        }
+        if let Some(h) = trimmed
+            .strip_prefix("### ")
+            .or_else(|| trimmed.strip_prefix("## "))
+            .or_else(|| trimmed.strip_prefix("# "))
+        {
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(h.replace('`', ""))
+                    .strong()
+                    .size(14.5)
+                    .color(TEXT_PRIMARY),
+            );
+            ui.add_space(2.0);
+            continue;
+        }
+        if let Some(bullet) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new("•")
+                        .strong()
+                        .size(13.5)
+                        .color(SERIKA_VIOLET_LIGHT),
+                );
+                ui.label(
+                    RichText::new(bullet.replace("**", "").replace('`', ""))
+                        .size(13.5)
+                        .color(TEXT_SECONDARY),
+                );
+            });
+            continue;
+        }
+        ui.label(
+            RichText::new(raw_line.replace("**", "").replace('`', ""))
+                .size(13.5)
+                .color(TEXT_SECONDARY),
+        );
+    }
+    if in_code && !code_buf.is_empty() {
+        draw_code_block_card(ui, &code_lang, &code_buf);
+    }
+}
+
+fn draw_code_block_card(ui: &mut egui::Ui, lang: &str, code: &str) {
+    ui.add_space(4.0);
+    egui::Frame::NONE
+        .fill(BG_DEEP)
+        .corner_radius(CornerRadius::same(8))
+        .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+        .inner_margin(Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (cr, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                paint_icon(ui.painter(), cr, Icon::Code, SERIKA_VIOLET_LIGHT);
+                ui.label(
+                    RichText::new(if lang.is_empty() { "code" } else { lang })
+                        .monospace()
+                        .size(11.0)
+                        .strong()
+                        .color(SERIKA_VIOLET_LIGHT),
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.small_button("Copy").clicked() {
+                        ui.ctx().copy_text(code.to_string());
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(code)
+                    .monospace()
+                    .size(12.0)
+                    .color(TEXT_PRIMARY),
+            );
+        });
+    ui.add_space(4.0);
+}
+
+fn draw_starter_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    icon: Icon,
+    title: &str,
+    subtitle: &str,
+) -> bool {
+    let desired = Vec2::new(width, 82.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+    let fill = if resp.hovered() {
+        BG_CARD_HOVER
+    } else {
+        BG_CARD
+    };
+    let stroke_col = if resp.hovered() {
+        SERIKA_VIOLET
+    } else {
+        BORDER_SUBTLE
+    };
+    ui.painter().rect_filled(rect, 10.0, fill);
+    ui.painter().rect_stroke(
+        rect,
+        10.0,
+        Stroke::new(1.0, stroke_col),
+        StrokeKind::Inside,
+    );
+
+    let icon_box = Rect::from_min_size(
+        Pos2::new(rect.left() + 12.0, rect.top() + 12.0),
+        Vec2::splat(24.0),
+    );
+    ui.painter().rect_filled(icon_box, 6.0, SERIKA_VIOLET_SOFT);
+    paint_icon(
+        ui.painter(),
+        icon_box.shrink(4.5),
+        icon,
+        SERIKA_VIOLET_LIGHT,
+    );
+
+    ui.painter().text(
+        Pos2::new(icon_box.right() + 10.0, rect.top() + 14.0),
+        egui::Align2::LEFT_TOP,
+        title,
+        FontId::proportional(13.0),
+        TEXT_PRIMARY,
+    );
+
+    let sub_clipped: String = subtitle.chars().take(54).collect();
+    ui.painter().text(
+        Pos2::new(rect.left() + 12.0, rect.top() + 44.0),
+        egui::Align2::LEFT_TOP,
+        sub_clipped,
+        FontId::proportional(11.5),
+        TEXT_MUTED,
+    );
+
+    let arrow_box = Rect::from_center_size(
+        Pos2::new(rect.right() - 16.0, rect.top() + 24.0),
+        Vec2::splat(12.0),
+    );
+    paint_icon(
+        ui.painter(),
+        arrow_box,
+        Icon::Send,
+        if resp.hovered() {
+            SERIKA_VIOLET_LIGHT
+        } else {
+            TEXT_DIM
+        },
+    );
+
+    resp.clicked()
+}
+
+fn primary_action_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    accent: Color32,
+    enabled: bool,
+) -> egui::Response {
+    let fg = if enabled { Color32::WHITE } else { TEXT_DIM };
+    let galley = ui.painter().layout_no_wrap(
+        label.to_string(),
+        FontId::proportional(12.0),
+        fg,
+    );
+    let desired = Vec2::new(galley.size().x + 36.0, 28.0);
+    let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
+    let fill = if !enabled {
+        BG_ELEVATED
+    } else if resp.hovered() {
+        SERIKA_VIOLET_HOVER
+    } else {
+        accent
+    };
+    ui.painter().rect_filled(rect, 7.0, fill);
+    if !enabled {
+        ui.painter()
+            .rect_stroke(rect, 7.0, Stroke::new(1.0, BORDER_SUBTLE), StrokeKind::Inside);
+    }
+    let ir = Rect::from_center_size(
+        Pos2::new(rect.left() + 13.0, rect.center().y),
+        Vec2::splat(11.0),
+    );
+    paint_icon(ui.painter(), ir, icon, fg);
+    ui.painter().galley(
+        Pos2::new(rect.left() + 24.0, rect.center().y - galley.size().y * 0.5),
+        galley,
+        fg,
+    );
+    resp
+}
+
 fn choose_initial_workspace(core: &Option<Arc<Runtime>>, recents: &[PathBuf]) -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let cwd_str = cwd.to_string_lossy().to_ascii_lowercase();
@@ -2688,8 +3781,31 @@ fn non_empty(s: &str) -> Option<String> {
     }
 }
 
+fn draw_status_badge(ui: &mut egui::Ui, dot_col: Color32, text: &str) {
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        FontId::proportional(11.0),
+        TEXT_MUTED,
+    );
+    let desired = Vec2::new(galley.size().x + 26.0, 23.0);
+    let (rect, _) = ui.allocate_exact_size(desired, Sense::hover());
+    ui.painter().rect_filled(rect, 6.0, BG_CARD);
+    ui.painter()
+        .rect_stroke(rect, 6.0, Stroke::new(1.0, BORDER_HAIRLINE), StrokeKind::Inside);
+    ui.painter().circle_filled(
+        Pos2::new(rect.left() + 10.0, rect.center().y),
+        3.2,
+        dot_col,
+    );
+    ui.painter().galley(
+        Pos2::new(rect.left() + 18.0, rect.center().y - galley.size().y * 0.5),
+        galley,
+        TEXT_MUTED,
+    );
+}
+
 fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip: &str, primary: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(25.0), Sense::click());
     let fill = if primary {
         if resp.hovered() {
             SERIKA_VIOLET_HOVER
@@ -2713,7 +3829,7 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip: &str, primary: bool) -> e
         ui.painter()
             .rect_stroke(rect, 6.0, Stroke::new(1.0, BORDER_SUBTLE), StrokeKind::Inside);
     }
-    paint_icon(ui.painter(), rect.shrink(5.0), icon, fg);
+    paint_icon(ui.painter(), rect.shrink(5.5), icon, fg);
     resp.on_hover_text(tooltip)
 }
 
@@ -2731,43 +3847,23 @@ fn pill_icon_button(
         TEXT_MUTED
     };
     let btn = ui.add(
-        egui::Button::new(RichText::new(format!("    {label}")).size(11.0).color(fg))
+        egui::Button::new(RichText::new(format!("    {label}")).size(11.5).color(fg))
             .fill(fill)
             .stroke(Stroke::new(1.0, stroke_col))
             .corner_radius(CornerRadius::same(6)),
     );
     let ir = Rect::from_center_size(
-        Pos2::new(btn.rect.left() + 11.0, btn.rect.center().y),
+        Pos2::new(btn.rect.left() + 11.5, btn.rect.center().y),
         Vec2::splat(11.0),
     );
     paint_icon(ui.painter(), ir, icon, fg);
     btn
 }
 
-#[allow(dead_code)]
-fn starter_chip(ui: &mut egui::Ui, icon: Icon, label: &str) -> egui::Response {
-    let btn = ui.add(
-        egui::Button::new(
-            RichText::new(format!("     {label}"))
-                .size(11.5)
-                .color(TEXT_MUTED),
-        )
-        .fill(BG_CARD)
-        .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-        .corner_radius(CornerRadius::same(20)),
-    );
-    let ir = Rect::from_center_size(
-        Pos2::new(btn.rect.left() + 13.0, btn.rect.center().y),
-        Vec2::splat(11.0),
-    );
-    paint_icon(ui.painter(), ir, icon, SERIKA_VIOLET_LIGHT);
-    btn
-}
-
 fn draw_thread_row(ui: &mut egui::Ui, item: &SessionSummary, is_active: bool) -> (bool, bool) {
     let mut clicked = false;
     let mut deleted = false;
-    let desired = Vec2::new(ui.available_width(), 34.0);
+    let desired = Vec2::new(ui.available_width(), 36.0);
     let (rect, resp) = ui.allocate_exact_size(desired, Sense::click());
 
     let fill = if is_active {
@@ -2775,30 +3871,49 @@ fn draw_thread_row(ui: &mut egui::Ui, item: &SessionSummary, is_active: bool) ->
     } else if resp.hovered() {
         BG_CARD_HOVER
     } else {
-        Color32::TRANSPARENT
+        BG_CARD
     };
-    ui.painter().rect_filled(rect, 6.0, fill);
+    ui.painter().rect_filled(rect, 7.0, fill);
+    let border_col = if is_active {
+        SERIKA_VIOLET.gamma_multiply(0.75)
+    } else {
+        BORDER_HAIRLINE
+    };
+    ui.painter()
+        .rect_stroke(rect, 7.0, Stroke::new(1.0, border_col), StrokeKind::Inside);
+
+    if is_active {
+        let accent_bar = Rect::from_min_max(
+            Pos2::new(rect.left() + 2.0, rect.top() + 7.0),
+            Pos2::new(rect.left() + 5.0, rect.bottom() - 7.0),
+        );
+        ui.painter().rect_filled(accent_bar, 2.0, SERIKA_VIOLET);
+    }
 
     let title_col = if is_active || resp.hovered() {
         TEXT_PRIMARY
     } else {
-        TEXT_MUTED
+        TEXT_SECONDARY
     };
-    let text_pos = Pos2::new(rect.left() + 8.0, rect.center().y - 7.0);
-    let clipped_title: String = item.title.chars().take(26).collect();
+    let clipped_title = if item.title.chars().count() > 26 {
+        let s: String = item.title.chars().take(25).collect();
+        format!("{s}…")
+    } else {
+        item.title.clone()
+    };
     ui.painter().text(
-        text_pos,
-        egui::Align2::LEFT_TOP,
+        Pos2::new(rect.left() + 11.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
         clipped_title,
-        FontId::proportional(13.0),
+        FontId::proportional(12.5),
         title_col,
     );
     if !resp.hovered() {
         ui.painter().text(
-            Pos2::new(rect.right() - 8.0, rect.center().y),
+            Pos2::new(rect.right() - 9.0, rect.center().y),
             egui::Align2::RIGHT_CENTER,
             short_age(item.updated_at),
-            FontId::proportional(11.0),
+            FontId::monospace(10.5),
             TEXT_DIM,
         );
     }
@@ -2828,22 +3943,50 @@ fn draw_thread_row(ui: &mut egui::Ui, item: &SessionSummary, is_active: bool) ->
 
 fn draw_tool_pill(ui: &mut egui::Ui, tool: &ToolRun, has_diff: bool) -> bool {
     let mut view_diff = false;
-    ui.horizontal(|ui| {
-        let mark = if tool.ok { "ok" } else { "failed" };
-        let col = if tool.ok { TEXT_DIM } else { ROSE };
-        ui.label(
-            RichText::new(format!("{}  {mark}", tool.name))
-                .monospace()
-                .size(12.0)
-                .color(col),
-        );
-        if has_diff && (tool.name.contains("file") || tool.name.contains("patch")) && ui
-            .add(egui::Button::new(RichText::new("diff").size(12.0).color(TEXT_MUTED)).frame(false))
-            .clicked()
-        {
-            view_diff = true;
-        }
-    });
+    egui::Frame::NONE
+        .fill(BG_CARD)
+        .corner_radius(CornerRadius::same(6))
+        .stroke(Stroke::new(1.0, BORDER_HAIRLINE))
+        .inner_margin(Margin::symmetric(9, 5))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let col = if tool.ok { EMERALD } else { ROSE };
+                let (dr, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                ui.painter().circle_filled(dr.center(), 3.5, col);
+                ui.label(
+                    RichText::new(&tool.name)
+                        .monospace()
+                        .size(11.5)
+                        .strong()
+                        .color(TEXT_PRIMARY),
+                );
+                let first_line = tool.output.lines().next().unwrap_or("");
+                let clipped = if first_line.chars().count() > 56 {
+                    let s: String = first_line.chars().take(55).collect();
+                    format!("{s}…")
+                } else {
+                    first_line.to_string()
+                };
+                ui.label(
+                    RichText::new(clipped)
+                        .monospace()
+                        .size(11.0)
+                        .color(TEXT_MUTED),
+                );
+                let is_edit_tool = matches!(
+                    tool.name.as_str(),
+                    "write_file" | "replace_in_file" | "apply_patch"
+                );
+                if has_diff && is_edit_tool {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if pill_icon_button(ui, Icon::Code, "View diff", false).clicked() {
+                            view_diff = true;
+                        }
+                    });
+                }
+            });
+        });
     view_diff
 }
 
@@ -2932,25 +4075,25 @@ fn apply_serika_theme(ctx: &egui::Context) {
     visuals.faint_bg_color = BG_SIDEBAR;
     visuals.override_text_color = Some(TEXT_PRIMARY);
     visuals.selection.bg_fill = BG_ACTIVE_ROW;
-    visuals.selection.stroke = Stroke::new(1.0, BORDER_STRONG);
+    visuals.selection.stroke = Stroke::new(1.0, SERIKA_VIOLET);
 
     visuals.widgets.noninteractive.bg_fill = BG_CARD;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER_SUBTLE);
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
-    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(6);
+    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(7);
 
     visuals.widgets.inactive.bg_fill = BG_INPUT;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, BORDER_SUBTLE);
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(6);
+    visuals.widgets.inactive.corner_radius = CornerRadius::same(7);
 
     visuals.widgets.hovered.bg_fill = BG_CARD_HOVER;
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, BORDER_STRONG);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, SERIKA_VIOLET);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(6);
+    visuals.widgets.hovered.corner_radius = CornerRadius::same(7);
 
-    visuals.widgets.active.bg_fill = BG_CARD_HOVER;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, BORDER_STRONG);
+    visuals.widgets.active.bg_fill = SERIKA_VIOLET_SOFT;
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, SERIKA_VIOLET);
     visuals.widgets.active.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
     visuals.widgets.active.corner_radius = CornerRadius::same(8);
 
