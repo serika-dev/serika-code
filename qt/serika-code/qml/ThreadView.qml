@@ -3,8 +3,21 @@ import QtQuick.Controls
 
 ListView {
     id: thread
-    SmoothWheel { flickable: thread }
+    // Wheel up leaves the bottom; the next streamed token will not drag the view back.
+    SmoothWheel {
+        flickable: thread
+        onScrolled: (dy) => { if (dy > 0) thread.stick = false }
+        onSettled: thread.stick = thread.atYEnd
+    }
     property bool stick: true
+    // Long user messages the reader opened, by turn index (kept while their row scrolls away)
+    property var openTurns: ({})
+    function toggleTurn(i) {
+        const m = Object.assign({}, openTurns)
+        m[i] = !m[i]
+        stick = false
+        openTurns = m
+    }
     clip: true
     spacing: 0
     model: ipc.turns
@@ -55,15 +68,10 @@ ListView {
 
     Connections {
         target: ipc
-        function onTurnsReloaded() { thread.stick = true; Qt.callLater(thread.positionViewAtEnd) }
+        function onTurnsReloaded() { thread.openTurns = ({}); thread.stick = true; Qt.callLater(thread.positionViewAtEnd) }
         function onRunningChanged() { if (ipc.running) thread.stick = true }
     }
 
-    // Wheel up leaves the bottom; the next streamed token will not drag the view back.
-    WheelHandler {
-        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-        onWheel: (event) => { if (event.angleDelta.y > 0) thread.stick = false }
-    }
 
     // Back to the newest message
     Rectangle {

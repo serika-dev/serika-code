@@ -11,6 +11,9 @@ Item {
     property real goal: 0
     property double lastAt: 0
     property real speed: 1
+    // dy > 0 is towards the top; settled() fires once the scroll has come to rest.
+    signal scrolled(real dy)
+    signal settled()
     parent: flickable
     anchors.fill: parent
     z: 1000
@@ -36,9 +39,11 @@ Item {
                 return
             }
             f.cancelFlick()
+            root.scrolled(dy)
             if (event.pixelDelta.y !== 0) {
                 glide.stop()
                 f.contentY = Math.max(b.top, Math.min(b.bottom, f.contentY - event.pixelDelta.y))
+                root.settled()
                 return
             }
             // Notches close together scroll further, up to 3x.
@@ -57,6 +62,7 @@ Item {
         property: "contentY"
         duration: 260
         easing.type: Easing.OutCubic
+        onFinished: root.settled()
     }
 
     // A drag or flick by hand takes over from a glide in progress.

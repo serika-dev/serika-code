@@ -200,19 +200,33 @@ Item {
             id: bubble
             visible: item.content.length > 0
             Layout.alignment: Qt.AlignRight
+            // Long messages (a pasted log or email) show a preview until you open them.
+            readonly property real foldedHeight: Theme.chatPx * 1.45 * 14
+            readonly property bool isLong: userText.implicitHeight > foldedHeight + Theme.chatPx * 4
+            readonly property bool expanded: item.ListView.view ? !!item.ListView.view.openTurns[item.index] : false
+            readonly property real textHeight: isLong && !expanded ? foldedHeight : userText.implicitHeight
             implicitWidth: Math.min(lane.width * 0.85, userText.implicitWidth + 32)
-            implicitHeight: userText.implicitHeight + 24
+            implicitHeight: textHeight + 24 + (isLong ? 36 : 0)
+            Behavior on implicitHeight { enabled: bubble.isLong; NumberAnimation { duration: Theme.motionBase; easing.type: Theme.easeEmphasis } }
             radius: 18
             color: Theme.raised
             border.width: Theme.light ? 1 : 0
             border.color: Theme.border
 
-            TextEdit {
-                id: userText
+            Item {
+                id: textClip
                 x: 16
                 y: 12
+                width: userText.width
+                height: bubble.textHeight
+                clip: bubble.isLong
+
+            TextEdit {
+                id: userText
                 width: Math.min(lane.width * 0.85 - 32, implicitWidth)
                 text: item.isUser ? item.content : ""
+                // Always plain: an email header like "Name <a@b.c>" must not be read as HTML.
+                textFormat: TextEdit.PlainText
                 readOnly: true
                 selectByMouse: true
                 selectionColor: Theme.accent
@@ -220,6 +234,61 @@ Item {
                 color: Theme.text
                 font.family: Theme.sans
                 font.pixelSize: Theme.chatPx
+            }
+            }
+            // Fade the cut edge of a folded message
+            Rectangle {
+                visible: bubble.isLong && !bubble.expanded
+                x: 1
+                y: 12 + bubble.foldedHeight - height
+                width: parent.width - 2
+                height: Theme.chatPx * 4
+                gradient: Gradient {
+                    GradientStop { position: 0; color: Qt.rgba(Theme.raised.r, Theme.raised.g, Theme.raised.b, 0) }
+                    GradientStop { position: 1; color: Theme.raised }
+                }
+            }
+            Rectangle {
+                visible: bubble.isLong
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 10
+                width: foldRow.implicitWidth + 22
+                height: 26
+                radius: 13
+                color: foldArea.containsMouse ? Theme.active : Theme.hover
+                border.width: 1
+                border.color: Theme.borderSubtle
+                Behavior on color { ColorAnimation { duration: Theme.motionFast } }
+                Row {
+                    id: foldRow
+                    anchors.centerIn: parent
+                    spacing: 6
+                    Icon {
+                        anchors.verticalCenter: parent.verticalCenter
+                        name: "chevron-down"
+                        size: 12
+                        color: Theme.textSecondary
+                        rotation: bubble.expanded ? 180 : 0
+                        Behavior on rotation { NumberAnimation { duration: Theme.motionBase; easing.type: Theme.easeEmphasis } }
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: bubble.expanded ? Format.tr(item.dict, "ShowLess", "Show less")
+                                              : Format.tr(item.dict, "ShowAllLines", "Show all {n} lines", { n: userText.lineCount })
+                        color: Theme.textSecondary
+                        font.family: Theme.sans
+                        font.pixelSize: 12
+                        font.weight: Font.Medium
+                    }
+                }
+                MouseArea {
+                    id: foldArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: item.ListView.view.toggleTurn(item.index)
+                }
             }
         }
         }
