@@ -10,7 +10,7 @@ Item {
     property bool settingsOpen: false
     // Two docks like VS Code: one on the right, one at the bottom. Each holds panes as tabs; any
     // pane can sit in either, and the layout (tabs, sizes, which is open) is kept in ui.json.
-    readonly property var paneIds: ["changes", "browser", "agents", "terminal"]
+    readonly property var paneIds: ["changes", "git", "browser", "agents", "terminal"]
     function tabList(text) {
         return text.split(",").filter(function (t) { return paneIds.indexOf(t) >= 0 })
     }
@@ -202,6 +202,8 @@ Item {
             changesShown: shell.panelShown("changes")
             agentsShown: shell.panelShown("agents")
             terminalShown: shell.panelShown("terminal")
+            gitShown: shell.panelShown("git")
+            onGitRequested: shell.togglePanel("git")
             onAgentsRequested: shell.togglePanel("agents")
             onTerminalRequested: shell.togglePanel("terminal")
             onInspectorRequested: shell.togglePanel("changes")
@@ -626,7 +628,7 @@ Item {
         onActionTriggered: (id) => {
             if (id === "new") shell.newChat()
             else if (id === "model") header.openModels()
-            else if (id === "changes" || id === "browser" || id === "agents" || id === "terminal") shell.showPanel(id)
+            else if (id === "changes" || id === "browser" || id === "agents" || id === "terminal" || id === "git") shell.showPanel(id)
             else if (id === "mcp") shell.openSettings("mcp")
             else if (id === "skills") shell.openSettings("skills")
             else if (id === "sidebar") shell.sidebarOpen = !shell.sidebarOpen
@@ -643,6 +645,7 @@ Item {
     Shortcut { sequence: "Ctrl+,"; onActivated: shell.openSettings("general") }
     Shortcut { sequence: "Ctrl+Shift+M"; onActivated: header.openModels() }
     Shortcut { sequence: "Ctrl+Shift+A"; onActivated: shell.togglePanel("agents") }
+    Shortcut { sequence: "Ctrl+Shift+G"; onActivated: shell.togglePanel("git") }
     Shortcut { sequences: ["Ctrl+`", "Ctrl+J"]; onActivated: { shell.togglePanel("terminal") } }
     Shortcut { sequence: "Ctrl+/"; onActivated: shortcuts.open() }
 

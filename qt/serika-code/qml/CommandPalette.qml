@@ -16,6 +16,7 @@ Popup {
         { id: "browser", label: Format.tr(dict, "ShowBrowser", "Show browser"), icon: "globe", keys: "Ctrl Shift B" },
         { id: "agents", label: Format.tr(dict, "ShowSubagents", "Show sub-agents"), icon: "users", keys: "Ctrl Shift A" },
         { id: "terminal", label: Format.tr(dict, "ShowTerminal", "Show terminal"), icon: "terminal", keys: "Ctrl `" },
+        { id: "git", label: Format.tr(dict, "ShowGit", "Git: stashes, incoming, history"), icon: "git-commit", keys: "Ctrl Shift G" },
         { id: "mcp", label: Format.tr(dict, "ManageMcp", "MCP servers"), icon: "server", keys: "" },
         { id: "skills", label: Format.tr(dict, "ManageSkills", "Skills"), icon: "package", keys: "" },
         { id: "sidebar", label: Format.tr(dict, "ToggleSidebar", "Toggle sidebar"), icon: "sidebar", keys: "Ctrl Shift S" },

@@ -170,8 +170,10 @@ QtObject {
     }
 
     // Flat rows for the sidebar: a header per project, then its chats (newest first).
-    // `collapsed` and `expanded` are maps keyed by project path.
-    function projectRows(projects, sessions, query, collapsed, expanded, limit) {
+    // `collapsed` and `expanded` are maps keyed by project path; `live` maps session id to
+    // "running", "waiting" or "done", so running chats always show and their project says so.
+    function projectRows(projects, sessions, query, collapsed, expanded, limit, live) {
+        live = live || {}
         var q = (query || "").trim().toLowerCase()
         var byProject = {}
         var list = (sessions || []).slice()
@@ -208,11 +210,16 @@ QtObject {
             if (q && h.chats.length === 0) return
             var path = h.p.path
             var isCollapsed = !q && collapsed && collapsed[path] === true
+            var running = h.chats.filter(function (s) { return live[s.id] === "running" || live[s.id] === "waiting" })
             rows.push({ kind: "project", path: path, name: h.p.name, exists: h.p.exists !== false, current: h.p.current === true, scratch: h.p.scratch === true,
-                        count: h.chats.length, collapsed: isCollapsed })
+                        count: h.chats.length, collapsed: isCollapsed, running: running.length,
+                        waiting: running.some(function (s) { return live[s.id] === "waiting" }) })
             if (isCollapsed) return
             var showAll = q.length > 0 || (expanded && expanded[path] === true)
             var shown = showAll ? h.chats : h.chats.slice(0, limit)
+            // A running chat stays in view even when it is older than the ones shown.
+            if (!showAll)
+                running.forEach(function (s) { if (shown.indexOf(s) < 0) shown.push(s) })
             shown.forEach(function (s) {
                 rows.push({ kind: "session", id: s.id, title: s.title || "", updatedAt: s.updatedAt, project: path })
             })
@@ -371,11 +378,15 @@ QtObject {
         var out = []
         var lines = (diff || "").split("\n")
         var oldNo = 0, newNo = 0
+        var header = false   // git's per-file header (mode, rename, index lines) up to the first hunk
         for (var i = 0; i < lines.length; ++i) {
             var line = lines[i]
-            if (line.indexOf("+++") === 0 || line.indexOf("---") === 0 || line.indexOf("diff --git") === 0 || line.indexOf("index ") === 0)
+            if (line.indexOf("diff --git") === 0) { header = true; continue }
+            if (line.indexOf("+++") === 0 || line.indexOf("---") === 0 || line.indexOf("index ") === 0)
                 continue
+            if (header && line.indexOf("@@") !== 0) continue
             if (line.indexOf("@@") === 0) {
+                header = false
                 var m = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)/)
                 if (m) { oldNo = parseInt(m[1]); newNo = parseInt(m[2]) }
                 out.push({ kind: "hunk", old: "", new: "", text: m && m[3] ? m[3].trim() : "" })

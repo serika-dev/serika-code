@@ -8,6 +8,8 @@ Item {
     property bool changesShown: false
     property bool agentsShown: false
     property bool terminalShown: false
+    property bool gitShown: false
+    signal gitRequested()
     signal agentsRequested()
     signal terminalRequested()
     readonly property bool inspectorOpen: browserShown || changesShown || agentsShown
@@ -123,6 +125,23 @@ Item {
             onClicked: header.agentsRequested()
             Rectangle {
                 visible: ipc.agents.some(function (a) { return a.status === "running" })
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 5
+                width: 7
+                height: 7
+                radius: 3.5
+                color: Theme.accent
+            }
+        }
+        IconButton {
+            icon: "git-commit"
+            tip: Format.tr(header.dict, "Git", "Git") + "  (Ctrl Shift G)"
+            active: header.gitShown
+            onClicked: header.gitRequested()
+            // Incoming commits waiting
+            Rectangle {
+                visible: (ipc.git.behind || 0) > 0
                 anchors.right: parent.right
                 anchors.top: parent.top
                 anchors.margins: 5

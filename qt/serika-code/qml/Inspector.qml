@@ -30,9 +30,11 @@ Item {
         agents: { id: "agents", label: Format.tr(dict, "Subagents", "Sub-agents"), icon: "users", count: ipc.agents.length,
                   live: ipc.agents.some(function (a) { return a.status === "running" }) },
         terminal: { id: "terminal", label: Format.tr(dict, "Terminal", "Terminal"), icon: "terminal", count: ipc.terminals.length,
-                    live: ipc.terminals.some(function (t) { return t.running === true }) }
+                    live: ipc.terminals.some(function (t) { return t.running === true }) },
+        git: { id: "git", label: Format.tr(dict, "Git", "Git"), icon: "git-commit", count: (ipc.git.stashes || []).length,
+               live: (ipc.git.behind || 0) > 0 }
     })
-    readonly property var allIds: ["changes", "browser", "agents", "terminal"]
+    readonly property var allIds: ["changes", "git", "browser", "agents", "terminal"]
 
     // Where in this dock's tab row a tab dropped at a scene point would go.
     function indexAt(scenePos) {
@@ -296,7 +298,8 @@ Item {
                         Behavior on opacity { NumberAnimation { duration: Theme.motionBase; easing.type: Theme.easeOut } }
                         sourceComponent: modelData === "browser" ? browserPane
                                        : modelData === "agents" ? agentsPane
-                                       : modelData === "terminal" ? terminalPane : changesPane
+                                       : modelData === "terminal" ? terminalPane
+                                       : modelData === "git" ? gitPane : changesPane
                     }
                 }
                 // Drop hint while a tab from elsewhere hovers this dock
@@ -336,4 +339,5 @@ Item {
     Component { id: browserPane; BrowserPanel {} }
     Component { id: agentsPane; AgentsPanel {} }
     Component { id: terminalPane; TerminalPanel {} }
+    Component { id: gitPane; GitPanel {} }
 }

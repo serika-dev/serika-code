@@ -23,6 +23,7 @@ pub mod handoff;
 pub mod subagents;
 pub mod i18n;
 pub mod logsetup;
+pub mod git;
 pub mod mcp;
 pub mod mcp_hub;
 pub mod mcp_server;

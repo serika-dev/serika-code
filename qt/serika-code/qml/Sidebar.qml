@@ -16,7 +16,7 @@ Rectangle {
     signal newChatInRequested(string path)
 
     readonly property var dict: ipc.strings
-    readonly property var rows: Format.projectRows(ipc.projects, ipc.sessions, filter.text, collapsed, expanded, chatLimit)
+    readonly property var rows: Format.projectRows(ipc.projects, ipc.sessions, filter.text, collapsed, expanded, chatLimit, ipc.liveChats)
     function t(key, values) { return Format.t(dict, key, values) }
     function openAccount() { accountMenu.open() }
     function focusSearch() { filter.forceActiveFocus() }
@@ -248,8 +248,37 @@ Rectangle {
                                 radius: 3
                                 color: Theme.accent
                             }
+                            // Chats of this project working right now (amber when one waits for you)
+                            Rectangle {
+                                visible: head.r.running > 0 && !(headArea.containsMouse || headMenuButton.hovered || headMenu.opened)
+                                implicitWidth: liveRow.implicitWidth + 12
+                                implicitHeight: 18
+                                radius: 9
+                                color: head.r.waiting ? Qt.rgba(0.96, 0.62, 0.04, 0.16) : Theme.accentSoft
+                                Row {
+                                    id: liveRow
+                                    anchors.centerIn: parent
+                                    spacing: 4
+                                    Icon {
+                                        id: headSpin
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        name: head.r.waiting ? "alert-circle" : "loader"
+                                        size: 11
+                                        color: head.r.waiting ? Theme.warning : Theme.accentSecondary
+                                        RotationAnimator on rotation { running: headSpin.visible && !head.r.waiting; from: 0; to: 360; duration: 1000; loops: Animation.Infinite }
+                                    }
+                                    Text {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: head.r.running
+                                        color: head.r.waiting ? Theme.warning : Theme.accentSecondary
+                                        font.family: Theme.sans
+                                        font.pixelSize: 11
+                                        font.weight: Font.DemiBold
+                                    }
+                                }
+                            }
                             Text {
-                                visible: !(headArea.containsMouse || headMenuButton.hovered || headMenu.opened) && head.r.count > 0
+                                visible: !(headArea.containsMouse || headMenuButton.hovered || headMenu.opened) && head.r.count > 0 && head.r.running === 0
                                 text: head.r.count
                                 color: Theme.textDim
                                 font.family: Theme.sans

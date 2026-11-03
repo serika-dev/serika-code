@@ -13,6 +13,9 @@ Rectangle {
     property bool editing: false
     property bool confirming: false
     readonly property var dict: ipc.strings
+    // "running", "waiting" (for your approval), "done" (finished while you were elsewhere) or ""
+    readonly property string live: ipc.liveChats[sessionId] || ""
+    readonly property bool working: live === "running" || live === "waiting"
 
     implicitHeight: 36
     radius: 8
@@ -38,7 +41,7 @@ Rectangle {
         anchors.left: parent.left
         anchors.leftMargin: 10 + row.indent
         anchors.right: parent.right
-        anchors.rightMargin: (area.containsMouse || menuButton.hovered || menu.opened) ? 36 : (row.time.length > 0 ? 40 : 10)
+        anchors.rightMargin: (area.containsMouse || menuButton.hovered || menu.opened) ? (row.working ? 64 : 36) : (row.live.length > 0 ? 34 : (row.time.length > 0 ? 40 : 10))
         anchors.verticalCenter: parent.verticalCenter
         text: row.title.length > 0 ? row.title : Format.t(row.dict, "NewChat")
         elide: Text.ElideRight
@@ -47,7 +50,7 @@ Rectangle {
         font.pixelSize: 14
     }
     Text {
-        visible: !row.editing && !row.confirming && row.time.length > 0 && !(area.containsMouse || menuButton.hovered || menu.opened)
+        visible: !row.editing && !row.confirming && row.time.length > 0 && row.live.length === 0 && !(area.containsMouse || menuButton.hovered || menu.opened)
         anchors.right: parent.right
         anchors.rightMargin: 10
         anchors.verticalCenter: parent.verticalCenter
@@ -55,6 +58,53 @@ Rectangle {
         color: Theme.textDim
         font.family: Theme.sans
         font.pixelSize: 12
+    }
+    // Live state on the right: spinner while it works, amber when it needs you, a dot when it
+    // finished while you were in another chat.
+    Item {
+        visible: !row.editing && !row.confirming && row.live.length > 0 && !(area.containsMouse || menuButton.hovered || menu.opened || stopButton.hovered)
+        anchors.right: parent.right
+        anchors.rightMargin: 12
+        anchors.verticalCenter: parent.verticalCenter
+        width: 16
+        height: 16
+        Icon {
+            id: spinner
+            anchors.centerIn: parent
+            visible: row.live === "running"
+            name: "loader"
+            size: 14
+            color: Theme.accentSecondary
+            RotationAnimator on rotation { running: spinner.visible; from: 0; to: 360; duration: 1000; loops: Animation.Infinite }
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            visible: row.live === "waiting"
+            width: 9
+            height: 9
+            radius: 4.5
+            color: Theme.warning
+            SequentialAnimation on scale {
+                running: row.live === "waiting"
+                loops: Animation.Infinite
+                NumberAnimation { to: 1.35; duration: 560; easing.type: Easing.InOutSine }
+                NumberAnimation { to: 1.0; duration: 560; easing.type: Easing.InOutSine }
+            }
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            visible: row.live === "done"
+            width: 8
+            height: 8
+            radius: 4
+            color: Theme.accent
+        }
+        HoverHandler { id: liveHover }
+        ToolTip.visible: liveHover.hovered
+        ToolTip.delay: 300
+        ToolTip.text: row.live === "running" ? Format.tr(row.dict, "ChatWorking", "Working in the background")
+                    : row.live === "waiting" ? Format.tr(row.dict, "ChatWaiting", "Waiting for your approval")
+                    : Format.tr(row.dict, "ChatDone", "New reply")
     }
     MouseArea {
         id: area
@@ -65,9 +115,22 @@ Rectangle {
         onClicked: ipc.openSession(row.sessionId)
         onDoubleClicked: row.beginEdit()
     }
+    // Stop a chat that is running in the background without opening it
+    IconButton {
+        id: stopButton
+        visible: row.working && !row.editing && !row.confirming && (area.containsMouse || hovered || menuButton.hovered || menu.opened)
+        anchors.right: menuButton.left
+        anchors.verticalCenter: parent.verticalCenter
+        implicitWidth: 28
+        implicitHeight: 28
+        icon: "square"
+        iconSize: 12
+        tip: Format.tr(row.dict, "StopChat", "Stop")
+        onClicked: ipc.stopChat(row.sessionId)
+    }
     IconButton {
         id: menuButton
-        visible: !row.editing && !row.confirming && (area.containsMouse || hovered || menu.opened)
+        visible: !row.editing && !row.confirming && (area.containsMouse || hovered || menu.opened || stopButton.hovered)
         anchors.right: parent.right
         anchors.rightMargin: 4
         anchors.verticalCenter: parent.verticalCenter

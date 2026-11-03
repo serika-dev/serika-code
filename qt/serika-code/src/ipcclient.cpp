@@ -17,6 +17,7 @@
 #include <QPainter>
 #include <QStandardPaths>
 #include <QTextStream>
+#include <QUuid>
 
 namespace {
 QString s(const char *text) { return QString::fromUtf8(text); }
@@ -187,6 +188,18 @@ void IpcClient::handleLine(const QByteArray &line) {
         else if (tag == QLatin1String("chat")) {
             setRunning(false);
             setStatus(error);
+            if (!m_viewRun.isEmpty()) {
+                m_runs.remove(m_viewRun);
+                m_viewRun.clear();
+                emit liveChatsChanged();
+            }
+        } else if (tag == QLatin1String("gitAction")) {
+            m_git.remove(QStringLiteral("busy"));
+            emit gitChanged();
+            emit gitMessage(error, true);
+            gitRefresh();
+        } else if (tag == QLatin1String("gitDiff")) {
+            emit gitMessage(error, true);
         } else if (tag == QLatin1String("browser")) {
             m_browserBusy = false;
             m_browserError = error;
@@ -197,7 +210,8 @@ void IpcClient::handleLine(const QByteArray &line) {
             setNotice(error);
         } else if (tag != QLatin1String("background") && tag != QLatin1String("account") && tag != QLatin1String("models") &&
                    tag != QLatin1String("browserPoll") && tag != QLatin1String("browserMouse") &&
-                   tag != QLatin1String("browserStream")) {
+                   tag != QLatin1String("browserStream") && tag != QLatin1String("git") &&
+                   tag != QLatin1String("sessionSettings")) {
             setNotice(error);
         }
         return;
@@ -261,9 +275,41 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
             m_sessions = result.value(QStringLiteral("sessions")).toArray().toVariantList();
             emit sessionsChanged();
         }
-    } else if (tag == QLatin1String("session")) {
+    } else if (tag == QLatin1String("sessionSettings")) {
         applySettings(result.value(QStringLiteral("settings")).toObject());
-        m_turns.replaceAll(result.value(QStringLiteral("turns")).toArray().toVariantList());
+        m_folderMissing = result.value(QStringLiteral("folderMissing")).toBool();
+        request(QStringLiteral("projects.list"), {}, QStringLiteral("projects"));
+        if (!m_running && !m_queue.isEmpty())
+            QTimer::singleShot(200, this, &IpcClient::dispatchQueue);
+    } else if (tag == QLatin1String("git")) {
+        m_git = result.toVariantMap();
+        emit gitChanged();
+    } else if (tag == QLatin1String("gitAction")) {
+        m_git = result.value(QStringLiteral("overview")).toObject().toVariantMap();
+        emit gitChanged();
+        const QString message = result.value(QStringLiteral("message")).toString();
+        emit gitMessage(message.isEmpty() ? QStringLiteral("Done.") : message, false);
+    } else if (tag == QLatin1String("gitDiff")) {
+        const QString key = result.contains(QStringLiteral("hash")) ? result.value(QStringLiteral("hash")).toString()
+                          : result.contains(QStringLiteral("index")) ? QStringLiteral("stash:%1").arg(result.value(QStringLiteral("index")).toInt())
+                          : QStringLiteral("file:") + result.value(QStringLiteral("path")).toString();
+        QVariantList files;
+        if (result.contains(QStringLiteral("files")))
+            files = result.value(QStringLiteral("files")).toArray().toVariantList();
+        else
+            files.append(QVariantMap{{QStringLiteral("path"), result.value(QStringLiteral("path")).toString()},
+                                     {QStringLiteral("diff"), result.value(QStringLiteral("diff")).toString()}});
+        emit gitDiffReady(key, files);
+    } else if (tag == QLatin1String("session")) {
+        // Another chat is loading: one still running on screen carries on in the background.
+        const QString incoming = result.value(QStringLiteral("id")).toString();
+        if (!m_viewRun.isEmpty()) {
+            if (incoming == m_activeSession && m_running)
+                return;
+            detachView();
+        }
+        applySettings(result.value(QStringLiteral("settings")).toObject());
+        m_view->replaceAll(result.value(QStringLiteral("turns")).toArray().toVariantList());
         m_diffs = result.value(QStringLiteral("diffs")).toArray().toVariantList();
         m_activeSession = result.value(QStringLiteral("id")).toString();
         m_folderMissing = result.value(QStringLiteral("folderMissing")).toBool();
@@ -375,11 +421,143 @@ void IpcClient::applyFrame(const QJsonObject &frame) {
     emit browserChanged();
 }
 
+// Keep one row per changed file, and link the change to the edit tool that made it, so its
+// card can open the diff.
+static void mergeDiff(QVariantList &diffs, TurnModel *model, const QJsonObject &obj) {
+    const QString path = obj.value(QStringLiteral("path")).toString();
+    const QVariantMap item{{QStringLiteral("path"), path}, {QStringLiteral("diff"), obj.value(QStringLiteral("diff")).toString()}};
+    bool replaced = false;
+    for (QVariant &existing : diffs) {
+        if (existing.toMap().value(QStringLiteral("path")).toString() == path) {
+            existing = item;
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced)
+        diffs.append(item);
+    int row = -1;
+    if (Turn *turn = model->lastAssistant(&row)) {
+        for (int i = int(turn->tools.size()) - 1; i >= 0; --i) {
+            QVariantMap tool = turn->tools.at(i).toMap();
+            if (isEditTool(tool.value(QStringLiteral("name")).toString()) && !tool.contains(QStringLiteral("diffPath"))) {
+                tool.insert(QStringLiteral("diffPath"), path);
+                turn->tools[i] = tool;
+                model->changed(row, {TurnModel::ToolsRole});
+                break;
+            }
+        }
+    }
+}
+
+// One row per sub-agent, updated in place. True when this one is new.
+static bool mergeAgent(QVariantList &agents, const QJsonObject &obj) {
+    QVariantMap row = obj.toVariantMap();
+    row.remove(QStringLiteral("event"));
+    row.remove(QStringLiteral("runId"));
+    const QString id = row.value(QStringLiteral("id")).toString();
+    if (row.value(QStringLiteral("status")).toString() != QLatin1String("running"))
+        row.insert(QStringLiteral("endedAt"), QDateTime::currentMSecsSinceEpoch());
+    for (QVariant &item : agents) {
+        QVariantMap map = item.toMap();
+        if (map.value(QStringLiteral("id")).toString() == id) {
+            row.insert(QStringLiteral("startedAt"), map.value(QStringLiteral("startedAt")));
+            item = row;
+            return false;
+        }
+    }
+    row.insert(QStringLiteral("startedAt"), QDateTime::currentMSecsSinceEpoch());
+    agents.append(row);
+    return true;
+}
+
+// Text for a new round of the same reply: keep rounds apart with a blank line.
+static void nextRound(TurnModel *model) {
+    int row = -1;
+    if (Turn *turn = model->lastAssistant(&row)) {
+        if (!turn->raw.trimmed().isEmpty())
+            turn->raw += QStringLiteral("\n\n");
+        if (!turn->reasoning.trimmed().isEmpty())
+            turn->reasoning += QStringLiteral("\n\n");
+        turn->content = TurnModel::stripToolFences(turn->raw);
+        model->changed(row, {TurnModel::ContentRole, TurnModel::ReasoningRole});
+    }
+}
+
+static void appendStream(TurnModel *model, const QString &event, const QString &text) {
+    int row = -1;
+    Turn *turn = model->lastAssistant(&row);
+    if (!turn)
+        return;
+    if (event == QLatin1String("chunk")) {
+        turn->raw += text;
+        turn->content = TurnModel::stripToolFences(turn->raw);
+        model->changed(row, {TurnModel::ContentRole});
+    } else {
+        turn->reasoning += text;
+        model->changed(row, {TurnModel::ReasoningRole});
+    }
+}
+
+static void setToolOutput(TurnModel *model, const QJsonObject &obj) {
+    int row = -1;
+    Turn *turn = model->lastAssistant(&row);
+    if (!turn)
+        return;
+    const QString id = obj.value(QStringLiteral("id")).toString();
+    for (int i = 0; i < turn->tools.size(); ++i) {
+        QVariantMap tool = turn->tools.at(i).toMap();
+        if (tool.value(QStringLiteral("id")).toString() == id) {
+            tool.insert(QStringLiteral("output"), obj.value(QStringLiteral("text")).toString());
+            turn->tools[i] = tool;
+            model->changed(row, {TurnModel::ToolsRole});
+            return;
+        }
+    }
+}
+
+static void insertHandoff(TurnModel *model, const QJsonObject &obj) {
+    Turn marker;
+    marker.role = QStringLiteral("switch");
+    marker.switchFrom = obj.value(QStringLiteral("from")).toString();
+    marker.switchTo = obj.value(QStringLiteral("to")).toString();
+    marker.content = QString::number(obj.value(QStringLiteral("messages")).toInt());
+    int row = -1;
+    Turn *reply = model->lastAssistant(&row);
+    if (reply && reply->streaming)
+        model->insert(row, marker);
+    else
+        model->append(marker);
+}
+
 void IpcClient::handleEvent(const QJsonObject &obj) {
     const QString event = obj.value(QStringLiteral("event")).toString();
+    if (event == QLatin1String("runs")) {
+        emit liveChatsChanged();
+        return;
+    }
+    // Events of a chat that is not on screen go to that chat's own state.
+    static const QSet<QString> perChat{QStringLiteral("started"), QStringLiteral("status"), QStringLiteral("chunk"),
+                                       QStringLiteral("reasoning"), QStringLiteral("tool"), QStringLiteral("toolOutput"),
+                                       QStringLiteral("approval"), QStringLiteral("diff"), QStringLiteral("subagent"),
+                                       QStringLiteral("handoff"), QStringLiteral("completed"), QStringLiteral("failed"),
+                                       QStringLiteral("cancelled")};
+    const QString runId = obj.value(QStringLiteral("runId")).toString();
+    if (!runId.isEmpty() && runId != m_viewRun && perChat.contains(event)) {
+        auto it = m_runs.find(runId);
+        if (it != m_runs.end())
+            handleBackgroundEvent(*it, event, obj);
+        else if (event == QLatin1String("completed") || event == QLatin1String("failed") || event == QLatin1String("cancelled"))
+            request(QStringLiteral("sessions.list"), {}, QStringLiteral("sessions"));
+        return;
+    }
     if (event == QLatin1String("started")) {
         m_activeSession = obj.value(QStringLiteral("sessionId")).toString();
+        if (m_runs.contains(m_viewRun))
+            m_runs[m_viewRun].sessionId = m_activeSession;
         emit activeSessionChanged();
+        emit liveChatsChanged();
+        request(QStringLiteral("sessions.list"), {}, QStringLiteral("sessions"));
         m_roundsSeen = 0;
         setRunning(true);
         beginAssistantTurn();
@@ -387,81 +565,24 @@ void IpcClient::handleEvent(const QJsonObject &obj) {
         const QString text = obj.value(QStringLiteral("text")).toString();
         if (text.startsWith(QLatin1String("turn "))) {
             ++m_roundsSeen;
-            if (m_roundsSeen > 1) {
-                int row = -1;
-                if (Turn *turn = m_turns.lastAssistant(&row)) {
-                    if (!turn->raw.trimmed().isEmpty())
-                        turn->raw += QStringLiteral("\n\n");
-                    if (!turn->reasoning.trimmed().isEmpty())
-                        turn->reasoning += QStringLiteral("\n\n");
-                    turn->content = TurnModel::stripToolFences(turn->raw);
-                    m_turns.changed(row, {TurnModel::ContentRole, TurnModel::ReasoningRole});
-                }
-            }
+            if (m_roundsSeen > 1)
+                nextRound(m_view);
         } else if (text.contains(QLatin1String("needed approval"))) {
             setNotice(text);
         }
     } else if (event == QLatin1String("chunk") || event == QLatin1String("reasoning")) {
-        int row = -1;
-        Turn *turn = m_turns.lastAssistant(&row);
-        if (!turn)
-            return;
-        const QString text = obj.value(QStringLiteral("text")).toString();
-        if (event == QLatin1String("chunk")) {
-            turn->raw += text;
-            turn->content = TurnModel::stripToolFences(turn->raw);
-            m_turns.changed(row, {TurnModel::ContentRole});
-        } else {
-            turn->reasoning += text;
-            m_turns.changed(row, {TurnModel::ReasoningRole});
-        }
+        appendStream(m_view, event, obj.value(QStringLiteral("text")).toString());
     } else if (event == QLatin1String("tool")) {
-        updateTool(obj);
+        updateTool(obj, m_view);
     } else if (event == QLatin1String("toolOutput")) {
-        int row = -1;
-        Turn *turn = m_turns.lastAssistant(&row);
-        if (!turn)
-            return;
-        const QString id = obj.value(QStringLiteral("id")).toString();
-        for (int i = 0; i < turn->tools.size(); ++i) {
-            QVariantMap tool = turn->tools.at(i).toMap();
-            if (tool.value(QStringLiteral("id")).toString() == id) {
-                tool.insert(QStringLiteral("output"), obj.value(QStringLiteral("text")).toString());
-                turn->tools[i] = tool;
-                m_turns.changed(row, {TurnModel::ToolsRole});
-                break;
-            }
-        }
+        setToolOutput(m_view, obj);
     } else if (event == QLatin1String("approval")) {
         m_approval = obj.toVariantMap();
         emit approvalChanged();
+        emit liveChatsChanged();
     } else if (event == QLatin1String("diff")) {
-        const QString path = obj.value(QStringLiteral("path")).toString();
-        const QVariantMap item{{QStringLiteral("path"), path}, {QStringLiteral("diff"), obj.value(QStringLiteral("diff")).toString()}};
-        bool replaced = false;
-        for (QVariant &existing : m_diffs) {
-            if (existing.toMap().value(QStringLiteral("path")).toString() == path) {
-                existing = item;
-                replaced = true;
-                break;
-            }
-        }
-        if (!replaced)
-            m_diffs.append(item);
+        mergeDiff(m_diffs, m_view, obj);
         emit diffsChanged();
-        // Link the change to the edit tool that made it, so its card can open the diff.
-        int row = -1;
-        if (Turn *turn = m_turns.lastAssistant(&row)) {
-            for (int i = int(turn->tools.size()) - 1; i >= 0; --i) {
-                QVariantMap tool = turn->tools.at(i).toMap();
-                if (isEditTool(tool.value(QStringLiteral("name")).toString()) && !tool.contains(QStringLiteral("diffPath"))) {
-                    tool.insert(QStringLiteral("diffPath"), path);
-                    turn->tools[i] = tool;
-                    m_turns.changed(row, {TurnModel::ToolsRole});
-                    break;
-                }
-            }
-        }
     } else if (event == QLatin1String("browser")) {
         applyFrame(obj);
         emit browserActivity();
@@ -486,41 +607,12 @@ void IpcClient::handleEvent(const QJsonObject &obj) {
             updateTerminal(id, {{QStringLiteral("running"), false}, {QStringLiteral("exited"), true}});
         }
     } else if (event == QLatin1String("subagent")) {
-        // Keep one row per sub-agent and update it in place; open the Agents tab when one starts.
-        QVariantMap row = obj.toVariantMap();
-        row.remove(QStringLiteral("event"));
-        const QString id = row.value(QStringLiteral("id")).toString();
-        if (row.value(QStringLiteral("status")).toString() != QLatin1String("running"))
-            row.insert(QStringLiteral("endedAt"), QDateTime::currentMSecsSinceEpoch());
-        bool found = false;
-        for (QVariant &item : m_agents) {
-            QVariantMap map = item.toMap();
-            if (map.value(QStringLiteral("id")).toString() == id) {
-                row.insert(QStringLiteral("startedAt"), map.value(QStringLiteral("startedAt")));
-                item = row;
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            row.insert(QStringLiteral("startedAt"), QDateTime::currentMSecsSinceEpoch());
-            m_agents.append(row);
+        if (mergeAgent(m_agents, obj))
             emit panelRequested(QStringLiteral("agents"));
-        }
         emit agentsChanged();
     } else if (event == QLatin1String("handoff")) {
         // Show where the chat moved to another model, just above the reply it is writing.
-        Turn marker;
-        marker.role = QStringLiteral("switch");
-        marker.switchFrom = obj.value(QStringLiteral("from")).toString();
-        marker.switchTo = obj.value(QStringLiteral("to")).toString();
-        marker.content = QString::number(obj.value(QStringLiteral("messages")).toInt());
-        int row = -1;
-        Turn *reply = m_turns.lastAssistant(&row);
-        if (reply && reply->streaming)
-            m_turns.insert(row, marker);
-        else
-            m_turns.append(marker);
+        insertHandoff(m_view, obj);
     } else if (event == QLatin1String("providerUsage")) {
         const QString provider = obj.value(QStringLiteral("provider")).toString();
         for (QVariant &row : m_providers) {
@@ -544,6 +636,11 @@ void IpcClient::handleEvent(const QJsonObject &obj) {
             setStatus(obj.value(QStringLiteral("message")).toString());
         }
         setRunning(false);
+        if (!m_viewRun.isEmpty()) {
+            m_runs.remove(m_viewRun);   // its model stays on screen
+            m_viewRun.clear();
+            emit liveChatsChanged();
+        }
         // Queued messages go out after a reply; a failure or Stop holds them until you resume.
         if (!m_queue.isEmpty()) {
             if (event == QLatin1String("completed") || m_sendNowPending)
@@ -567,16 +664,16 @@ void IpcClient::beginAssistantTurn() {
     turn.role = QStringLiteral("assistant");
     turn.model = m_selectedModel;
     turn.streaming = true;
-    m_turns.append(turn);
+    m_view->append(turn);
 }
 
 void IpcClient::setRunning(bool on) {
     if (!on) {
         int row = -1;
-        if (Turn *turn = m_turns.lastAssistant(&row)) {
+        if (Turn *turn = m_view->lastAssistant(&row)) {
             if (turn->streaming) {
                 turn->streaming = false;
-                m_turns.changed(row, {TurnModel::StreamingRole});
+                m_view->changed(row, {TurnModel::StreamingRole});
             }
         }
     }
@@ -598,9 +695,9 @@ void IpcClient::setNotice(const QString &text) {
     emit noticeChanged();
 }
 
-void IpcClient::updateTool(const QJsonObject &obj) {
+void IpcClient::updateTool(const QJsonObject &obj, TurnModel *model) {
     int row = -1;
-    Turn *turn = m_turns.lastAssistant(&row);
+    Turn *turn = model->lastAssistant(&row);
     if (!turn)
         return;
     const QString id = obj.value(QStringLiteral("id")).toString();
@@ -635,7 +732,7 @@ void IpcClient::updateTool(const QJsonObject &obj) {
         turn->tools[index] = tool;
     else
         turn->tools.append(tool);
-    m_turns.changed(row, {TurnModel::ToolsRole});
+    model->changed(row, {TurnModel::ToolsRole});
 }
 
 void IpcClient::applyAccount(const QJsonObject &result) {
@@ -656,7 +753,7 @@ void IpcClient::applyAccount(const QJsonObject &result) {
     m_weeklyLimit = result.value(QStringLiteral("weeklyLimit")).toDouble(-1);
     m_weeklyResetsAt = result.value(QStringLiteral("weeklyResetsAt")).toString();
     if (!m_signedIn) {
-        m_turns.clear();
+        m_view->clear();
         m_sessions.clear();
         m_projects.clear();
         m_diffs.clear();
@@ -757,7 +854,7 @@ void IpcClient::revealFile(const QString &path) {
 }
 
 QString IpcClient::lastReplyModel() const {
-    const QList<Turn> &turns = m_turns.turns();
+    const QList<Turn> &turns = m_view->turns();
     for (int i = int(turns.size()) - 1; i >= 0; --i) {
         if (turns[i].role == QLatin1String("assistant") && !turns[i].model.isEmpty())
             return turns[i].model;
@@ -840,7 +937,7 @@ void IpcClient::logout() {
         emit accountChanged();
         return;
     }
-    m_turns.clear();
+    m_view->clear();
     m_activeSession.clear();
     emit activeSessionChanged();
     request(QStringLiteral("auth.logout"), {}, QStringLiteral("auth.logout"));
@@ -892,7 +989,7 @@ void IpcClient::startSend(const QString &trimmed, const QVariantList &files) {
     user.raw = trimmed;
     user.content = trimmed;
     user.attachments = files;
-    m_turns.append(user);
+    m_view->append(user);
     setStatus(QString());
     setRunning(true);
     QJsonObject params{{QStringLiteral("prompt"), trimmed},
@@ -908,7 +1005,175 @@ void IpcClient::startSend(const QString &trimmed, const QVariantList &files) {
     }
     if (!m_activeSession.isEmpty())
         params.insert(QStringLiteral("sessionId"), m_activeSession);
+    // This chat runs on its own: it keeps going if you open another chat or project.
+    LiveRun run;
+    run.runId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    run.sessionId = m_activeSession;
+    run.project = m_projectPath;
+    run.model = m_view;
+    m_runs.insert(run.runId, run);
+    m_viewRun = run.runId;
+    params.insert(QStringLiteral("runId"), run.runId);
+    params.insert(QStringLiteral("project"), m_projectPath);
     request(QStringLiteral("chat.send"), params, QStringLiteral("chat"));
+    emit liveChatsChanged();
+}
+
+void IpcClient::detachView() {
+    if (m_viewRun.isEmpty())
+        return;
+    auto it = m_runs.find(m_viewRun);
+    if (it != m_runs.end()) {
+        it->diffs = m_diffs;
+        it->agents = m_agents;
+        it->approval = m_approval;
+        it->rounds = m_roundsSeen;
+        it->queue = m_queue;
+        it->sessionId = m_activeSession.isEmpty() ? it->sessionId : m_activeSession;
+    }
+    m_viewRun.clear();
+    // The running chat keeps its model; the screen gets a fresh one.
+    m_view = new TurnModel(this);
+    emit turnsModelChanged();
+    m_queue.clear();
+    emit queueChanged();
+    if (!m_approval.isEmpty()) {
+        m_approval.clear();
+        emit approvalChanged();
+    }
+    if (m_running) {
+        m_running = false;
+        emit runningChanged();
+    }
+    emit liveChatsChanged();
+}
+
+void IpcClient::attachRun(const QString &runId) {
+    if (runId == m_viewRun || !m_runs.contains(runId))
+        return;
+    detachView();
+    TurnModel *old = m_view;
+    LiveRun &run = m_runs[runId];
+    m_view = run.model;
+    m_viewRun = runId;
+    bool owned = false;
+    for (const LiveRun &other : std::as_const(m_runs))
+        owned = owned || other.model == old;
+    if (!owned && old != m_view)
+        old->deleteLater();
+    m_activeSession = run.sessionId;
+    m_diffs = run.diffs;
+    m_agents = run.agents;
+    m_approval = run.approval;
+    m_roundsSeen = run.rounds;
+    m_queue = run.queue;
+    m_unread.remove(run.sessionId);
+    emit turnsModelChanged();
+    emit activeSessionChanged();
+    emit diffsChanged();
+    emit agentsChanged();
+    emit approvalChanged();
+    emit queueChanged();
+    emit turnsReloaded();
+    setRunning(true);
+    emit liveChatsChanged();
+    // Bring its project and settings along (the turns on screen are already live).
+    if (!run.sessionId.isEmpty())
+        request(QStringLiteral("sessions.open"), {{QStringLiteral("id"), run.sessionId}}, QStringLiteral("sessionSettings"));
+}
+
+void IpcClient::handleBackgroundEvent(LiveRun &run, const QString &event, const QJsonObject &obj) {
+    TurnModel *model = run.model;
+    if (event == QLatin1String("started")) {
+        run.sessionId = obj.value(QStringLiteral("sessionId")).toString();
+        run.rounds = 0;
+        request(QStringLiteral("sessions.list"), {}, QStringLiteral("sessions"));
+        emit liveChatsChanged();
+    } else if (event == QLatin1String("status")) {
+        if (obj.value(QStringLiteral("text")).toString().startsWith(QLatin1String("turn ")) && ++run.rounds > 1)
+            nextRound(model);
+    } else if (event == QLatin1String("chunk") || event == QLatin1String("reasoning")) {
+        appendStream(model, event, obj.value(QStringLiteral("text")).toString());
+    } else if (event == QLatin1String("tool")) {
+        updateTool(obj, model);
+    } else if (event == QLatin1String("toolOutput")) {
+        setToolOutput(model, obj);
+    } else if (event == QLatin1String("diff")) {
+        mergeDiff(run.diffs, model, obj);
+    } else if (event == QLatin1String("subagent")) {
+        mergeAgent(run.agents, obj);
+    } else if (event == QLatin1String("handoff")) {
+        insertHandoff(model, obj);
+    } else if (event == QLatin1String("approval")) {
+        run.approval = obj.toVariantMap();
+        setNotice(QStringLiteral("A chat running in the background is waiting for your approval."));
+        emit liveChatsChanged();
+    } else {
+        // completed, failed or cancelled
+        if (!obj.value(QStringLiteral("sessionId")).toString().isEmpty())
+            run.sessionId = obj.value(QStringLiteral("sessionId")).toString();
+        finishRun(run.runId);
+    }
+}
+
+void IpcClient::finishRun(const QString &runId) {
+    auto it = m_runs.find(runId);
+    if (it == m_runs.end())
+        return;
+    if (!it->sessionId.isEmpty())
+        m_unread.insert(it->sessionId);
+    if (it->model && it->model != m_view)
+        it->model->deleteLater();
+    m_runs.erase(it);
+    emit liveChatsChanged();
+    request(QStringLiteral("sessions.list"), {}, QStringLiteral("sessions"));
+}
+
+QVariantMap IpcClient::liveChats() const {
+    // session id -> "running", "waiting" (for an approval) or "done" (finished while away)
+    QVariantMap out;
+    for (const QString &id : m_unread)
+        out.insert(id, QStringLiteral("done"));
+    for (const LiveRun &run : m_runs) {
+        if (run.sessionId.isEmpty())
+            continue;
+        const bool onScreen = run.runId == m_viewRun;
+        const bool waiting = onScreen ? !m_approval.isEmpty() : !run.approval.isEmpty();
+        out.insert(run.sessionId, waiting ? QStringLiteral("waiting") : QStringLiteral("running"));
+    }
+    return out;
+}
+
+void IpcClient::stopChat(const QString &sessionId) {
+    request(QStringLiteral("chat.cancel"), {{QStringLiteral("sessionId"), sessionId}}, QStringLiteral("cancel"));
+}
+
+void IpcClient::gitRefresh() {
+    if (m_demo)
+        return;
+    request(QStringLiteral("git.overview"), {{QStringLiteral("project"), m_projectPath}}, QStringLiteral("git"));
+}
+
+void IpcClient::gitAction(const QString &action, int index, const QString &message) {
+    QJsonObject params{{QStringLiteral("project"), m_projectPath}, {QStringLiteral("action"), action}, {QStringLiteral("message"), message}};
+    if (index >= 0)
+        params.insert(QStringLiteral("index"), index);
+    m_git.insert(QStringLiteral("busy"), action);
+    emit gitChanged();
+    request(QStringLiteral("git.action"), params, QStringLiteral("gitAction"));
+}
+
+void IpcClient::gitStashDiff(int index) {
+    request(QStringLiteral("git.stashDiff"), {{QStringLiteral("project"), m_projectPath}, {QStringLiteral("index"), index}}, QStringLiteral("gitDiff"));
+}
+
+void IpcClient::gitCommitDiff(const QString &hash) {
+    request(QStringLiteral("git.commitDiff"), {{QStringLiteral("project"), m_projectPath}, {QStringLiteral("hash"), hash}}, QStringLiteral("gitDiff"));
+}
+
+void IpcClient::gitFileDiff(const QString &path, bool untracked) {
+    request(QStringLiteral("git.fileDiff"), {{QStringLiteral("project"), m_projectPath}, {QStringLiteral("path"), path}, {QStringLiteral("untracked"), untracked}},
+            QStringLiteral("gitDiff"));
 }
 
 void IpcClient::addAttachments(const QList<QUrl> &urls) {
@@ -971,12 +1236,21 @@ void IpcClient::clearAttachments() {
     emit attachmentsChanged();
 }
 
-void IpcClient::cancel() { request(QStringLiteral("chat.cancel"), {}, QStringLiteral("cancel")); }
+void IpcClient::cancel() {
+    if (m_viewRun.isEmpty() && m_activeSession.isEmpty())
+        return;
+    QJsonObject params;
+    if (!m_viewRun.isEmpty())
+        params.insert(QStringLiteral("runId"), m_viewRun);
+    else
+        params.insert(QStringLiteral("sessionId"), m_activeSession);
+    request(QStringLiteral("chat.cancel"), params, QStringLiteral("cancel"));
+}
 
 // The position of a turn among the messages the user wrote: the user turn itself, or the
 // prompt an assistant turn answered.
 int IpcClient::userIndexFor(int row) const {
-    const QList<Turn> &turns = m_turns.turns();
+    const QList<Turn> &turns = m_view->turns();
     int index = -1;
     for (int i = 0; i <= row && i < turns.size(); ++i) {
         if (turns[i].role == QLatin1String("user"))
@@ -1002,7 +1276,7 @@ void IpcClient::turnRequest(const QString &method, int row, int offset, const QS
 
 bool IpcClient::canRewindTo(int row) const {
     // Rewinding to an assistant reply keeps it and drops what came after.
-    const QList<Turn> &turns = m_turns.turns();
+    const QList<Turn> &turns = m_view->turns();
     for (int i = row + 1; i < turns.size(); ++i)
         if (turns[i].role == QLatin1String("user"))
             return true;
@@ -1012,7 +1286,7 @@ bool IpcClient::canRewindTo(int row) const {
 void IpcClient::rewindTo(int row) {
     if (!canRewindTo(row))
         return;
-    const bool onUser = row < m_turns.count() && m_turns.turns()[row].role == QLatin1String("user");
+    const bool onUser = row < m_view->count() && m_view->turns()[row].role == QLatin1String("user");
     turnRequest(QStringLiteral("sessions.rewind"), row, onUser ? 0 : 1, QStringLiteral("rewind"));
 }
 
@@ -1109,14 +1383,24 @@ void IpcClient::clearQueue() {
 }
 
 void IpcClient::openSession(const QString &id) {
-    if (id == m_activeSession && m_turns.count() > 0)
+    if (id == m_activeSession && m_view->count() > 0)
         return;
+    // A chat that is still running opens live, exactly where it is.
+    for (const LiveRun &run : std::as_const(m_runs)) {
+        if (run.sessionId == id) {
+            attachRun(run.runId);
+            return;
+        }
+    }
+    if (m_unread.remove(id))
+        emit liveChatsChanged();
     request(QStringLiteral("sessions.open"), {{QStringLiteral("id"), id}}, QStringLiteral("session"));
 }
 
 void IpcClient::newChat() {
+    detachView();
     m_activeSession.clear();
-    m_turns.clear();
+    m_view->clear();
     m_diffs.clear();
     m_agents.clear();
     setStatus(QString());
@@ -1139,6 +1423,9 @@ void IpcClient::renameSession(const QString &id, const QString &title) {
 }
 
 void IpcClient::deleteSession(const QString &id) {
+    for (const LiveRun &run : std::as_const(m_runs))
+        if (run.sessionId == id)
+            stopChat(id);
     if (id == m_activeSession)
         newChat();
     request(QStringLiteral("sessions.delete"), {{QStringLiteral("id"), id}}, QStringLiteral("mutated"));
@@ -1203,7 +1490,7 @@ bool IpcClient::exportMarkdown(const QUrl &file) {
     QTextStream stream(&out);
     stream.setEncoding(QStringConverter::Utf8);
     stream << "# Serika Code\n\n";
-    for (const Turn &turn : m_turns.turns()) {
+    for (const Turn &turn : m_view->turns()) {
         stream << "## " << (turn.role == QLatin1String("user") ? "You" : "Serika") << "\n\n"
                << turn.content.trimmed() << "\n\n";
     }
@@ -1630,7 +1917,7 @@ void IpcClient::loadDemo() {
                              {QStringLiteral("content"),
                               QStringLiteral("Two edge cases worth handling:\n\n1. A provider that times out should not block the others; `join!` already runs them together, but each fetch needs its own timeout.\n"
                                              "2. Duplicate model ids from different providers should keep the provider prefix so the picker can tell them apart.")}});
-    m_turns.replaceAll(turns);
+    m_view->replaceAll(turns);
     m_activeSession = QStringLiteral("a");
     emit activeSessionChanged();
     m_diffs = {QVariantMap{{QStringLiteral("path"), QStringLiteral("crates/serika-runtime/src/providers.rs")},

@@ -232,7 +232,7 @@ ColumnLayout {
     // Which dock each panel lives in, how big the docks are, and how wide the chat is.
     SettingsCard {
         title: section.t("LayoutTitle", "Layout")
-        readonly property var paneIds: ["changes", "browser", "agents", "terminal"]
+        readonly property var paneIds: ["changes", "git", "browser", "agents", "terminal"]
         function tabsOf(key, fallback) {
             const raw = ipc.ui[key]
             if (raw === undefined || raw === null) return fallback
@@ -252,6 +252,7 @@ ColumnLayout {
         Repeater {
             model: [
                 { id: "changes", label: section.t("Changes", "Changes"), icon: "git-branch" },
+                { id: "git", label: section.t("Git", "Git"), icon: "git-commit" },
                 { id: "browser", label: section.t("Browser", "Browser"), icon: "globe" },
                 { id: "agents", label: section.t("Subagents", "Sub-agents"), icon: "users" },
                 { id: "terminal", label: section.t("Terminal", "Terminal"), icon: "terminal" }

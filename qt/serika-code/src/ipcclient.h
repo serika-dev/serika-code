@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QSet>
 #include <QJsonObject>
 #include <QObject>
 #include <QProcess>
@@ -58,10 +59,12 @@ class IpcClient : public QObject {
     Q_PROPERTY(QVariantList projects READ projects NOTIFY projectsChanged)
     Q_PROPERTY(QVariantList sessions READ sessions NOTIFY sessionsChanged)
     Q_PROPERTY(QString activeSession READ activeSession NOTIFY activeSessionChanged)
-    Q_PROPERTY(QObject *turns READ turns CONSTANT)
+    Q_PROPERTY(QObject *turns READ turns NOTIFY turnsModelChanged)
+    Q_PROPERTY(QVariantMap liveChats READ liveChats NOTIFY liveChatsChanged)
     Q_PROPERTY(QVariantList diffs READ diffs NOTIFY diffsChanged)
     Q_PROPERTY(QVariantList agents READ agents NOTIFY agentsChanged)
     Q_PROPERTY(QVariantList terminals READ terminals NOTIFY terminalsChanged)
+    Q_PROPERTY(QVariantMap git READ git NOTIFY gitChanged)
     Q_PROPERTY(QVariantMap mcp READ mcp NOTIFY mcpChanged)
     Q_PROPERTY(QVariantList skills READ skills NOTIFY skillsChanged)
     Q_PROPERTY(QString browserImage READ browserImage NOTIFY browserImageChanged)
@@ -124,12 +127,14 @@ public:
     QVariantList projects() const { return m_projects; }
     QVariantList sessions() const { return m_sessions; }
     QString activeSession() const { return m_activeSession; }
-    QObject *turns() { return &m_turns; }
+    QObject *turns() { return m_view; }
+    QVariantMap liveChats() const;
     QVariantList diffs() const { return m_diffs; }
     QVariantList attachments() const { return m_attachments; }
     QVariantList queue() const { return m_queue; }
     QVariantList agents() const { return m_agents; }
     QVariantList terminals() const { return m_terminals; }
+    QVariantMap git() const { return m_git; }
     QVariantMap mcp() const { return m_mcp; }
     QVariantList skills() const { return m_skills; }
     QString browserImage() const { return m_browserImage; }
@@ -176,6 +181,13 @@ public:
     Q_INVOKABLE void probeClaudeUsage();
     Q_INVOKABLE void checkUpdates();
     Q_INVOKABLE void resolveApproval(bool allow);
+    Q_INVOKABLE void stopChat(const QString &sessionId);
+    // Git panel
+    Q_INVOKABLE void gitRefresh();
+    Q_INVOKABLE void gitAction(const QString &action, int index = -1, const QString &message = QString());
+    Q_INVOKABLE void gitStashDiff(int index);
+    Q_INVOKABLE void gitCommitDiff(const QString &hash);
+    Q_INVOKABLE void gitFileDiff(const QString &path, bool untracked);
     Q_INVOKABLE bool exportMarkdown(const QUrl &file);
     Q_INVOKABLE void copyText(const QString &text);
     Q_INVOKABLE void browserOpen(const QString &url);
@@ -271,6 +283,11 @@ signals:
     void panelRequested(const QString &which);
     void authFinished(bool ok, const QString &message, bool needsSecondFactor);
     void turnsReloaded();
+    void turnsModelChanged();
+    void liveChatsChanged();
+    void gitChanged();
+    void gitDiffReady(const QString &key, const QVariantList &files);
+    void gitMessage(const QString &text, bool error);
 
 private:
     void startProcess();
@@ -289,7 +306,28 @@ private:
     void setRunning(bool on);
     void setStatus(const QString &text);
     void setNotice(const QString &text);
-    void updateTool(const QJsonObject &obj);
+    void updateTool(const QJsonObject &obj, TurnModel *model);
+    // A chat that is running. The one on screen shares the visible state; the others keep
+    // their own, so they carry on in the background (in any project) until you look again.
+    struct LiveRun {
+        QString runId;
+        QString sessionId;
+        QString project;
+        TurnModel *model = nullptr;
+        QVariantList diffs;
+        QVariantList agents;
+        QVariantMap approval;
+        QVariantList queue;
+        int rounds = 0;
+    };
+    QHash<QString, LiveRun> m_runs;   // by run id
+    QString m_viewRun;                // the run on screen, if it is running
+    QSet<QString> m_unread;           // chats that finished while you were elsewhere
+    void detachView();
+    void attachRun(const QString &runId);
+    void handleBackgroundEvent(LiveRun &run, const QString &event, const QJsonObject &obj);
+    void finishRun(const QString &runId);
+    QVariantMap m_git;
     QString findSerika() const;
 
     QProcess m_process;
@@ -322,7 +360,7 @@ private:
     QVariantList m_projects;
     QVariantList m_sessions;
     QString m_activeSession;
-    TurnModel m_turns;
+    TurnModel *m_view = new TurnModel(this);
     QVariantList m_diffs;
     QVariantList m_attachments;
     QVariantList m_queue;

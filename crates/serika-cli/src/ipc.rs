@@ -17,11 +17,23 @@ use serika_runtime::{AgentEvent, Config, PermissionMode, Runtime, StoredMessage,
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
+use std::collections::HashMap;
+
+struct Run {
+    cancel: CancellationToken,
+    session_id: Option<String>,
+    project: PathBuf,
+    /// Approvals this run is waiting on, so stopping it answers only its own.
+    approvals: Vec<String>,
+    waiting: bool,
+}
+
 struct Host {
     runtime: Arc<Runtime>,
     project: Mutex<PathBuf>,
     stdout: Mutex<std::io::Stdout>,
-    cancel: Mutex<Option<CancellationToken>>,
+    /// Chats running now, by run id. Any number run at once, in any project.
+    runs: Mutex<HashMap<String, Run>>,
     providers: Mutex<Option<Vec<ProviderStatus>>>,
     terminals: serika_runtime::terminal::TerminalHost,
 }
@@ -59,7 +71,7 @@ pub async fn serve(runtime: Runtime) -> serika_runtime::Result<i32> {
         runtime: Arc::new(runtime),
         project: Mutex::new(project),
         stdout: Mutex::new(std::io::stdout()),
-        cancel: Mutex::new(None),
+        runs: Mutex::new(HashMap::new()),
         providers: Mutex::new(None),
         terminals: Default::default(),
     });
@@ -111,8 +123,8 @@ pub async fn serve(runtime: Runtime) -> serika_runtime::Result<i32> {
             host.emit(&payload);
         });
     }
-    if let Some(cancel) = host.cancel.lock().unwrap_or_else(|e| e.into_inner()).take() {
-        cancel.cancel();
+    for run in host.runs.lock().unwrap_or_else(|e| e.into_inner()).values() {
+        run.cancel.cancel();
     }
     host.runtime.approvals.deny_all();
     host.runtime.browser.shutdown().await;
@@ -354,15 +366,62 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
             open_session(&host, &new_id)
         }
         "chat.send" => {
-            spawn_chat(host, &params)?;
-            Ok(json!({"accepted": true}))
+            let run_id = spawn_chat(host, &params)?;
+            Ok(json!({"accepted": true, "runId": run_id}))
         }
         "chat.cancel" => {
-            if let Some(cancel) = host.cancel.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                cancel.cancel();
+            // One chat (by run or session id), or every chat when neither is given.
+            let run_id = text(&params, "runId");
+            let session_id = text(&params, "sessionId");
+            let mut runs = host.runs.lock().unwrap_or_else(|e| e.into_inner());
+            let mut stopped = 0;
+            for (id, run) in runs.iter_mut() {
+                let all = run_id.is_empty() && session_id.is_empty();
+                let hit = (!run_id.is_empty() && *id == run_id)
+                    || (!session_id.is_empty() && run.session_id.as_deref() == Some(session_id.as_str()));
+                if all || hit {
+                    run.cancel.cancel();
+                    for approval in run.approvals.drain(..) {
+                        runtime.approvals.resolve(&approval, false);
+                    }
+                    stopped += 1;
+                }
             }
-            runtime.approvals.deny_all();
-            Ok(json!({"cancelled": true}))
+            Ok(json!({"cancelled": stopped}))
+        }
+        "chat.runs" => Ok(runs_json(&host)),
+        "git.overview" => {
+            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            let overview = serika_runtime::git::overview(&project).await.map_err(|err| err.to_string())?;
+            Ok(serde_json::to_value(overview).unwrap_or(Value::Null))
+        }
+        "git.stashDiff" => {
+            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            let index = number(&params, "index").max(0.0) as usize;
+            let files = serika_runtime::git::stash_diff(&project, index).await.map_err(|err| err.to_string())?;
+            Ok(json!({"index": index, "files": files}))
+        }
+        "git.commitDiff" => {
+            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            let hash = text(&params, "hash");
+            let files = serika_runtime::git::commit_diff(&project, &hash).await.map_err(|err| err.to_string())?;
+            Ok(json!({"hash": hash, "files": files}))
+        }
+        "git.fileDiff" => {
+            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            let path = text(&params, "path");
+            let untracked = params.get("untracked").and_then(Value::as_bool).unwrap_or(false);
+            let diff = serika_runtime::git::file_diff(&project, &path, untracked).await.map_err(|err| err.to_string())?;
+            Ok(json!({"path": path, "diff": diff}))
+        }
+        "git.action" => {
+            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            let index = params.get("index").and_then(Value::as_f64).map(|n| n.max(0.0) as usize);
+            let message = serika_runtime::git::act(&project, &text(&params, "action"), index, &text(&params, "message"))
+                .await
+                .map_err(|err| err.to_string())?;
+            let overview = serika_runtime::git::overview(&project).await.map_err(|err| err.to_string())?;
+            Ok(json!({"message": message, "overview": overview}))
         }
         "approval.resolve" => {
             let allow = params.get("allow").and_then(|item| item.as_bool()).unwrap_or(false);
@@ -876,7 +935,7 @@ fn permission_mode(host: &Host, params: &Value) -> PermissionMode {
         .unwrap_or(host.runtime.config.permission)
 }
 
-fn spawn_chat(host: Arc<Host>, params: &Value) -> Result<(), String> {
+fn spawn_chat(host: Arc<Host>, params: &Value) -> Result<String, String> {
     let mut prompt = text(params, "prompt");
     let files = parse_attachments(params, "attachments");
     attachments::verify(&files, &attachments_dir(&host.runtime)).map_err(|err| err.to_string())?;
@@ -898,14 +957,54 @@ fn spawn_chat(host: Arc<Host>, params: &Value) -> Result<(), String> {
         prompt
     };
 
+    // Each chat runs on its own, so several can run at once (in different projects too);
+    // every event carries the run id so the app knows which chat it belongs to.
+    let run_id = optional_text(params, "runId").unwrap_or_else(serika_runtime::sessions::new_id);
+    let project = optional_text(params, "project")
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| host.project());
     let cancel = CancellationToken::new();
-    *host.cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel.clone());
+    host.runs.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        run_id.clone(),
+        Run { cancel: cancel.clone(), session_id: session_id.clone(), project: project.clone(), approvals: Vec::new(), waiting: false },
+    );
+    host.emit(&json!({"event": "runs", "runs": runs_json(&host)["runs"]}));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let forward = host.clone();
+    let forward_id = run_id.clone();
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            if let Some(value) = event_json(event) {
-                forward.emit(&value);
+            let Some(mut value) = event_json(event) else { continue };
+            value["runId"] = json!(forward_id);
+            let kind = value.get("event").and_then(Value::as_str).unwrap_or("").to_string();
+            let mut changed = false;
+            if let Some(run) = forward.runs.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&forward_id) {
+                match kind.as_str() {
+                    "started" => {
+                        run.session_id = value.get("sessionId").and_then(Value::as_str).map(str::to_string);
+                        changed = true;
+                    }
+                    "approval" => {
+                        if let Some(id) = value.get("id").and_then(Value::as_str) {
+                            run.approvals.push(id.to_string());
+                        }
+                        run.waiting = true;
+                        changed = true;
+                    }
+                    "tool" | "chunk" if run.waiting => {
+                        run.waiting = false;
+                        changed = true;
+                    }
+                    _ => {}
+                }
+                if let Some(id) = &run.session_id {
+                    value["sessionId"] = json!(id);
+                }
+            }
+            forward.emit(&value);
+            if changed {
+                forward.emit(&json!({"event": "runs", "runs": runs_json(&forward)["runs"]}));
             }
         }
     });
@@ -916,7 +1015,7 @@ fn spawn_chat(host: Arc<Host>, params: &Value) -> Result<(), String> {
         permission_mode(&host, params)
     };
     let request = TaskRequest {
-        project: host.project(),
+        project,
         prompt,
         session_id,
         model,
@@ -926,20 +1025,42 @@ fn spawn_chat(host: Arc<Host>, params: &Value) -> Result<(), String> {
         cancel,
         attachments: files,
     };
+    let result_id = run_id.clone();
     tokio::spawn(async move {
         let outcome = host.runtime.run_task(request).await;
+        let run = host.runs.lock().unwrap_or_else(|e| e.into_inner()).remove(&run_id);
+        let session = run.and_then(|r| r.session_id);
         match outcome {
             Ok(done) => host.emit(&json!({
                 "event": "completed",
+                "runId": run_id,
                 "sessionId": done.session_id,
                 "summary": done.summary,
                 "finished": done.finished,
             })),
-            Err(serika_runtime::Error::Cancelled) => host.emit(&json!({"event": "cancelled"})),
-            Err(err) => host.emit(&json!({"event": "failed", "message": err.to_string()})),
+            Err(serika_runtime::Error::Cancelled) => {
+                host.emit(&json!({"event": "cancelled", "runId": run_id, "sessionId": session}))
+            }
+            Err(err) => host.emit(&json!({"event": "failed", "runId": run_id, "sessionId": session, "message": err.to_string()})),
         }
+        host.emit(&json!({"event": "runs", "runs": runs_json(&host)["runs"]}));
     });
-    Ok(())
+    Ok(result_id)
+}
+
+/// Chats running now: which session, which project, and whether one waits for an approval.
+fn runs_json(host: &Host) -> Value {
+    let runs = host.runs.lock().unwrap_or_else(|e| e.into_inner());
+    let list: Vec<Value> = runs
+        .iter()
+        .map(|(id, run)| {
+            json!({
+                "runId": id, "sessionId": run.session_id,
+                "project": plain(&run.project.display().to_string()), "waiting": run.waiting,
+            })
+        })
+        .collect();
+    json!({"runs": list})
 }
 
 fn event_json(event: AgentEvent) -> Option<Value> {
