@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Serika Code
+GenericName=Coding Agent
+Comment=A fast, native coding agent: chat with any model, edit your project, review every change
+Exec=serika-code %U
+Icon=serika-code
+Terminal=false
+Categories=Development;IDE;
+Keywords=ai;agent;code;chat;claude;codex;git;
+StartupWMClass=serika-code
+StartupNotify=true

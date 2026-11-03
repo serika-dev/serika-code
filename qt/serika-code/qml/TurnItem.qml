@@ -317,6 +317,7 @@ Item {
                 Layout.fillWidth: true
                 visible: item.content.length > 0
                 text: item.content
+                live: item.streaming
             }
 
             // Waiting for the first token

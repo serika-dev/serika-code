@@ -7,6 +7,8 @@ import QtQuick.Layouts
 ColumnLayout {
     id: view
     property string text: ""
+    // True while the reply streams in: new blocks fade in as they appear.
+    property bool live: false
     spacing: 14
 
     // Colors the inline renderer bakes into rich text.
@@ -29,6 +31,24 @@ ColumnLayout {
         return out
     }
 
+    // Blocks live in a model that is patched, not replaced, so while a reply streams only the
+    // block being written changes; the ones above keep their items (and any text selection).
+    ListModel { id: blockModel }
+    function sync() {
+        const list = view.blocks
+        for (let i = 0; i < list.length; i++) {
+            const json = JSON.stringify(list[i])
+            if (i >= blockModel.count) blockModel.append({ kind: list[i].type, json: json })
+            else if (blockModel.get(i).json !== json) {
+                if (blockModel.get(i).kind !== list[i].type) blockModel.set(i, { kind: list[i].type, json: json })
+                else blockModel.setProperty(i, "json", json)
+            }
+        }
+        if (blockModel.count > list.length) blockModel.remove(list.length, blockModel.count - list.length)
+    }
+    onBlocksChanged: sync()
+    Component.onCompleted: sync()
+
     // Selectable rich text that opens links.
     component Prose: TextEdit {
         readOnly: true
@@ -46,16 +66,20 @@ ColumnLayout {
     }
 
     Repeater {
-        model: view.blocks
+        model: blockModel
         delegate: Loader {
             id: block
-            required property var modelData
+            required property string kind
+            required property string json
             required property int index
+            readonly property var modelData: JSON.parse(json)
             Layout.fillWidth: true
+            Component.onCompleted: if (view.live) appear.start()
+            NumberAnimation { id: appear; target: block; property: "opacity"; from: 0; to: 1; duration: Theme.motionSlow; easing.type: Theme.easeOut }
             // Headings breathe a little more above, except at the very top.
             Layout.topMargin: modelData.type === "heading" && index > 0 ? (modelData.level <= 2 ? 10 : 4) : 0
             sourceComponent: {
-                switch (modelData.type) {
+                switch (kind) {
                 case "code": return codeBlock
                 case "heading": return heading
                 case "list": return list

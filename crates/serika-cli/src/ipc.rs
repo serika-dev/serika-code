@@ -45,6 +45,10 @@ fn initial_project(runtime: &Runtime) -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let lowered = cwd.to_string_lossy().to_ascii_lowercase();
     let system_dir = lowered.contains("programs\\serika code")
+        || lowered.contains("program files")
+        || lowered.starts_with("/opt/")
+        || lowered.starts_with("/usr/")
+        || lowered.starts_with("/tmp/.mount_")
         || lowered.contains("appdata\\local")
         || lowered.ends_with("\\bin")
         || lowered.contains("windows\\system32");

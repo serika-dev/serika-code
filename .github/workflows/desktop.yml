@@ -1,0 +1,143 @@
+name: Desktop packages
+
+# The Qt desktop app, packaged: a Windows installer and zip, a Linux AppImage and a .deb.
+# The release workflow calls this with its tag and the packages go onto that release. Run it by
+# hand without a tag to try the packaging: the files are kept as workflow artifacts only.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release to upload to (leave empty to only keep the files as artifacts)
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  QT_VERSION: 6.8.3
+
+jobs:
+  windows:
+    name: Windows installer
+    runs-on: blacksmith-4vcpu-windows-2025
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the serika command line
+        run: cargo build --release --locked -p serika-cli
+
+      - name: Install Qt (LLVM MinGW)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_llvm_mingw
+          dir: ${{ runner.temp }}
+          tools: 'tools_llvm_mingw1706,qt.tools.win64_llvm_mingw1706 tools_ninja'
+          cache: true
+
+      - name: Install Inno Setup and Pillow
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+          python -m pip install --quiet pillow
+
+      - name: Package
+        shell: pwsh
+        env:
+          SERIKA_QT_ROOT: ${{ runner.temp }}\Qt
+        run: ./scripts/package-qt.ps1 -Installer -Cli target/release/serika.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: serika-code-windows
+          path: |
+            dist/serika-code-*-windows-x64-setup.exe*
+            dist/serika-code-*-windows-x64.zip*
+
+      - name: Upload to the release
+        if: inputs.tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $files = Get-ChildItem dist -File | Where-Object { $_.Name -like 'serika-code-*-windows-x64*' } | ForEach-Object FullName
+          gh release upload "${{ inputs.tag }}" @files --clobber
+
+  linux:
+    name: Linux AppImage and .deb
+    # The oldest supported Ubuntu, so the packages run on its glibc and anything newer.
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libssl-dev libdbus-1-dev ninja-build file \
+            libgl1-mesa-dev libegl1-mesa-dev libfontconfig1-dev libxkbcommon-dev libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libxcb-xinput0 \
+            libwayland-client0 libwayland-cursor0 libwayland-egl1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the serika command line
+        run: cargo build --release --locked -p serika-cli
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          cache: true
+
+      - name: Package
+        run: bash packaging/linux/build.sh target/release/serika
+
+      - name: Check the AppImage starts
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb
+          APPIMAGE=$(ls dist/serika-code-*-x86_64.AppImage)
+          chmod +x "$APPIMAGE"
+          "$APPIMAGE" --appimage-extract >/dev/null
+          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software timeout 20 squashfs-root/AppRun --demo --shot "$RUNNER_TEMP/shot.png"
+          test -s "$RUNNER_TEMP/shot.png"
+          squashfs-root/usr/bin/serika --version
+
+      - name: Check the .deb installs and starts
+        run: |
+          sudo apt-get install -y "./$(ls dist/serika-code_*_amd64.deb)"
+          serika --version
+          QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software timeout 20 serika-code --demo --shot "$RUNNER_TEMP/shot-deb.png"
+          test -s "$RUNNER_TEMP/shot-deb.png"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: serika-code-linux
+          path: |
+            dist/serika-code-*-x86_64.AppImage*
+            dist/serika-code_*_amd64.deb*
+
+      - name: Upload to the release
+        if: inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ inputs.tag }}" dist/serika-code-*-x86_64.AppImage* dist/serika-code_*_amd64.deb* --clobber

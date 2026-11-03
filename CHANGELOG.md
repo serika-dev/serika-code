@@ -2,6 +2,20 @@
 
 All notable changes to Serika Code are documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Installers**: a Windows setup (per-user, no admin needed; Start menu, optional desktop
+  shortcut and `serika` on PATH; clean uninstall), a Linux AppImage with delta updates and a
+  `.deb` for Debian and Ubuntu. Every release builds them.
+- **Replies type out** at an even pace instead of landing in bursts, and new paragraphs fade in.
+- **Long messages** fold to a preview with "Show all N lines".
+
+### Fixed
+- Pasted text with `<...>` (an email, a log) showed as an empty bubble.
+- Opening a long message or clicking in a chat no longer jumps to the bottom.
+- The Windows desktop package includes the C++ runtime, so it starts without Qt installed.
+
 ## [0.2.0] - 2026-11-03
 
 The Qt desktop app grows into a full workspace.

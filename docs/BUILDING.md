@@ -38,6 +38,32 @@ The binaries are:
 
 Copy them somewhere on `PATH` if you want to run `serika` from any directory.
 
+## Desktop packages
+
+The Qt desktop app (`qt/serika-code`) is packaged with its own Qt and the `serika` command line.
+Releases build these in CI (`.github/workflows/desktop.yml`); you can run that workflow by hand
+without a tag to get the files as artifacts.
+
+- **Windows** (Qt 6.8 LLVM MinGW kit, plus [Inno Setup 6](https://jrsoftware.org/isinfo.php) for the installer):
+
+  ```powershell
+  .\scripts\package-qt.ps1 -Installer
+  ```
+
+  Writes `dist\serika-code\` (portable folder), a `.zip` of it and
+  `dist\serika-code-<version>-windows-x64-setup.exe`. The installer script is
+  `packaging\windows\serika-code.iss`.
+
+- **Linux** (Qt 6.8, cmake, ninja, curl, dpkg-deb; build on the oldest distribution you
+  support):
+
+  ```bash
+  packaging/linux/build.sh
+  ```
+
+  Writes `dist/serika-code-<version>-x86_64.AppImage` (with a `.zsync` for delta updates) and
+  `dist/serika-code_<version>_amd64.deb`.
+
 ## First run
 
 ```bash

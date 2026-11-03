@@ -14,6 +14,8 @@ int main(int argc, char *argv[]) {
     QGuiApplication app(argc, argv);
     QGuiApplication::setApplicationName(QStringLiteral("Serika Code"));
     QGuiApplication::setOrganizationName(QStringLiteral("Serika"));
+    // Linux desktops match the window to serika-code.desktop (its icon, name and dock pin).
+    QGuiApplication::setDesktopFileName(QStringLiteral("serika-code"));
     QIcon icon;
     for (int size : {16, 32, 48, 64, 128, 256})
         icon.addFile(QStringLiteral(":/qt/qml/SerikaCode/app/serika-code-%1.png").arg(size), QSize(size, size));

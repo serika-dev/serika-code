@@ -80,7 +80,7 @@ IpcClient::~IpcClient() {
 void IpcClient::startProcess() {
     const QString program = findSerika();
     if (program.isEmpty()) {
-        m_bridgeError = QStringLiteral("Could not find serika.exe. Build the CLI with cargo first.");
+        m_bridgeError = QStringLiteral("Could not find the serika command line. Build it with cargo first.");
         emit bridgeErrorChanged();
         return;
     }
@@ -108,14 +108,19 @@ QString IpcClient::findSerika() const {
     const QString env = qEnvironmentVariable("SERIKA_BIN");
     if (!env.isEmpty() && QFileInfo::exists(env))
         return env;
-    const QString beside = QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("serika.exe"));
+#ifdef Q_OS_WIN
+    const QString exe = QStringLiteral("serika.exe");
+#else
+    const QString exe = QStringLiteral("serika");
+#endif
+    const QString beside = QDir(QCoreApplication::applicationDirPath()).filePath(exe);
     if (QFileInfo::exists(beside))
         return beside;
     // Running from a source checkout: use whichever cargo build is newest.
     QDir dir(QCoreApplication::applicationDirPath());
     for (int i = 0; i < 7; ++i) {
-        const QFileInfo debug(dir.filePath(QStringLiteral("target/debug/serika.exe")));
-        const QFileInfo release(dir.filePath(QStringLiteral("target/release/serika.exe")));
+        const QFileInfo debug(dir.filePath(QStringLiteral("target/debug/") + exe));
+        const QFileInfo release(dir.filePath(QStringLiteral("target/release/") + exe));
         if (debug.exists() && release.exists())
             return debug.lastModified() > release.lastModified() ? debug.filePath() : release.filePath();
         if (release.exists())
@@ -541,9 +546,16 @@ static void appendStream(TurnModel *model, const QString &event, const QString &
     if (!turn)
         return;
     if (event == QLatin1String("chunk")) {
+        const int before = int(turn->content.size());
         turn->raw += text;
         turn->content = TurnModel::stripToolFences(turn->raw);
-        model->changed(row, {TurnModel::ContentRole});
+        // A closed tool fence can make the text shorter: show that at once.
+        if (turn->content.size() < before)
+            turn->shown = -1;
+        if (turn->content.size() > before)
+            model->reveal(row, before);
+        else
+            model->changed(row, {TurnModel::ContentRole});
     } else {
         turn->reasoning += text;
         model->changed(row, {TurnModel::ReasoningRole});

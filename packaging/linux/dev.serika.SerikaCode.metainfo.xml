@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.serika.SerikaCode</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <name>Serika Code</name>
+  <summary>A fast, native coding agent</summary>
+  <description>
+    <p>
+      Chat with any model, let it read and edit your project, run commands, browse the web,
+      and review every change, in one native app.
+    </p>
+    <ul>
+      <li>Chats keep running in the background while you switch chat or project</li>
+      <li>Every edit as a line-numbered diff you can review and rewind</li>
+      <li>A Git panel with stashes, sync, branches and per-project accounts</li>
+      <li>A built-in terminal and a browser the agent can use</li>
+      <li>MCP servers and skills from Claude Code, Claude Desktop and Codex</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">serika-code.desktop</launchable>
+  <url type="homepage">https://github.com/serika-dev/serika-code</url>
+  <url type="bugtracker">https://github.com/serika-dev/serika-code/issues</url>
+  <developer id="dev.serika">
+    <name>Serika</name>
+  </developer>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/serika-dev/serika-code/main/docs/screenshots/chat.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.2.0" date="2026-11-03" />
+  </releases>
+</component>

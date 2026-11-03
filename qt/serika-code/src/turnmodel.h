@@ -3,6 +3,7 @@
 #include <QAbstractListModel>
 #include <QList>
 #include <QString>
+#include <QTimer>
 #include <QVariantList>
 
 struct Turn {
@@ -16,6 +17,7 @@ struct Turn {
     QString switchFrom;       // role "switch": the chat moved from this model…
     QString switchTo;         // …to this one
     bool streaming = false;
+    int shown = -1;           // while a reply is typed out: how much of content is on screen (-1: all)
 };
 
 /// Chat turns for the thread view. Row-level updates keep the list from resetting
@@ -41,6 +43,9 @@ public:
     Turn *last();
     Turn *lastAssistant(int *row = nullptr);
     void changed(int row, const QList<int> &roles);
+    // Streamed text arrived for a row: type it out at an even pace instead of in bursts.
+    // shownBefore is how much of the content was on screen before the new text.
+    void reveal(int row, int shownBefore);
     const QList<Turn> &turns() const { return m_turns; }
 
     static QString stripToolFences(const QString &raw);
@@ -49,5 +54,8 @@ signals:
     void countChanged();
 
 private:
+    void pace();
+
     QList<Turn> m_turns;
+    QTimer m_pace;
 };

@@ -3,7 +3,11 @@
 #include <QRegularExpression>
 #include <QVariantMap>
 
-TurnModel::TurnModel(QObject *parent) : QAbstractListModel(parent) {}
+TurnModel::TurnModel(QObject *parent) : QAbstractListModel(parent) {
+    m_pace.setInterval(16);
+    m_pace.setTimerType(Qt::PreciseTimer);
+    connect(&m_pace, &QTimer::timeout, this, &TurnModel::pace);
+}
 
 int TurnModel::rowCount(const QModelIndex &parent) const {
     return parent.isValid() ? 0 : int(m_turns.size());
@@ -17,13 +21,14 @@ QVariant TurnModel::data(const QModelIndex &index, int role) const {
     case TurnRole:
         return turn.role;
     case ContentRole:
-        return turn.content;
+        return turn.shown >= 0 ? turn.content.left(turn.shown) : turn.content;
     case ReasoningRole:
         return turn.reasoning;
     case ToolsRole:
         return turn.tools;
     case StreamingRole:
-        return turn.streaming;
+        // Still typing out counts as streaming, so the footer waits for the last word.
+        return turn.streaming || turn.shown >= 0;
     case AttachmentsRole:
         return turn.attachments;
     case ModelRole:
@@ -52,6 +57,7 @@ QHash<int, QByteArray> TurnModel::roleNames() const {
 }
 
 void TurnModel::replaceAll(const QVariantList &turns) {
+    m_pace.stop();
     beginResetModel();
     m_turns.clear();
     for (const QVariant &item : turns) {
@@ -73,6 +79,7 @@ void TurnModel::replaceAll(const QVariantList &turns) {
 }
 
 void TurnModel::clear() {
+    m_pace.stop();
     if (m_turns.isEmpty())
         return;
     beginResetModel();
@@ -114,6 +121,55 @@ Turn *TurnModel::lastAssistant(int *row) {
 void TurnModel::changed(int row, const QList<int> &roles) {
     const QModelIndex idx = index(row);
     emit dataChanged(idx, idx, roles);
+}
+
+void TurnModel::reveal(int row, int shownBefore) {
+    if (row < 0 || row >= m_turns.size())
+        return;
+    Turn &turn = m_turns[row];
+    if (turn.shown < 0)
+        turn.shown = qBound(0, shownBefore, int(turn.content.size()));
+    if (!m_pace.isActive())
+        m_pace.start();
+}
+
+// One frame of typing. The pace follows the backlog: a trickle of tokens shows at reading
+// speed a few hundred milliseconds behind, and a big block (a whole message at once, or a
+// burst after a pause) types out over a second or two instead of landing in one go.
+// Words appear whole.
+void TurnModel::pace() {
+    bool busy = false;
+    for (int row = 0; row < m_turns.size(); ++row) {
+        Turn &turn = m_turns[row];
+        if (turn.shown < 0)
+            continue;
+        const int total = int(turn.content.size());
+        const int backlog = total - turn.shown;
+        if (backlog <= 0) {
+            turn.shown = -1;
+            changed(row, {ContentRole, StreamingRole});
+            continue;
+        }
+        int next = turn.shown + qBound(2, (backlog + 23) / 24, 60);
+        // Finish the word in progress, if it ends soon.
+        for (int i = next, end = qMin(total, next + 12); i < end; ++i) {
+            if (turn.content.at(i).isSpace()) {
+                next = i;
+                break;
+            }
+        }
+        next = qMin(next, total);
+        if (next < total && turn.content.at(next).isLowSurrogate())
+            ++next;
+        turn.shown = next >= total ? -1 : next;
+        if (turn.shown < 0)
+            changed(row, {ContentRole, StreamingRole});
+        else
+            changed(row, {ContentRole});
+        busy = busy || turn.shown >= 0;
+    }
+    if (!busy)
+        m_pace.stop();
 }
 
 QString TurnModel::stripToolFences(const QString &raw) {

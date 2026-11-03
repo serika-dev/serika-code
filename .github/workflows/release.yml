@@ -139,9 +139,17 @@ jobs:
           "`n" | Out-File -FilePath "dist/$archive.sha256" -Encoding ascii -Append -NoNewline
           gh release upload $env:TAG "dist/$archive" "dist/$archive.sha256" --clobber
 
+  desktop:
+    name: Desktop packages
+    needs: prepare-release
+    uses: ./.github/workflows/desktop.yml
+    with:
+      tag: ${{ needs.prepare-release.outputs.tag }}
+    secrets: inherit
+
   finalize-checksums:
     name: Publish SHA256SUMS
-    needs: [prepare-release, build]
+    needs: [prepare-release, build, desktop]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Checkout repository

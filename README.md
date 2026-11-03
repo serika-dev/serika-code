@@ -96,8 +96,15 @@ and follow them in their own panel.
 
 ## Install
 
-Download the latest build from [Releases](https://github.com/serika-dev/serika-code/releases/latest),
-or install the CLI with one line:
+Get the desktop app from [Releases](https://github.com/serika-dev/serika-code/releases/latest):
+
+| Platform | Download |
+| --- | --- |
+| Windows 10/11 | `serika-code-<version>-windows-x64-setup.exe`: installs for you alone (no admin), adds a Start menu entry and the `serika` command. A portable `.zip` is there too. |
+| Linux, any distribution | `serika-code-<version>-x86_64.AppImage`: make it executable and run it. |
+| Debian, Ubuntu | `serika-code_<version>_amd64.deb`: `sudo apt install ./serika-code_*_amd64.deb` |
+
+Both desktop packages include the `serika` command line. To install only the CLI:
 
 ```bash
 # Linux and macOS
