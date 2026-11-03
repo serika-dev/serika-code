@@ -2315,7 +2315,7 @@ mod tests {
 
     #[test]
     fn router_matches_responses_and_answers_requests() {
-        let router = Router::new(Some(PathBuf::from(r"C:\Work\My Project")));
+        let router = Router::new(Some(std::env::temp_dir().join("Work").join("My Project")));
         let mut rx = router.register(5);
         assert!(router.incoming(json!({ "jsonrpc": "2.0", "method": "notifications/message", "params": {} })).is_empty());
         let replies = router.incoming(json!([
