@@ -543,6 +543,7 @@ Item {
         target: ipc
         function onBrowserActivity() { if (ipc.ui.autoBrowser !== false) shell.showPanel("browser") }
         function onPanelRequested(which) {
+            if (which.indexOf("settings:") === 0) { shell.openSettings(which.substring(9)); return }
             if (which === "addProject") folderDialog.open()
             else shell.showPanel(which)
             shell.settingsOpen = false

@@ -151,7 +151,20 @@ impl Host {
         // drive letter are the same place.
         let path = PathBuf::from(resolve_folder(&path.display().to_string()));
         let _ = self.runtime.sessions.remember_project(&path);
-        *self.project.lock().unwrap_or_else(|e| e.into_inner()) = path;
+        *self.project.lock().unwrap_or_else(|e| e.into_inner()) = path.clone();
+        // The project's default git account, if it has one and the repository uses another.
+        let book = serika_runtime::git::load_book(&self.runtime.paths.data_dir);
+        if let Some(id) = book.defaults.get(&canon_key(&path.display().to_string())).cloned() {
+            if let Some(account) = book.accounts.into_iter().find(|a| a.id == id) {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        if serika_runtime::git::identity(&path).await.account != account.id {
+                            let _ = serika_runtime::git::apply_account(&path, Some(&account)).await;
+                        }
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -391,9 +404,59 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
         }
         "chat.runs" => Ok(runs_json(&host)),
         "git.overview" => {
-            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            let asked = optional_text(&params, "project");
+            let project = asked.clone().map(PathBuf::from).unwrap_or_else(|| host.project());
             let overview = serika_runtime::git::overview(&project).await.map_err(|err| err.to_string())?;
-            Ok(serde_json::to_value(overview).unwrap_or(Value::Null))
+            let mut value = serde_json::to_value(overview).unwrap_or(Value::Null);
+            // Echo the folder asked about, so the app can drop answers for a project it left.
+            value["project"] = json!(asked.unwrap_or_default());
+            Ok(value)
+        }
+        "git.accounts" => {
+            // GitHub logins from the GitHub CLI and Git Credential Manager join the list by themselves.
+            serika_runtime::git::import_detected(&runtime.paths.data_dir).await;
+            Ok(git_accounts_json(&host, optional_text(&params, "project")))
+        }
+        "git.accountSave" => {
+            let account: serika_runtime::git::Account = serde_json::from_value(params.get("account").cloned().unwrap_or(Value::Null))
+                .map_err(|err| format!("not a git account: {err}"))?;
+            serika_runtime::git::save_account(&runtime.paths.data_dir, account).map_err(|err| err.to_string())?;
+            Ok(git_accounts_json(&host, optional_text(&params, "project")))
+        }
+        "git.accountRemove" => {
+            serika_runtime::git::remove_account(&runtime.paths.data_dir, &text(&params, "id")).map_err(|err| err.to_string())?;
+            Ok(git_accounts_json(&host, optional_text(&params, "project")))
+        }
+        // Use an account in a project now ("" = your global git settings), and optionally
+        // make it that project's default.
+        "git.accountUse" => {
+            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            let id = text(&params, "id");
+            let book = serika_runtime::git::load_book(&runtime.paths.data_dir);
+            let account = book.accounts.iter().find(|a| a.id == id).cloned();
+            if !id.is_empty() && account.is_none() {
+                return Err("that git account no longer exists".into());
+            }
+            serika_runtime::git::apply_account(&project, account.as_ref()).await.map_err(|err| err.to_string())?;
+            if params.get("makeDefault").and_then(Value::as_bool).unwrap_or(false) {
+                serika_runtime::git::set_default(&runtime.paths.data_dir, &canon_key(&project.display().to_string()), &id)
+                    .map_err(|err| err.to_string())?;
+            }
+            let overview = serika_runtime::git::overview(&project).await.map_err(|err| err.to_string())?;
+            let label = account.map(|a| a.label).unwrap_or_else(|| "your global git settings".into());
+            Ok(json!({"message": format!("This project now uses {label}."), "overview": overview,
+                      "accounts": git_accounts_json(&host, Some(project.display().to_string()))}))
+        }
+        "git.accountDefault" => {
+            let project = text(&params, "project");
+            serika_runtime::git::set_default(&runtime.paths.data_dir, &canon_key(&project), &text(&params, "id"))
+                .map_err(|err| err.to_string())?;
+            Ok(git_accounts_json(&host, Some(project)))
+        }
+        "git.branches" => {
+            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            let list = serika_runtime::git::branches(&project).await.map_err(|err| err.to_string())?;
+            Ok(json!({"branches": list}))
         }
         "git.stashDiff" => {
             let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
@@ -714,6 +777,14 @@ fn mask_secrets(definition: &mut Value) {
             definition["url"] = json!(format!("{base}?{}", query.join("&")));
         }
     }
+}
+
+/// Git accounts, each project's default (by project key), and the default for `project`.
+fn git_accounts_json(host: &Host, project: Option<String>) -> Value {
+    let book = serika_runtime::git::load_book(&host.runtime.paths.data_dir);
+    let project = project.unwrap_or_else(|| host.project().display().to_string());
+    let current = book.defaults.get(&canon_key(&project)).cloned().unwrap_or_default();
+    json!({"accounts": book.accounts, "defaults": book.defaults, "projectDefault": current, "projectKey": canon_key(&project)})
 }
 
 fn skills_list(host: &Host) -> Value {

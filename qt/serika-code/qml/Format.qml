@@ -268,7 +268,8 @@ QtObject {
         if (seconds >= startToday - 30 * day) return { key: "3month", label: "Previous 30 days" }
         var d = new Date(seconds * 1000)
         var months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-        return { key: "4" + (9999 - d.getFullYear()) + String(99 - d.getMonth()).padStart(2, "0"), label: months[d.getMonth()] + " " + d.getFullYear() }
+        var month = 99 - d.getMonth()
+        return { key: "4" + (9999 - d.getFullYear()) + (month < 10 ? "0" : "") + month, label: months[d.getMonth()] + " " + d.getFullYear() }
     }
 
     // Sidebar rows when chats are not grouped by project: by day ("date") or one list ("none").
@@ -398,6 +399,145 @@ QtObject {
 
     function escapeHtml(s) {
         return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    }
+
+    // Prose Markdown (code fences are split off before) into blocks the chat draws itself:
+    // heading, para, list, quote, callout, table, hr. Forgiving with half-streamed text.
+    function mdBlocks(text) {
+        var lines = (text || "").replace(/\r/g, "").split("\n")
+        var out = []
+        var listRe = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/
+        var tableSep = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/
+        function isHeading(l) { return /^#{1,6}\s+\S/.test(l) }
+        function isHr(l) { return /^\s*([-*_])(\s*\1){2,}\s*$/.test(l) }
+        function isQuote(l) { return /^\s*>/.test(l) }
+        function cells(l) {
+            var s = l.trim()
+            if (s.charAt(0) === "|") s = s.substring(1)
+            if (s.charAt(s.length - 1) === "|") s = s.substring(0, s.length - 1)
+            return s.replace(/\\\|/g, "\u0002").split("|").map(function (c) { return c.trim().replace(/\u0002/g, "|") })
+        }
+        var i = 0
+        while (i < lines.length) {
+            var line = lines[i]
+            if (line.trim().length === 0) { i++; continue }
+            var h = line.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/)
+            if (h) { out.push({ type: "heading", level: h[1].length, text: h[2] }); i++; continue }
+            if (isHr(line)) { out.push({ type: "hr" }); i++; continue }
+            // Table: a header row, then a separator row
+            if (line.indexOf("|") >= 0 && i + 1 < lines.length && tableSep.test(lines[i + 1])) {
+                var header = cells(line)
+                var align = cells(lines[i + 1]).map(function (c) {
+                    var l = c.charAt(0) === ":", r = c.charAt(c.length - 1) === ":"
+                    return l && r ? "center" : (r ? "right" : "left")
+                })
+                var rows = []
+                i += 2
+                while (i < lines.length && lines[i].indexOf("|") >= 0 && lines[i].trim().length > 0) {
+                    var row = cells(lines[i])
+                    while (row.length < header.length) row.push("")
+                    rows.push(row.slice(0, header.length))
+                    i++
+                }
+                out.push({ type: "table", header: header, align: align, rows: rows })
+                continue
+            }
+            if (isQuote(line)) {
+                var quoted = []
+                while (i < lines.length && isQuote(lines[i])) {
+                    quoted.push(lines[i].replace(/^\s*>\s?/, ""))
+                    i++
+                }
+                var callout = (quoted[0] || "").match(/^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i)
+                if (callout) {
+                    var rest = quoted.slice(1)
+                    if (callout[2].trim().length > 0) rest.unshift(callout[2])
+                    out.push({ type: "callout", kind: callout[1].toLowerCase(), text: rest.join("\n").trim() })
+                } else {
+                    out.push({ type: "quote", text: quoted.join("\n").trim() })
+                }
+                continue
+            }
+            if (listRe.test(line)) {
+                var items = []
+                var base = line.match(listRe)[1].length
+                while (i < lines.length) {
+                    var l2 = lines[i]
+                    var m = l2.match(listRe)
+                    if (m) {
+                        var indent = Math.max(0, m[1].replace(/\t/g, "    ").length - base)
+                        var body = m[3]
+                        var task = body.match(/^\[([ xX])\]\s+(.*)$/)
+                        // A top-level item of another kind (bullets after numbers, tasks) starts a new list.
+                        if (indent < 2 && items.length > 0) {
+                            var first = items[0]
+                            var kind = task ? "task" : (/\d/.test(m[2]) ? "ordered" : "bullet")
+                            var firstKind = first.checked !== null ? "task" : (first.ordered ? "ordered" : "bullet")
+                            if (kind !== firstKind) break
+                        }
+                        items.push({
+                            depth: Math.min(4, Math.floor(indent / 2)),
+                            ordered: /\d/.test(m[2]),
+                            num: /\d/.test(m[2]) ? parseInt(m[2]) : 0,
+                            checked: task ? (task[1] !== " ") : null,
+                            text: task ? task[2] : body
+                        })
+                        i++
+                    } else if (l2.trim().length > 0 && /^\s{2,}/.test(l2) && items.length > 0) {
+                        items[items.length - 1].text += "\n" + l2.trim()   // continuation line
+                        i++
+                    } else if (l2.trim().length === 0 && i + 1 < lines.length && listRe.test(lines[i + 1])) {
+                        i++                                              // loose list: blank between items
+                    } else {
+                        break
+                    }
+                }
+                out.push({ type: "list", items: items })
+                continue
+            }
+            var para = []
+            while (i < lines.length && lines[i].trim().length > 0 && !isHeading(lines[i]) && !isHr(lines[i])
+                   && !isQuote(lines[i]) && !listRe.test(lines[i])
+                   && !(lines[i].indexOf("|") >= 0 && i + 1 < lines.length && tableSep.test(lines[i + 1]))) {
+                para.push(lines[i])
+                i++
+            }
+            if (para.length === 0) { para.push(lines[i]); i++ }
+            out.push({ type: "para", text: para.join("\n") })
+        }
+        return out
+    }
+
+    // Inline Markdown to Qt rich text: `code` as a tinted chip, links, bold, italic,
+    // strikethrough, and line breaks. `c` holds colors: { code, codeText, link }.
+    function mdInline(src, c) {
+        var keep = []
+        function hold(html) { keep.push(html); return "\u0001" + (keep.length - 1) + "\u0001" }
+        var s = (src || "").replace(/`([^`\n]+)`/g, function (m, code) {
+            return hold("<span style=\"font-family:'" + c.mono + "';background-color:" + c.code + ";color:" + c.codeText + ";\">&nbsp;"
+                        + escapeHtml(code) + "&nbsp;</span>")
+        })
+        s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)[^)]*\)/g, function (m, alt, url) {
+            return hold("<a href=\"" + escapeHtml(url) + "\" style=\"color:" + c.link + ";text-decoration:none;\">🖼 " + escapeHtml(alt || url) + "</a>")
+        })
+        s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, function (m, label, url) {
+            return hold("<a href=\"" + escapeHtml(url) + "\" style=\"color:" + c.link + ";text-decoration:none;\">" + mdEmphasis(escapeHtml(label)) + "</a>")
+        })
+        s = s.replace(/(^|[\s(])(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g, function (m, pre, url) {
+            return pre + hold("<a href=\"" + escapeHtml(url) + "\" style=\"color:" + c.link + ";text-decoration:none;\">" + escapeHtml(url) + "</a>")
+        })
+        s = mdEmphasis(escapeHtml(s))
+        s = s.replace(/\n/g, "<br/>")
+        return s.replace(/\u0001(\d+)\u0001/g, function (m, n) { return keep[parseInt(n)] })
+    }
+
+    function mdEmphasis(s) {
+        return s.replace(/\*\*\*(?!\s)([^*]+?)\*\*\*/g, "<b><i>$1</i></b>")
+                .replace(/\*\*(?!\s)(.+?)\*\*/g, "<b>$1</b>")
+                .replace(/(^|[^\w])__(?!\s)(.+?)__(?!\w)/g, "$1<b>$2</b>")
+                .replace(/(^|[^*\w])\*(?![\s*])([^*\n]+?)\*(?!\*)/g, "$1<i>$2</i>")
+                .replace(/(^|[^\w])_(?![\s_])([^_\n]+?)_(?!\w)/g, "$1<i>$2</i>")
+                .replace(/~~(?!\s)(.+?)~~/g, "<s>$1</s>")
     }
 
     function diffHtml(diff, light, mono) {

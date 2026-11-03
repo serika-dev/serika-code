@@ -65,6 +65,8 @@ class IpcClient : public QObject {
     Q_PROPERTY(QVariantList agents READ agents NOTIFY agentsChanged)
     Q_PROPERTY(QVariantList terminals READ terminals NOTIFY terminalsChanged)
     Q_PROPERTY(QVariantMap git READ git NOTIFY gitChanged)
+    Q_PROPERTY(QVariantList gitBranches READ gitBranches NOTIFY gitBranchesChanged)
+    Q_PROPERTY(QVariantMap gitAccounts READ gitAccounts NOTIFY gitAccountsChanged)
     Q_PROPERTY(QVariantMap mcp READ mcp NOTIFY mcpChanged)
     Q_PROPERTY(QVariantList skills READ skills NOTIFY skillsChanged)
     Q_PROPERTY(QString browserImage READ browserImage NOTIFY browserImageChanged)
@@ -135,6 +137,8 @@ public:
     QVariantList agents() const { return m_agents; }
     QVariantList terminals() const { return m_terminals; }
     QVariantMap git() const { return m_git; }
+    QVariantList gitBranches() const { return m_gitBranches; }
+    QVariantMap gitAccounts() const { return m_gitAccounts; }
     QVariantMap mcp() const { return m_mcp; }
     QVariantList skills() const { return m_skills; }
     QString browserImage() const { return m_browserImage; }
@@ -184,7 +188,13 @@ public:
     Q_INVOKABLE void stopChat(const QString &sessionId);
     // Git panel
     Q_INVOKABLE void gitRefresh();
-    Q_INVOKABLE void gitAction(const QString &action, int index = -1, const QString &message = QString());
+    Q_INVOKABLE void gitAction(const QString &action, int index = -1, const QString &message = QString(), const QString &label = QString());
+    Q_INVOKABLE void gitBranchesRefresh();
+    Q_INVOKABLE void gitAccountsRefresh();
+    Q_INVOKABLE void gitAccountSave(const QVariantMap &account);
+    Q_INVOKABLE void gitAccountRemove(const QString &id);
+    Q_INVOKABLE void gitAccountUse(const QString &id, bool makeDefault);
+    Q_INVOKABLE void gitAccountDefault(const QString &project, const QString &id);
     Q_INVOKABLE void gitStashDiff(int index);
     Q_INVOKABLE void gitCommitDiff(const QString &hash);
     Q_INVOKABLE void gitFileDiff(const QString &path, bool untracked);
@@ -286,6 +296,8 @@ signals:
     void turnsModelChanged();
     void liveChatsChanged();
     void gitChanged();
+    void gitBranchesChanged();
+    void gitAccountsChanged();
     void gitDiffReady(const QString &key, const QVariantList &files);
     void gitMessage(const QString &text, bool error);
 
@@ -328,6 +340,12 @@ private:
     void handleBackgroundEvent(LiveRun &run, const QString &event, const QJsonObject &obj);
     void finishRun(const QString &runId);
     QVariantMap m_git;
+    // The git operation in progress, kept apart so refreshes don't wipe it:
+    // {action, index, label, startedAt}. While set, no other git action starts.
+    QVariantMap m_gitBusy;
+    QVariantList m_gitBranches;
+    QVariantMap m_gitAccounts;
+    void setGit(const QVariantMap &overview);
     QString findSerika() const;
 
     QProcess m_process;

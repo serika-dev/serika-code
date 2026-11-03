@@ -10,7 +10,29 @@ Item {
     readonly property var dict: ipc.strings
     readonly property var g: ipc.git
     readonly property bool repo: g.repo === true
-    readonly property string busy: g.busy || ""
+    // The git operation running now ({action, index, label, startedAt}); everything that
+    // changes the repository waits until it is done.
+    readonly property var busyInfo: g.busy || null
+    readonly property string busy: busyInfo ? busyInfo.action : ""
+    readonly property bool isBusy: busy.length > 0
+    property int elapsed: 0
+    Timer {
+        interval: 1000
+        repeat: true
+        running: panel.isBusy
+        onTriggered: panel.elapsed = Math.round((Date.now() - panel.busyInfo.startedAt) / 1000)
+        onRunningChanged: panel.elapsed = 0
+    }
+    function commits(n) { return n === 1 ? panel.tr("GitOneCommit", "1 commit") : panel.tr("GitNCommits", "{n} commits", { n: n }) }
+    function initials(name) {
+        const parts = (name || "?").trim().split(/\s+/)
+        return ((parts[0] || "?").charAt(0) + (parts.length > 1 ? parts[parts.length - 1].charAt(0) : "")).toUpperCase()
+    }
+    function accountById(id) {
+        const list = ipc.gitAccounts.accounts || []
+        for (let i = 0; i < list.length; i++) if (list[i].id === id) return list[i]
+        return null
+    }
     property string view: "stashes"
     property string filter: ""
     property string openKey: ""
@@ -33,10 +55,12 @@ Item {
         openKey = key
         if (diffs[key] === undefined) { loadingKey = key; load() }
     }
+    // Success fades on its own; an error stays until you close it.
     function say(text, error) {
         note = text
         noteError = error
-        noteTimer.restart()
+        if (error) noteTimer.stop()
+        else noteTimer.restart()
     }
     readonly property var stashes: (g.stashes || []).filter(function (s) {
         const q = panel.filter.trim().toLowerCase()
@@ -46,8 +70,8 @@ Item {
 
     // A different project: start over with its repository.
     readonly property string project: ipc.projectPath
-    onProjectChanged: { diffs = ({}); openKey = ""; filter = ""; ipc.gitRefresh() }
-    Component.onCompleted: ipc.gitRefresh()
+    onProjectChanged: { diffs = ({}); openKey = ""; filter = ""; ipc.gitRefresh(); ipc.gitAccountsRefresh() }
+    Component.onCompleted: { ipc.gitRefresh(); ipc.gitAccountsRefresh() }
     onVisibleChanged: if (visible) ipc.gitRefresh()
     Timer {
         interval: 8000
@@ -94,88 +118,370 @@ Item {
         anchors.fill: parent
         spacing: 0
 
-        // Branch, upstream and sync
+        // Branch switcher, account switcher, refresh
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 52
+            Layout.preferredHeight: 50
             color: Theme.bg
             visible: panel.repo
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 12
+                anchors.leftMargin: 8
                 anchors.rightMargin: 8
-                spacing: 8
-                Icon { name: "git-branch"; size: 16; color: Theme.accentSecondary }
-                ColumnLayout {
+                spacing: 6
+                // Current branch; click to switch or create one
+                Rectangle {
+                    id: branchButton
                     Layout.fillWidth: true
-                    spacing: 1
-                    Text {
-                        Layout.fillWidth: true
-                        text: panel.g.detached ? panel.tr("GitDetached", "Detached HEAD") : (panel.g.branch || "")
-                        elide: Text.ElideRight
-                        color: Theme.text
-                        font.family: Theme.sans
-                        font.pixelSize: 14
-                        font.weight: Font.DemiBold
-                    }
-                    Text {
-                        Layout.fillWidth: true
-                        text: panel.g.upstream ? panel.g.upstream + (panel.g.fetchedAt ? "  ·  " + panel.tr("GitFetched", "fetched {t} ago", { t: Format.relTime(panel.g.fetchedAt) }) : "")
-                                               : panel.tr("GitNoUpstream", "No upstream branch")
-                        elide: Text.ElideRight
-                        color: Theme.textDim
-                        font.family: Theme.sans
-                        font.pixelSize: 11
-                    }
-                }
-                // Behind / ahead
-                Repeater {
-                    model: [
-                        { icon: "arrow-down", n: panel.g.behind || 0, tip: panel.tr("GitBehind", "Incoming commits") },
-                        { icon: "arrow-up", n: panel.g.ahead || 0, tip: panel.tr("GitAhead", "Commits to push") }
-                    ]
-                    delegate: Rectangle {
-                        required property var modelData
-                        visible: !!panel.g.upstream
-                        implicitWidth: syncRow.implicitWidth + 14
-                        implicitHeight: 24
-                        radius: 12
-                        color: modelData.n > 0 ? Theme.accentSoft : Theme.hover
-                        Row {
-                            id: syncRow
-                            anchors.centerIn: parent
-                            spacing: 3
-                            Icon { anchors.verticalCenter: parent.verticalCenter; name: modelData.icon; size: 12; color: modelData.n > 0 ? Theme.accentSecondary : Theme.textDim }
-                            Text { anchors.verticalCenter: parent.verticalCenter; text: modelData.n; color: modelData.n > 0 ? Theme.accentSecondary : Theme.textDim; font.family: Theme.sans; font.pixelSize: 12; font.weight: Font.Medium }
+                    Layout.maximumWidth: implicitWidth
+                    implicitWidth: branchRow.implicitWidth + 20
+                    implicitHeight: 34
+                    radius: 9
+                    color: branchArea.containsMouse || branchMenu.opened ? Theme.active : Theme.hover
+                    border.width: 1
+                    border.color: branchMenu.opened ? Theme.accent : Theme.borderSubtle
+                    Behavior on color { ColorAnimation { duration: Theme.motionFast } }
+                    RowLayout {
+                        id: branchRow
+                        anchors.fill: parent
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 8
+                        spacing: 7
+                        Icon { name: "git-branch"; size: 15; color: Theme.accentSecondary }
+                        Text {
+                            Layout.fillWidth: true
+                            Layout.maximumWidth: 220
+                            text: panel.g.detached ? panel.tr("GitDetached", "Detached HEAD") : (panel.g.branch || "")
+                            elide: Text.ElideMiddle
+                            color: Theme.text
+                            font.family: Theme.sans
+                            font.pixelSize: 13
+                            font.weight: Font.DemiBold
                         }
-                        HoverHandler { id: syncHover }
-                        ToolTip.visible: syncHover.hovered
-                        ToolTip.delay: 300
-                        ToolTip.text: modelData.tip
+                        Icon {
+                            name: "chevron-down"
+                            size: 13
+                            color: Theme.textDim
+                            rotation: branchMenu.opened ? 180 : 0
+                            Behavior on rotation { NumberAnimation { duration: Theme.motionFast } }
+                        }
+                    }
+                    MouseArea {
+                        id: branchArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (branchMenu.opened) { branchMenu.close(); return }
+                            ipc.gitBranchesRefresh()
+                            branchSearch.text = ""
+                            branchMenu.open()
+                            Qt.callLater(branchSearch.focusInput)
+                        }
+                    }
+                    ToolTip.visible: branchArea.containsMouse && !branchMenu.opened
+                    ToolTip.delay: 500
+                    ToolTip.text: panel.tr("GitSwitchBranch", "Switch or create a branch")
+
+                    Popover {
+                        id: branchMenu
+                        focus: true
+                        y: branchButton.height + 6
+                        width: Math.min(340, panel.width - 24)
+                        readonly property string query: branchSearch.text.trim()
+                        readonly property var matches: ipc.gitBranches.filter(function (b) {
+                            return branchMenu.query.length === 0 || b.name.toLowerCase().indexOf(branchMenu.query.toLowerCase()) >= 0
+                        })
+                        readonly property bool exists: ipc.gitBranches.some(function (b) { return b.name === branchMenu.query })
+                        function pick(name) {
+                            branchMenu.close()
+                            ipc.gitAction("switch", -1, name, panel.tr("GitSwitching", "Switching to {b}", { b: name }))
+                        }
+                        contentItem: ColumnLayout {
+                            spacing: 4
+                            Field {
+                                id: branchSearch
+                                Layout.fillWidth: true
+                                icon: "search"
+                                placeholder: panel.tr("GitFindBranch", "Find or create a branch")
+                                onAccepted: {
+                                    if (branchMenu.matches.length > 0 && branchMenu.matches[0].name.toLowerCase() === branchMenu.query.toLowerCase()) branchMenu.pick(branchMenu.matches[0].name)
+                                    else if (branchMenu.query.length > 0 && !branchMenu.exists) createRow.triggered()
+                                }
+                            }
+                            MenuRow {
+                                id: createRow
+                                visible: branchMenu.query.length > 0 && !branchMenu.exists
+                                icon: "plus"
+                                label: panel.tr("GitCreateBranch", "Create branch \"{b}\" from {c}", { b: branchMenu.query, c: panel.g.branch || "HEAD" })
+                                onTriggered: {
+                                    const name = branchMenu.query
+                                    branchMenu.close()
+                                    ipc.gitAction("branch.create", -1, name, panel.tr("GitCreating", "Creating {b}", { b: name }))
+                                }
+                            }
+                            Flickable {
+                                id: branchFlick
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: Math.min(branchColumn.implicitHeight, 320)
+                                contentHeight: branchColumn.implicitHeight
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+                                SmoothWheel { flickable: branchFlick }
+                                ColumnLayout {
+                                    id: branchColumn
+                                    width: branchFlick.width
+                                    spacing: 0
+                                    Repeater {
+                                        model: branchMenu.matches
+                                        delegate: ColumnLayout {
+                                            id: branchItem
+                                            required property var modelData
+                                            required property int index
+                                            readonly property bool firstRemote: modelData.remote && (index === 0 || !branchMenu.matches[index - 1].remote)
+                                            Layout.fillWidth: true
+                                            spacing: 0
+                                            Text {
+                                                visible: branchItem.firstRemote
+                                                Layout.leftMargin: 10
+                                                Layout.topMargin: 6
+                                                Layout.bottomMargin: 2
+                                                text: panel.tr("GitRemoteBranches", "Remote branches")
+                                                color: Theme.textDim
+                                                font.family: Theme.sans
+                                                font.pixelSize: 11
+                                                font.weight: Font.Medium
+                                                font.capitalization: Font.AllUppercase
+                                                font.letterSpacing: 0.6
+                                            }
+                                            Rectangle {
+                                                Layout.fillWidth: true
+                                                implicitHeight: 44
+                                                radius: 8
+                                                color: rowArea.containsMouse ? Theme.active : "transparent"
+                                                RowLayout {
+                                                    anchors.fill: parent
+                                                    anchors.leftMargin: 10
+                                                    anchors.rightMargin: 10
+                                                    spacing: 10
+                                                    Icon {
+                                                        name: branchItem.modelData.current ? "check" : (branchItem.modelData.remote ? "cloud" : "git-branch")
+                                                        size: 14
+                                                        color: branchItem.modelData.current ? Theme.accentSecondary : Theme.textDim
+                                                    }
+                                                    ColumnLayout {
+                                                        Layout.fillWidth: true
+                                                        spacing: 1
+                                                        Text {
+                                                            Layout.fillWidth: true
+                                                            text: branchItem.modelData.name
+                                                            elide: Text.ElideMiddle
+                                                            color: Theme.text
+                                                            font.family: Theme.sans
+                                                            font.pixelSize: 13
+                                                            font.weight: branchItem.modelData.current ? Font.DemiBold : Font.Normal
+                                                        }
+                                                        Text {
+                                                            Layout.fillWidth: true
+                                                            text: Format.relTime(branchItem.modelData.time) + "  ·  " + branchItem.modelData.subject
+                                                            elide: Text.ElideRight
+                                                            color: Theme.textDim
+                                                            font.family: Theme.sans
+                                                            font.pixelSize: 11
+                                                        }
+                                                    }
+                                                    Text {
+                                                        visible: branchItem.modelData.behind > 0 || branchItem.modelData.ahead > 0
+                                                        text: (branchItem.modelData.behind > 0 ? "↓" + branchItem.modelData.behind + " " : "") + (branchItem.modelData.ahead > 0 ? "↑" + branchItem.modelData.ahead : "")
+                                                        color: Theme.accentSecondary
+                                                        font.family: Theme.sans
+                                                        font.pixelSize: 11
+                                                    }
+                                                }
+                                                MouseArea {
+                                                    id: rowArea
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    cursorShape: branchItem.modelData.current ? Qt.ArrowCursor : Qt.PointingHandCursor
+                                                    onClicked: if (!branchItem.modelData.current) branchMenu.pick(branchItem.modelData.name)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Text {
+                                visible: branchMenu.matches.length === 0 && branchMenu.query.length === 0
+                                Layout.margins: 10
+                                text: panel.tr("Loading", "Loading…")
+                                color: Theme.textDim
+                                font.family: Theme.sans
+                                font.pixelSize: 12
+                            }
+                        }
                     }
                 }
-                IconButton {
-                    icon: panel.busy === "fetch" ? "loader" : "download"
-                    iconSize: 15
-                    tip: panel.tr("GitFetch", "Fetch")
-                    enabled: panel.busy.length === 0
-                    onClicked: ipc.gitAction("fetch")
-                }
-                IconButton {
-                    icon: panel.busy === "pull" ? "loader" : "arrow-down"
-                    iconSize: 15
-                    tip: panel.tr("GitPull", "Pull (fast-forward only)")
-                    enabled: panel.busy.length === 0 && (panel.g.behind || 0) > 0
-                    opacity: enabled ? 1 : 0.4
-                    onClicked: ipc.gitAction("pull")
-                }
-                IconButton {
-                    icon: panel.busy === "push" ? "loader" : "arrow-up"
-                    iconSize: 15
-                    tip: panel.tr("GitPush", "Push")
-                    enabled: panel.busy.length === 0 && (panel.g.ahead || 0) > 0
-                    opacity: enabled ? 1 : 0.4
-                    onClicked: ipc.gitAction("push")
+                Item { Layout.fillWidth: true }
+                // Who commits here; click to switch git accounts
+                Rectangle {
+                    id: accountButton
+                    readonly property var who: panel.g.identity || {}
+                    readonly property var account: panel.accountById(who.account || "")
+                    implicitWidth: accountRow.implicitWidth + 16
+                    implicitHeight: 34
+                    radius: 9
+                    color: accountArea.containsMouse || accountMenu.opened ? Theme.active : "transparent"
+                    border.width: accountMenu.opened ? 1 : 0
+                    border.color: Theme.accent
+                    Behavior on color { ColorAnimation { duration: Theme.motionFast } }
+                    RowLayout {
+                        id: accountRow
+                        anchors.centerIn: parent
+                        spacing: 6
+                        Rectangle {
+                            implicitWidth: 22
+                            implicitHeight: 22
+                            radius: 11
+                            color: accountButton.account ? Theme.accent : Theme.active
+                            Text {
+                                anchors.centerIn: parent
+                                text: panel.initials(accountButton.who.name || "?")
+                                color: accountButton.account ? "white" : Theme.textSecondary
+                                font.family: Theme.sans
+                                font.pixelSize: 10
+                                font.weight: Font.DemiBold
+                            }
+                        }
+                        Text {
+                            Layout.maximumWidth: 120
+                            visible: panel.width > 420
+                            text: accountButton.account ? accountButton.account.label : (accountButton.who.email || panel.tr("GitNoIdentity", "No identity"))
+                            elide: Text.ElideRight
+                            color: Theme.textSecondary
+                            font.family: Theme.sans
+                            font.pixelSize: 12
+                        }
+                        Icon { name: "chevron-down"; size: 12; color: Theme.textDim }
+                    }
+                    MouseArea {
+                        id: accountArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (accountMenu.opened) { accountMenu.close(); return }
+                            ipc.gitAccountsRefresh()
+                            accountMenu.open()
+                        }
+                    }
+                    ToolTip.visible: accountArea.containsMouse && !accountMenu.opened
+                    ToolTip.delay: 500
+                    ToolTip.text: (accountButton.who.name || "") + " <" + (accountButton.who.email || "") + ">"
+                                  + (accountButton.who.username ? "\n" + panel.tr("GitLogin", "Login: {u}", { u: accountButton.who.username }) : "")
+
+                    Popover {
+                        id: accountMenu
+                        x: accountButton.width - width
+                        y: accountButton.height + 6
+                        width: 300
+                        property bool makeDefault: true
+                        function use(id) {
+                            accountMenu.close()
+                            ipc.gitAccountUse(id, accountMenu.makeDefault)
+                        }
+                        contentItem: ColumnLayout {
+                            spacing: 2
+                            Text {
+                                Layout.leftMargin: 10
+                                Layout.topMargin: 6
+                                Layout.bottomMargin: 2
+                                text: panel.tr("GitAccountFor", "Git account for this project")
+                                color: Theme.textDim
+                                font.family: Theme.sans
+                                font.pixelSize: 11
+                                font.weight: Font.Medium
+                                font.capitalization: Font.AllUppercase
+                                font.letterSpacing: 0.6
+                            }
+                            Repeater {
+                                model: (ipc.gitAccounts.accounts || [])
+                                delegate: Rectangle {
+                                    id: accountItem
+                                    required property var modelData
+                                    readonly property bool current: (panel.g.identity || {}).account === modelData.id
+                                    readonly property bool isDefault: ipc.gitAccounts.projectDefault === modelData.id
+                                    Layout.fillWidth: true
+                                    implicitHeight: 46
+                                    radius: 8
+                                    color: itemArea.containsMouse ? Theme.active : "transparent"
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+                                        spacing: 10
+                                        Rectangle {
+                                            implicitWidth: 26
+                                            implicitHeight: 26
+                                            radius: 13
+                                            color: accountItem.current ? Theme.accent : Theme.active
+                                            Text { anchors.centerIn: parent; text: panel.initials(accountItem.modelData.name); color: accountItem.current ? "white" : Theme.textSecondary; font.family: Theme.sans; font.pixelSize: 11; font.weight: Font.DemiBold }
+                                        }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 1
+                                            Text { Layout.fillWidth: true; text: accountItem.modelData.label; elide: Text.ElideRight; color: Theme.text; font.family: Theme.sans; font.pixelSize: 13; font.weight: accountItem.current ? Font.DemiBold : Font.Normal }
+                                            Text { Layout.fillWidth: true; text: accountItem.modelData.name + " <" + accountItem.modelData.email + ">"; elide: Text.ElideRight; color: Theme.textDim; font.family: Theme.sans; font.pixelSize: 11 }
+                                        }
+                                        Tag { visible: accountItem.isDefault; text: panel.tr("GitDefault", "default") }
+                                        Icon { visible: accountItem.current; name: "check"; size: 14; color: Theme.accentSecondary }
+                                    }
+                                    MouseArea {
+                                        id: itemArea
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: accountMenu.use(accountItem.modelData.id)
+                                    }
+                                }
+                            }
+                            MenuRow {
+                                icon: (panel.g.identity || {}).account ? "user" : "check"
+                                label: panel.tr("GitGlobalIdentity", "Your global git settings")
+                                onTriggered: accountMenu.use("")
+                            }
+                            Text {
+                                visible: (ipc.gitAccounts.accounts || []).length === 0
+                                Layout.fillWidth: true
+                                Layout.margins: 10
+                                wrapMode: Text.WordWrap
+                                text: panel.tr("GitNoAccounts", "Add your work and personal git accounts to switch between them per project.")
+                                color: Theme.textDim
+                                font.family: Theme.sans
+                                font.pixelSize: 12
+                            }
+                            MenuDivider {}
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Layout.leftMargin: 10
+                                Layout.rightMargin: 6
+                                Layout.preferredHeight: 36
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: panel.tr("GitMakeDefault", "Use it every time I open this project")
+                                    wrapMode: Text.WordWrap
+                                    color: Theme.textSecondary
+                                    font.family: Theme.sans
+                                    font.pixelSize: 12
+                                }
+                                Toggle { checked: accountMenu.makeDefault; onToggled: (v) => accountMenu.makeDefault = v }
+                            }
+                            MenuRow {
+                                icon: "settings"
+                                label: panel.tr("GitManageAccounts", "Manage git accounts…")
+                                onTriggered: { accountMenu.close(); ipc.panelRequested("settings:gitaccounts") }
+                            }
+                        }
+                    }
                 }
                 IconButton {
                     icon: "refresh-cw"
@@ -185,6 +491,125 @@ Item {
                 }
             }
             Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: Theme.borderSubtle }
+        }
+
+        // Sync with the upstream: what's waiting either way, and the buttons that move it
+        Rectangle {
+            id: syncCard
+            readonly property int behind: panel.g.behind || 0
+            readonly property int ahead: panel.g.ahead || 0
+            readonly property bool network: ["fetch", "pull", "push", "publish"].indexOf(panel.busy) >= 0
+            Layout.fillWidth: true
+            Layout.leftMargin: 10
+            Layout.rightMargin: 10
+            Layout.topMargin: 10
+            Layout.preferredHeight: 58
+            visible: panel.repo
+            radius: 12
+            clip: true
+            color: behind > 0 ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.10) : Theme.card
+            border.width: 1
+            border.color: behind > 0 ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.35) : Theme.borderSubtle
+            Behavior on color { ColorAnimation { duration: Theme.motionBase } }
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 10
+                spacing: 10
+                Rectangle {
+                    implicitWidth: 32
+                    implicitHeight: 32
+                    radius: 10
+                    color: syncCard.behind > 0 ? Theme.accent : Theme.active
+                    Icon {
+                        id: syncIcon
+                        anchors.centerIn: parent
+                        name: syncCard.network ? "loader" : (syncCard.behind > 0 ? "download-cloud" : (syncCard.ahead > 0 ? "upload-cloud" : (panel.g.upstream ? "check" : "cloud")))
+                        size: 16
+                        color: syncCard.behind > 0 ? "white" : Theme.textSecondary
+                        RotationAnimator on rotation { id: syncSpin; running: syncCard.network; from: 0; to: 360; duration: 900; loops: Animation.Infinite; onRunningChanged: if (!running) syncIcon.rotation = 0 }
+                    }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Text {
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                        color: Theme.text
+                        font.family: Theme.sans
+                        font.pixelSize: 13
+                        font.weight: Font.DemiBold
+                        text: syncCard.network ? panel.busyInfo.label + "…"
+                            : !panel.g.upstream ? panel.tr("GitNotPublished", "This branch is not on a remote yet")
+                            : syncCard.behind > 0 && syncCard.ahead > 0 ? panel.tr("GitDiverged", "{b} to pull, {a} to push", { b: panel.commits(syncCard.behind), a: panel.commits(syncCard.ahead) })
+                            : syncCard.behind > 0 ? panel.tr("GitNewCommits", "{n} on {u}", { n: panel.commits(syncCard.behind), u: panel.g.upstream })
+                            : syncCard.ahead > 0 ? panel.tr("GitToPush", "{n} not pushed yet", { n: panel.commits(syncCard.ahead) })
+                            : panel.tr("GitUpToDateWith", "Up to date with {u}", { u: panel.g.upstream })
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                        color: Theme.textDim
+                        font.family: Theme.sans
+                        font.pixelSize: 11
+                        text: syncCard.network ? panel.tr("GitElapsed", "{s}s, this talks to the remote", { s: panel.elapsed })
+                            : panel.g.fetchedAt ? panel.tr("GitCheckedAgo", "Checked {t} ago", { t: Format.relTime(panel.g.fetchedAt) })
+                            : panel.tr("GitNeverFetched", "Not checked yet. Fetch to see new commits.")
+                    }
+                }
+                ChipButton {
+                    text: panel.tr("GitFetch", "Fetch")
+                    iconName: "refresh-cw"
+                    visible: !!panel.g.upstream
+                    enabled: !panel.isBusy
+                    opacity: enabled ? 1 : 0.5
+                    onClicked: ipc.gitAction("fetch", -1, "", panel.tr("GitFetching", "Checking {r} for new commits", { r: (panel.g.upstream || "origin").split("/")[0] }))
+                }
+                AccentButton {
+                    implicitHeight: 32
+                    visible: syncCard.behind > 0
+                    text: panel.tr("GitPullN", "Pull {n}", { n: syncCard.behind })
+                    enabled: !panel.isBusy
+                    opacity: enabled ? 1 : 0.5
+                    onClicked: ipc.gitAction("pull", -1, "", panel.tr("GitPulling", "Pulling {n}", { n: panel.commits(syncCard.behind) }))
+                }
+                ChipButton {
+                    visible: !panel.g.upstream && !panel.g.detached
+                    primary: true
+                    text: panel.tr("GitPublish", "Publish branch")
+                    iconName: "upload-cloud"
+                    enabled: !panel.isBusy
+                    opacity: enabled ? 1 : 0.5
+                    onClicked: ipc.gitAction("publish", -1, "", panel.tr("GitPublishing", "Publishing {b}", { b: panel.g.branch }))
+                }
+                ChipButton {
+                    visible: syncCard.ahead > 0
+                    primary: syncCard.behind === 0
+                    text: panel.tr("GitPushN", "Push {n}", { n: syncCard.ahead })
+                    iconName: "upload-cloud"
+                    enabled: !panel.isBusy
+                    opacity: enabled ? 1 : 0.5
+                    onClicked: ipc.gitAction("push", -1, "", panel.tr("GitPushing", "Pushing {n}", { n: panel.commits(syncCard.ahead) }))
+                }
+            }
+            // Indeterminate progress while the remote is busy
+            Item {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 2
+                visible: syncCard.network
+                clip: true
+                Rectangle {
+                    id: syncSweep
+                    width: parent.width * 0.3
+                    height: 2
+                    radius: 1
+                    color: Theme.accent
+                    NumberAnimation on x { running: syncCard.network; from: -syncSweep.width; to: syncSweep.parent.width; duration: 1100; loops: Animation.Infinite; easing.type: Easing.InOutQuad }
+                }
+            }
         }
 
         // Views
@@ -207,27 +632,115 @@ Item {
             }
         }
 
-        // Message from the last action
+        // Work in progress (not network, which the sync card shows): stash, switch, account
         Rectangle {
             Layout.fillWidth: true
             Layout.leftMargin: 10
             Layout.rightMargin: 10
-            Layout.preferredHeight: noteText.implicitHeight + 14
-            visible: panel.note.length > 0
-            radius: 8
-            color: panel.noteError ? Theme.dangerSoft : Theme.accentSoft
-            Text {
-                id: noteText
+            Layout.bottomMargin: 6
+            Layout.preferredHeight: panel.isBusy && !syncCard.network ? 40 : 0
+            opacity: panel.isBusy && !syncCard.network ? 1 : 0
+            visible: Layout.preferredHeight > 1
+            Behavior on Layout.preferredHeight { NumberAnimation { duration: Theme.motionBase; easing.type: Theme.easeEmphasis } }
+            Behavior on opacity { NumberAnimation { duration: Theme.motionBase } }
+            radius: 10
+            clip: true
+            color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.12)
+            border.width: 1
+            border.color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.35)
+            RowLayout {
                 anchors.fill: parent
-                anchors.margins: 7
-                anchors.leftMargin: 10
-                text: panel.note
-                wrapMode: Text.Wrap
-                maximumLineCount: 6
-                elide: Text.ElideRight
-                color: panel.noteError ? Theme.danger : Theme.text
-                font.family: Theme.mono
-                font.pixelSize: 11
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                spacing: 10
+                Icon {
+                    id: workSpin
+                    name: "loader"
+                    size: 15
+                    color: Theme.accentSecondary
+                    RotationAnimator on rotation { running: panel.isBusy; from: 0; to: 360; duration: 900; loops: Animation.Infinite }
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: panel.isBusy ? panel.busyInfo.label + "…" : ""
+                    elide: Text.ElideRight
+                    color: Theme.text
+                    font.family: Theme.sans
+                    font.pixelSize: 13
+                    font.weight: Font.Medium
+                }
+                Text {
+                    text: panel.elapsed > 0 ? panel.elapsed + "s" : ""
+                    color: Theme.textDim
+                    font.family: Theme.sans
+                    font.pixelSize: 12
+                }
+            }
+            Item {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 2
+                clip: true
+                Rectangle {
+                    id: workSweep
+                    width: parent.width * 0.3
+                    height: 2
+                    color: Theme.accent
+                    NumberAnimation on x { running: panel.isBusy; from: -workSweep.width; to: workSweep.parent.width; duration: 1100; loops: Animation.Infinite; easing.type: Easing.InOutQuad }
+                }
+            }
+        }
+
+        // Result of the last action: green when it worked, red with git's own words when not
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.leftMargin: 10
+            Layout.rightMargin: 10
+            Layout.bottomMargin: 6
+            Layout.preferredHeight: panel.note.length > 0 ? noteRow.implicitHeight + 18 : 0
+            opacity: panel.note.length > 0 ? 1 : 0
+            visible: Layout.preferredHeight > 1
+            Behavior on Layout.preferredHeight { NumberAnimation { duration: Theme.motionBase; easing.type: Theme.easeEmphasis } }
+            Behavior on opacity { NumberAnimation { duration: Theme.motionBase } }
+            radius: 10
+            clip: true
+            color: panel.noteError ? Theme.dangerSoft : Qt.rgba(0.13, 0.77, 0.37, 0.12)
+            border.width: 1
+            border.color: panel.noteError ? Qt.rgba(0.96, 0.25, 0.37, 0.35) : Qt.rgba(0.13, 0.77, 0.37, 0.35)
+            RowLayout {
+                id: noteRow
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 9
+                anchors.leftMargin: 12
+                spacing: 10
+                Icon {
+                    Layout.alignment: Qt.AlignTop
+                    name: panel.noteError ? "alert-circle" : "check-circle"
+                    size: 15
+                    color: panel.noteError ? Theme.danger : Theme.success
+                }
+                Text {
+                    id: noteText
+                    Layout.fillWidth: true
+                    text: panel.note
+                    wrapMode: Text.Wrap
+                    maximumLineCount: 6
+                    elide: Text.ElideRight
+                    color: Theme.text
+                    font.family: panel.noteError ? Theme.mono : Theme.sans
+                    font.pixelSize: panel.noteError ? 11 : 13
+                }
+                IconButton {
+                    Layout.alignment: Qt.AlignTop
+                    implicitWidth: 22
+                    implicitHeight: 22
+                    icon: "x"
+                    iconSize: 11
+                    onClicked: panel.note = ""
+                }
             }
         }
 
@@ -298,8 +811,8 @@ Item {
                     ChipButton {
                         text: panel.tr("GitStashNow", "Stash")
                         iconName: "archive"
-                        enabled: (panel.g.changes || []).length > 0
-                        onClicked: { panel.stashing = !panel.stashing; if (panel.stashing) Qt.callLater(stashName.forceActiveFocus) }
+                        enabled: (panel.g.changes || []).length > 0 && !panel.isBusy
+                        onClicked: { panel.stashing = !panel.stashing; if (panel.stashing) Qt.callLater(stashName.focusInput) }
                     }
                 }
                 // New stash, named after the ticket
@@ -312,11 +825,12 @@ Item {
                         Layout.fillWidth: true
                         icon: "edit-2"
                         placeholder: panel.tr("GitStashName", "Ticket number and a note, e.g. 4821 login timeout")
-                        onAccepted: { ipc.gitAction("stash.push", -1, text); text = ""; panel.stashing = false }
+                        onAccepted: { ipc.gitAction("stash.push", -1, text, panel.tr("GitStashing", "Stashing your changes")); text = ""; panel.stashing = false }
                     }
                     AccentButton {
                         text: panel.tr("GitStashSave", "Save stash")
-                        onClicked: { ipc.gitAction("stash.push", -1, stashName.text); stashName.text = ""; panel.stashing = false }
+                        enabled: !panel.isBusy
+                        onClicked: { ipc.gitAction("stash.push", -1, stashName.text, panel.tr("GitStashing", "Stashing your changes")); stashName.text = ""; panel.stashing = false }
                     }
                 }
                 Repeater {
@@ -327,6 +841,11 @@ Item {
                         readonly property string key: "stash:" + modelData.index
                         readonly property bool open: panel.openKey === key
                         readonly property string ticket: panel.ticketOf(modelData.message)
+                        readonly property string title: modelData.message || modelData.name
+                        // This stash is the one being popped, applied or deleted right now.
+                        readonly property bool working: panel.isBusy && panel.busyInfo.index === modelData.index && panel.busy.indexOf("stash.") === 0
+                        opacity: panel.isBusy && !working ? 0.55 : 1
+                        Behavior on opacity { NumberAnimation { duration: Theme.motionBase } }
                         Layout.fillWidth: true
                         implicitHeight: stashColumn.implicitHeight + 16
                         radius: 10
@@ -380,9 +899,31 @@ Item {
                                         font.pixelSize: 11
                                     }
                                 }
+                                // Working on this one: a spinner and what is happening
+                                Row {
+                                    visible: stashCard.working
+                                    spacing: 6
+                                    Icon {
+                                        id: rowSpin
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        name: "loader"
+                                        size: 14
+                                        color: Theme.accentSecondary
+                                        RotationAnimator on rotation { running: stashCard.working; from: 0; to: 360; duration: 900; loops: Animation.Infinite }
+                                    }
+                                    Text {
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        text: panel.busy === "stash.pop" ? panel.tr("GitPoppingShort", "Popping…")
+                                            : panel.busy === "stash.apply" ? panel.tr("GitApplyingShort", "Applying…") : panel.tr("GitDroppingShort", "Deleting…")
+                                        color: Theme.accentSecondary
+                                        font.family: Theme.sans
+                                        font.pixelSize: 12
+                                        font.weight: Font.Medium
+                                    }
+                                }
                                 // Actions, on hover or when open
                                 Row {
-                                    visible: stashArea.containsMouse || stashCard.open || applyBtn.hovered || popBtn.hovered || dropBtn.hovered
+                                    visible: !stashCard.working && !panel.isBusy && (stashArea.containsMouse || stashCard.open || applyBtn.hovered || popBtn.hovered || dropBtn.hovered)
                                     spacing: 2
                                     IconButton {
                                         id: applyBtn
@@ -391,8 +932,8 @@ Item {
                                         implicitWidth: 28
                                         implicitHeight: 28
                                         tip: panel.tr("GitApply", "Apply (keep the stash)")
-                                        enabled: panel.busy.length === 0
-                                        onClicked: ipc.gitAction("stash.apply", stashCard.modelData.index)
+                                        enabled: !panel.isBusy
+                                        onClicked: ipc.gitAction("stash.apply", stashCard.modelData.index, "", panel.tr("GitApplying", "Applying {s}", { s: stashCard.title }))
                                     }
                                     IconButton {
                                         id: popBtn
@@ -401,8 +942,8 @@ Item {
                                         implicitWidth: 28
                                         implicitHeight: 28
                                         tip: panel.tr("GitPop", "Pop (apply and remove)")
-                                        enabled: panel.busy.length === 0
-                                        onClicked: ipc.gitAction("stash.pop", stashCard.modelData.index)
+                                        enabled: !panel.isBusy
+                                        onClicked: ipc.gitAction("stash.pop", stashCard.modelData.index, "", panel.tr("GitPopping", "Popping {s}", { s: stashCard.title }))
                                     }
                                     IconButton {
                                         id: dropBtn
@@ -413,11 +954,11 @@ Item {
                                         danger: true
                                         tip: panel.dropArmed === stashCard.modelData.index ? panel.tr("GitDropConfirm", "Click again to delete this stash")
                                                                                           : panel.tr("GitDrop", "Drop")
-                                        enabled: panel.busy.length === 0
+                                        enabled: !panel.isBusy
                                         onClicked: {
                                             if (panel.dropArmed !== stashCard.modelData.index) { panel.dropArmed = stashCard.modelData.index; disarm.restart(); return }
                                             panel.dropArmed = -1
-                                            ipc.gitAction("stash.drop", stashCard.modelData.index)
+                                            ipc.gitAction("stash.drop", stashCard.modelData.index, "", panel.tr("GitDropping", "Deleting {s}", { s: stashCard.title }))
                                         }
                                     }
                                 }

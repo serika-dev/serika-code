@@ -13,6 +13,8 @@ Rectangle {
     property bool revealed: false
     signal accepted()
     signal edited()
+    // Put the cursor in the text box (focusing the field itself would not).
+    function focusInput() { input.forceActiveFocus() }
 
     implicitHeight: 46
     radius: 12

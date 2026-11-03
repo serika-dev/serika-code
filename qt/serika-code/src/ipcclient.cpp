@@ -194,10 +194,12 @@ void IpcClient::handleLine(const QByteArray &line) {
                 emit liveChatsChanged();
             }
         } else if (tag == QLatin1String("gitAction")) {
-            m_git.remove(QStringLiteral("busy"));
-            emit gitChanged();
+            m_gitBusy.clear();
+            setGit(m_git);
             emit gitMessage(error, true);
             gitRefresh();
+        } else if (tag == QLatin1String("gitAccounts")) {
+            emit gitMessage(error, true);
         } else if (tag == QLatin1String("gitDiff")) {
             emit gitMessage(error, true);
         } else if (tag == QLatin1String("browser")) {
@@ -282,13 +284,27 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
         if (!m_running && !m_queue.isEmpty())
             QTimer::singleShot(200, this, &IpcClient::dispatchQueue);
     } else if (tag == QLatin1String("git")) {
-        m_git = result.toVariantMap();
-        emit gitChanged();
+        // An answer for a project you have since left is not this project's state.
+        if (result.value(QStringLiteral("project")).toString().isEmpty() || result.value(QStringLiteral("project")).toString() == m_projectPath)
+            setGit(result.toVariantMap());
     } else if (tag == QLatin1String("gitAction")) {
-        m_git = result.value(QStringLiteral("overview")).toObject().toVariantMap();
-        emit gitChanged();
+        const QString action = m_gitBusy.value(QStringLiteral("action")).toString();
+        m_gitBusy.clear();
+        setGit(result.value(QStringLiteral("overview")).toObject().toVariantMap());
+        if (result.contains(QStringLiteral("accounts"))) {
+            m_gitAccounts = result.value(QStringLiteral("accounts")).toObject().toVariantMap();
+            emit gitAccountsChanged();
+        }
         const QString message = result.value(QStringLiteral("message")).toString();
         emit gitMessage(message.isEmpty() ? QStringLiteral("Done.") : message, false);
+        if (action == QLatin1String("switch") || action == QLatin1String("branch.create") || action == QLatin1String("fetch"))
+            gitBranchesRefresh();
+    } else if (tag == QLatin1String("gitBranches")) {
+        m_gitBranches = result.value(QStringLiteral("branches")).toArray().toVariantList();
+        emit gitBranchesChanged();
+    } else if (tag == QLatin1String("gitAccounts")) {
+        m_gitAccounts = result.toVariantMap();
+        emit gitAccountsChanged();
     } else if (tag == QLatin1String("gitDiff")) {
         const QString key = result.contains(QStringLiteral("hash")) ? result.value(QStringLiteral("hash")).toString()
                           : result.contains(QStringLiteral("index")) ? QStringLiteral("stash:%1").arg(result.value(QStringLiteral("index")).toInt())
@@ -1154,13 +1170,62 @@ void IpcClient::gitRefresh() {
     request(QStringLiteral("git.overview"), {{QStringLiteral("project"), m_projectPath}}, QStringLiteral("git"));
 }
 
-void IpcClient::gitAction(const QString &action, int index, const QString &message) {
+void IpcClient::setGit(const QVariantMap &overview) {
+    m_git = overview;
+    m_git.remove(QStringLiteral("busy"));
+    if (!m_gitBusy.isEmpty())
+        m_git.insert(QStringLiteral("busy"), m_gitBusy);
+    emit gitChanged();
+}
+
+void IpcClient::gitAction(const QString &action, int index, const QString &message, const QString &label) {
+    // One git operation at a time: a second click while one runs would race it.
+    if (!m_gitBusy.isEmpty()) {
+        emit gitMessage(QStringLiteral("Wait for \"%1\" to finish.").arg(m_gitBusy.value(QStringLiteral("label")).toString()), true);
+        return;
+    }
     QJsonObject params{{QStringLiteral("project"), m_projectPath}, {QStringLiteral("action"), action}, {QStringLiteral("message"), message}};
     if (index >= 0)
         params.insert(QStringLiteral("index"), index);
-    m_git.insert(QStringLiteral("busy"), action);
-    emit gitChanged();
+    m_gitBusy = {{QStringLiteral("action"), action}, {QStringLiteral("index"), index},
+                 {QStringLiteral("label"), label.isEmpty() ? action : label},
+                 {QStringLiteral("startedAt"), QDateTime::currentMSecsSinceEpoch()}};
+    setGit(m_git);
     request(QStringLiteral("git.action"), params, QStringLiteral("gitAction"));
+}
+
+void IpcClient::gitBranchesRefresh() {
+    request(QStringLiteral("git.branches"), {{QStringLiteral("project"), m_projectPath}}, QStringLiteral("gitBranches"));
+}
+
+void IpcClient::gitAccountsRefresh() {
+    request(QStringLiteral("git.accounts"), {{QStringLiteral("project"), m_projectPath}}, QStringLiteral("gitAccounts"));
+}
+
+void IpcClient::gitAccountSave(const QVariantMap &account) {
+    request(QStringLiteral("git.accountSave"), {{QStringLiteral("project"), m_projectPath}, {QStringLiteral("account"), QJsonObject::fromVariantMap(account)}},
+            QStringLiteral("gitAccounts"));
+}
+
+void IpcClient::gitAccountRemove(const QString &id) {
+    request(QStringLiteral("git.accountRemove"), {{QStringLiteral("project"), m_projectPath}, {QStringLiteral("id"), id}}, QStringLiteral("gitAccounts"));
+}
+
+void IpcClient::gitAccountUse(const QString &id, bool makeDefault) {
+    if (!m_gitBusy.isEmpty()) {
+        emit gitMessage(QStringLiteral("Wait for \"%1\" to finish.").arg(m_gitBusy.value(QStringLiteral("label")).toString()), true);
+        return;
+    }
+    m_gitBusy = {{QStringLiteral("action"), QStringLiteral("account")}, {QStringLiteral("index"), -1},
+                 {QStringLiteral("label"), QStringLiteral("Switching git account")},
+                 {QStringLiteral("startedAt"), QDateTime::currentMSecsSinceEpoch()}};
+    setGit(m_git);
+    request(QStringLiteral("git.accountUse"), {{QStringLiteral("project"), m_projectPath}, {QStringLiteral("id"), id}, {QStringLiteral("makeDefault"), makeDefault}},
+            QStringLiteral("gitAction"));
+}
+
+void IpcClient::gitAccountDefault(const QString &project, const QString &id) {
+    request(QStringLiteral("git.accountDefault"), {{QStringLiteral("project"), project}, {QStringLiteral("id"), id}}, QStringLiteral("gitAccounts"));
 }
 
 void IpcClient::gitStashDiff(int index) {

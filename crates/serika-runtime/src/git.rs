@@ -54,12 +54,364 @@ pub struct Overview {
     pub ahead: u32,
     pub behind: u32,
     /// Unix seconds of the last fetch (FETCH_HEAD), if any.
+    #[serde(rename = "fetchedAt")]
     pub fetched_at: Option<i64>,
     pub changes: Vec<Change>,
     pub stashes: Vec<Stash>,
     pub incoming: Vec<Commit>,
     pub outgoing: Vec<Commit>,
     pub history: Vec<Commit>,
+    pub identity: Identity,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct Branch {
+    pub name: String,
+    pub current: bool,
+    /// A remote branch with no local branch yet (switching to it creates one that tracks it).
+    pub remote: bool,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub time: i64,
+    pub subject: String,
+}
+
+/// Local branches (current first, then newest), then remote branches you have no local copy of.
+pub async fn branches(project: &Path) -> Result<Vec<Branch>> {
+    let text = git(
+        project,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname)%1f%(HEAD)%1f%(upstream:short)%1f%(upstream:track)%1f%(committerdate:unix)%1f%(subject)%1e",
+            "refs/heads",
+            "refs/remotes",
+        ],
+        TIMEOUT,
+    )
+    .await?;
+    let mut local = Vec::new();
+    let mut remote = Vec::new();
+    for record in text.split('\u{1e}') {
+        let record = record.trim_matches(['\n', '\r']);
+        let parts: Vec<&str> = record.split('\u{1f}').collect();
+        if parts.len() < 6 {
+            continue;
+        }
+        let (refname, head, upstream, track, time, subject) = (parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]);
+        let mut branch = Branch {
+            current: head == "*",
+            upstream: (!upstream.is_empty()).then(|| upstream.to_string()),
+            time: time.trim().parse().unwrap_or(0),
+            subject: subject.to_string(),
+            ..Default::default()
+        };
+        // "[ahead 2, behind 3]"
+        for part in track.trim_matches(['[', ']']).split(", ") {
+            if let Some(n) = part.strip_prefix("ahead ") {
+                branch.ahead = n.parse().unwrap_or(0);
+            } else if let Some(n) = part.strip_prefix("behind ") {
+                branch.behind = n.parse().unwrap_or(0);
+            }
+        }
+        if let Some(name) = refname.strip_prefix("refs/heads/") {
+            branch.name = name.to_string();
+            local.push(branch);
+        } else if let Some(name) = refname.strip_prefix("refs/remotes/") {
+            if name.ends_with("/HEAD") {
+                continue;
+            }
+            branch.name = name.to_string();
+            branch.remote = true;
+            remote.push(branch);
+        }
+    }
+    // A remote branch that a local branch already tracks is the same work; list it once.
+    let tracked: std::collections::HashSet<String> = local.iter().filter_map(|b| b.upstream.clone()).collect();
+    remote.retain(|b| !tracked.contains(&b.name));
+    local.sort_by_key(|b| !b.current);
+    local.extend(remote);
+    Ok(local)
+}
+
+/// A branch name git accepts, and not one that could be read as an option.
+async fn valid_branch(project: &Path, name: &str) -> Result<()> {
+    if name.is_empty() || name.starts_with('-') || name.chars().any(char::is_whitespace) {
+        return Err(Error::msg(format!("\"{name}\" is not a valid branch name")));
+    }
+    git(project, &["check-ref-format", "--branch", name], TIMEOUT)
+        .await
+        .map(|_| ())
+        .map_err(|_| Error::msg(format!("\"{name}\" is not a valid branch name")))
+}
+
+/// A git identity you can switch between: who commits, and which stored login and SSH key
+/// git uses. No passwords or tokens: the credential helper keeps those, picked by `username`.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, Default, PartialEq)]
+pub struct Account {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    pub name: String,
+    pub email: String,
+    /// Login for HTTPS remotes (`credential.username`), so the credential manager picks
+    /// the right stored account.
+    #[serde(default)]
+    pub username: String,
+    /// Private key for SSH remotes (`core.sshCommand`).
+    #[serde(default, rename = "sshKey")]
+    pub ssh_key: String,
+    /// Where it came from when Serika found it for you: "gh" or "gcm" (empty when you added it).
+    #[serde(default)]
+    pub source: String,
+}
+
+/// Accounts plus the default account per project (keyed by project path).
+#[derive(Debug, Clone, Serialize, serde::Deserialize, Default)]
+pub struct AccountBook {
+    #[serde(default)]
+    pub accounts: Vec<Account>,
+    #[serde(default)]
+    pub defaults: std::collections::BTreeMap<String, String>,
+    /// Logins of found accounts you removed, so they are not added again.
+    #[serde(default)]
+    pub dismissed: Vec<String>,
+}
+
+fn book_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("git-accounts.json")
+}
+
+pub fn load_book(data_dir: &Path) -> AccountBook {
+    std::fs::read_to_string(book_path(data_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_book(data_dir: &Path, book: &AccountBook) -> Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let text = serde_json::to_string_pretty(book).map_err(|err| Error::msg(err.to_string()))?;
+    std::fs::write(book_path(data_dir), text)?;
+    Ok(())
+}
+
+/// Add or replace an account (a new one gets an id). Name and email are required.
+pub fn save_account(data_dir: &Path, mut account: Account) -> Result<Account> {
+    account.name = account.name.trim().to_string();
+    account.email = account.email.trim().to_string();
+    account.username = account.username.trim().to_string();
+    account.ssh_key = account.ssh_key.trim().trim_matches('"').to_string();
+    account.label = account.label.trim().to_string();
+    if account.name.is_empty() || !account.email.contains('@') {
+        return Err(Error::msg("a git account needs a name and an email address"));
+    }
+    if account.label.is_empty() {
+        account.label = account.email.clone();
+    }
+    let mut book = load_book(data_dir);
+    if account.id.is_empty() {
+        account.id = crate::sessions::new_id();
+    }
+    match book.accounts.iter_mut().find(|a| a.id == account.id) {
+        Some(existing) => *existing = account.clone(),
+        None => book.accounts.push(account.clone()),
+    }
+    save_book(data_dir, &book)?;
+    Ok(account)
+}
+
+pub fn remove_account(data_dir: &Path, id: &str) -> Result<()> {
+    let mut book = load_book(data_dir);
+    for account in book.accounts.iter().filter(|a| a.id == id && !a.source.is_empty()) {
+        book.dismissed.push(account.username.to_ascii_lowercase());
+    }
+    book.accounts.retain(|a| a.id != id);
+    book.defaults.retain(|_, account| account != id);
+    save_book(data_dir, &book)
+}
+
+/// Remember (or forget, with an empty id) the account a project uses by default.
+pub fn set_default(data_dir: &Path, project_key: &str, id: &str) -> Result<()> {
+    let mut book = load_book(data_dir);
+    if id.is_empty() {
+        book.defaults.remove(project_key);
+    } else {
+        book.defaults.insert(project_key.to_string(), id.to_string());
+    }
+    save_book(data_dir, &book)
+}
+
+/// GitHub logins on this computer: from the GitHub CLI (`gh auth status`, every account it
+/// holds) and from Git Credential Manager. Each becomes an account that commits under the
+/// profile's display name and GitHub's private noreply address, and signs in as that login.
+pub async fn detect_accounts() -> Vec<Account> {
+    use std::sync::{Mutex, OnceLock};
+    // Asking GitHub for profile names costs a request per login; reuse answers for a while.
+    static CACHE: OnceLock<Mutex<Option<(std::time::Instant, Vec<Account>)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((at, list)) = cache.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if at.elapsed() < Duration::from_secs(600) {
+            return list.clone();
+        }
+    }
+    let quiet = |program: &Path| {
+        let mut cmd = Command::new(program);
+        cmd.stdin(std::process::Stdio::null()).kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        cmd
+    };
+    let mut logins: Vec<(String, String, &'static str)> = Vec::new(); // (host, login, source)
+    let gh = crate::agents::find_cli("gh", None);
+    if let Some(gh) = &gh {
+        let mut cmd = quiet(gh);
+        cmd.args(["auth", "status", "--json", "hosts"]);
+        if let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(10), cmd.output()).await {
+            let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+            if let Some(hosts) = value.get("hosts").and_then(|h| h.as_object()) {
+                for (host, list) in hosts {
+                    for entry in list.as_array().into_iter().flatten() {
+                        if let Some(login) = entry.get("login").and_then(|l| l.as_str()) {
+                            logins.push((host.clone(), login.to_string(), "gh"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    {
+        let mut cmd = Command::new("git");
+        cmd.args(["credential-manager", "github", "list"]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        if let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(10), cmd.output()).await {
+            if out.status.success() {
+                for login in String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|l| !l.is_empty() && !l.contains(' ')) {
+                    if !logins.iter().any(|(_, l, _)| l.eq_ignore_ascii_case(login)) {
+                        logins.push(("github.com".into(), login.to_string(), "gcm"));
+                    }
+                }
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for (host, login, source) in logins {
+        // Public profile: display name and numeric id (for the noreply address).
+        let mut name = login.clone();
+        let mut id: Option<u64> = None;
+        if let Some(gh) = &gh {
+            let mut cmd = quiet(gh);
+            cmd.args(["api", &format!("users/{login}"), "--hostname", &host]);
+            if let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(8), cmd.output()).await {
+                let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+                if let Some(n) = value.get("name").and_then(|n| n.as_str()).filter(|n| !n.trim().is_empty()) {
+                    name = n.trim().to_string();
+                }
+                id = value.get("id").and_then(|i| i.as_u64());
+            }
+        }
+        let domain = if host == "github.com" { "users.noreply.github.com".to_string() } else { format!("users.noreply.{host}") };
+        let email = match id {
+            Some(id) => format!("{id}+{login}@{domain}"),
+            None => format!("{login}@{domain}"),
+        };
+        let label = if host == "github.com" { format!("{login} (GitHub)") } else { format!("{login} ({host})") };
+        found.push(Account { id: String::new(), label, name, email, username: login, ssh_key: String::new(), source: source.into() });
+    }
+    *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), found.clone()));
+    found
+}
+
+/// Add the GitHub logins found on this computer that are not accounts yet (and that you have
+/// not removed before). Returns how many were added.
+pub async fn import_detected(data_dir: &Path) -> usize {
+    let found = detect_accounts().await;
+    let mut book = load_book(data_dir);
+    let mut added = 0;
+    for mut account in found {
+        let login = account.username.to_ascii_lowercase();
+        let known = book.accounts.iter().any(|a| a.username.eq_ignore_ascii_case(&login));
+        if known || book.dismissed.contains(&login) {
+            continue;
+        }
+        account.id = crate::sessions::new_id();
+        book.accounts.push(account);
+        added += 1;
+    }
+    if added > 0 {
+        let _ = save_book(data_dir, &book);
+    }
+    added
+}
+
+/// Who commits in this repository, and which Serika account set it (if one did).
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct Identity {
+    pub name: String,
+    pub email: String,
+    pub username: String,
+    #[serde(rename = "sshCommand")]
+    pub ssh_command: String,
+    /// Id of the Serika account applied to this repository, if any.
+    pub account: String,
+}
+
+async fn config_get(project: &Path, key: &str) -> String {
+    git(project, &["config", "--get", key], TIMEOUT).await.map(|v| v.trim().to_string()).unwrap_or_default()
+}
+
+pub async fn identity(project: &Path) -> Identity {
+    let (name, email, username, ssh_command, account) = tokio::join!(
+        config_get(project, "user.name"),
+        config_get(project, "user.email"),
+        config_get(project, "credential.username"),
+        config_get(project, "core.sshCommand"),
+        config_get(project, "serika.account"),
+    );
+    Identity { name, email, username, ssh_command, account }
+}
+
+/// Make this repository commit and authenticate as `account` (local config only), or go back
+/// to your global git settings with None. Settings Serika wrote for an earlier account are
+/// removed when the new one has no value for them; settings you made yourself stay.
+pub async fn apply_account(project: &Path, account: Option<&Account>) -> Result<()> {
+    let lock = lock_for(project);
+    let _guard = lock.lock().await;
+    let managed = !config_get(project, "serika.account").await.is_empty();
+    let unset = |key: &'static str| async move {
+        let _ = git(project, &["config", "--local", "--unset-all", key], TIMEOUT).await;
+    };
+    match account {
+        Some(account) => {
+            git(project, &["config", "--local", "user.name", &account.name], TIMEOUT).await?;
+            git(project, &["config", "--local", "user.email", &account.email], TIMEOUT).await?;
+            if !account.username.is_empty() {
+                git(project, &["config", "--local", "credential.username", &account.username], TIMEOUT).await?;
+            } else if managed {
+                unset("credential.username").await;
+            }
+            if !account.ssh_key.is_empty() {
+                let key = account.ssh_key.replace('\\', "/");
+                let command = format!("ssh -i \"{key}\" -o IdentitiesOnly=yes");
+                git(project, &["config", "--local", "core.sshCommand", &command], TIMEOUT).await?;
+            } else if managed {
+                unset("core.sshCommand").await;
+            }
+            git(project, &["config", "--local", "serika.account", &account.id], TIMEOUT).await?;
+        }
+        None => {
+            if managed {
+                for key in ["user.name", "user.email", "credential.username", "core.sshCommand"] {
+                    unset(key).await;
+                }
+            }
+            unset("serika.account").await;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -224,7 +576,9 @@ pub async fn overview(project: &Path) -> Result<Overview> {
     let stashes = git(project, &["stash", "list", "--format=%gd%x1f%gs%x1f%ct%x1e"], TIMEOUT);
     let history = git(project, &["log", "-n", "40", LOG_FORMAT], TIMEOUT);
     let fetch_head = git(project, &["rev-parse", "--git-path", "FETCH_HEAD"], TIMEOUT);
-    let (status, stashes, history, fetch_head) = tokio::join!(status, stashes, history, fetch_head);
+    let who = identity(project);
+    let (status, stashes, history, fetch_head, who) = tokio::join!(status, stashes, history, fetch_head, who);
+    overview.identity = who;
     parse_status(&status?, &mut overview);
     overview.stashes = parse_stashes(&stashes.unwrap_or_default());
     overview.history = parse_commits(&history.unwrap_or_default());
@@ -370,6 +724,41 @@ pub async fn act(project: &Path, action: &str, index: Option<usize>, message: &s
             git(project, &["push"], NETWORK_TIMEOUT).await?;
             "Pushed.".to_string()
         }
+        // First push of a new branch: to the first remote, and track it from now on.
+        ("publish", _) => {
+            let remotes = git(project, &["remote"], TIMEOUT).await?;
+            let remote = remotes.lines().map(str::trim).find(|r| *r == "origin").or_else(|| remotes.lines().map(str::trim).find(|r| !r.is_empty()));
+            let Some(remote) = remote else {
+                return Err(Error::msg("this repository has no remote to publish to"));
+            };
+            git(project, &["push", "-u", remote, "HEAD"], NETWORK_TIMEOUT).await?;
+            format!("Published to {remote}.")
+        }
+        // `message` carries the branch name for these two.
+        ("switch", _) => {
+            let name = message.trim();
+            let remote_branch = branches(project).await?.into_iter().find(|b| b.remote && b.name == name);
+            match remote_branch {
+                // A remote branch: make a local one that tracks it.
+                Some(branch) => {
+                    let local = branch.name.split_once('/').map(|(_, rest)| rest).unwrap_or(&branch.name).to_string();
+                    valid_branch(project, &local).await?;
+                    git(project, &["switch", "--track", "-c", &local, &branch.name], TIMEOUT).await?;
+                    format!("Switched to {local}, tracking {}.", branch.name)
+                }
+                None => {
+                    valid_branch(project, name).await?;
+                    git(project, &["switch", name], TIMEOUT).await?;
+                    format!("Switched to {name}.")
+                }
+            }
+        }
+        ("branch.create", _) => {
+            let name = message.trim();
+            valid_branch(project, name).await?;
+            git(project, &["switch", "-c", name], TIMEOUT).await?;
+            format!("Created and switched to {name}.")
+        }
         _ => return Err(Error::msg(format!("unknown git action {action}"))),
     };
     Ok(done)
@@ -441,5 +830,35 @@ mod tests {
         assert!(o.stashes.is_empty());
         assert_eq!(o.changes.len(), 2);
         assert_eq!(o.history[0].subject, "first");
+
+        // Branches: create one, switch back, and refuse names that look like options.
+        act(p, "stash.push", None, "park").await.unwrap();
+        act(p, "branch.create", None, "ticket/4821").await.unwrap();
+        assert_eq!(overview(p).await.unwrap().branch, "ticket/4821");
+        act(p, "switch", None, "main").await.unwrap();
+        let list = branches(p).await.unwrap();
+        assert!(list[0].current && list[0].name == "main", "{list:?}");
+        assert!(list.iter().any(|b| b.name == "ticket/4821" && !b.remote));
+        assert!(act(p, "switch", None, "--orphan").await.is_err());
+        assert!(act(p, "branch.create", None, "bad name").await.is_err());
+
+        // Accounts: apply one, switch to one without a login, then back to global settings.
+        let data = tempfile::tempdir().unwrap();
+        let work = save_account(data.path(), Account { name: "Work Me".into(), email: "me@work.test".into(), username: "me-work".into(), ssh_key: "C:\\keys\\work".into(), ..Default::default() }).unwrap();
+        let home = save_account(data.path(), Account { name: "Home Me".into(), email: "me@home.test".into(), ..Default::default() }).unwrap();
+        assert!(save_account(data.path(), Account { name: "x".into(), email: "nope".into(), ..Default::default() }).is_err());
+        apply_account(p, Some(&work)).await.unwrap();
+        let id = identity(p).await;
+        assert_eq!((id.email.as_str(), id.username.as_str(), id.account.as_str()), ("me@work.test", "me-work", work.id.as_str()));
+        assert!(id.ssh_command.contains("C:/keys/work"));
+        apply_account(p, Some(&home)).await.unwrap();
+        let id = identity(p).await;
+        assert_eq!(id.email, "me@home.test");
+        assert!(id.username.is_empty() && id.ssh_command.is_empty(), "{id:?}");
+        set_default(data.path(), "c:/repo", &home.id).unwrap();
+        remove_account(data.path(), &home.id).unwrap();
+        assert!(load_book(data.path()).defaults.is_empty());
+        apply_account(p, None).await.unwrap();
+        assert!(identity(p).await.account.is_empty());
     }
 }

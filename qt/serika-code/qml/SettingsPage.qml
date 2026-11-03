@@ -19,7 +19,8 @@ Rectangle {
             { id: "agent", label: t("Agent", "Agent"), icon: "zap", sub: t("AgentSub", "Permissions and limits") },
             { id: "browser", label: t("Browser", "Browser"), icon: "globe", sub: t("BrowserSub", "Let Serika browse the web") },
             { id: "mcp", label: t("McpNav", "MCP servers"), icon: "server", sub: t("McpSub", "Tools from Claude Code, Codex and your own servers") },
-            { id: "skills", label: t("SkillsNav", "Skills"), icon: "package", sub: t("SkillsSub", "Reusable instructions Serika can load") }
+            { id: "skills", label: t("SkillsNav", "Skills"), icon: "package", sub: t("SkillsSub", "Reusable instructions Serika can load") },
+            { id: "gitaccounts", label: t("GitAccountsNav", "Git accounts"), icon: "users", sub: t("GitAccountsSub", "Who you commit and sign in as, per project") }
         ] },
         { title: t("SettingsInterface", "Interface"), items: [
             { id: "appearance", label: t("Appearance", "Appearance"), icon: "droplet", sub: t("AppearanceSub", "Themes, accent, text") },
@@ -216,6 +217,7 @@ Rectangle {
                             case "browser": return browser
                             case "mcp": return mcpSection
                             case "skills": return skillsSection
+                            case "gitaccounts": return gitAccountsSection
                             case "keys": return keys
                             case "data": return dataSection
                             case "account": return account
@@ -234,6 +236,7 @@ Rectangle {
             Component { id: browser; SettingsBrowser {} }
             Component { id: mcpSection; SettingsMcp {} }
             Component { id: skillsSection; SettingsSkills {} }
+            Component { id: gitAccountsSection; SettingsGitAccounts {} }
             Component { id: keys; SettingsKeys {} }
             Component { id: dataSection; SettingsData {} }
             Component { id: account; SettingsAccount {} }
