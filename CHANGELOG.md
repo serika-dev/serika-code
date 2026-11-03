@@ -23,6 +23,8 @@ All notable changes to Serika Code are documented in this file.
 - Stash rows have labelled **Apply** and **Pop** buttons instead of copy and download icons.
 
 ### Fixed
+- The browser no longer flashes white while you click, scroll or type in it: frames are
+  decoded once and shown at once instead of loading in the background.
 - Pasted text with `<...>` (an email, a log) showed as an empty bubble.
 - Opening a long message or clicking in a chat no longer jumps to the bottom.
 - The Windows desktop package includes the C++ runtime, so it starts without Qt installed.

@@ -42,6 +42,7 @@ int main(int argc, char *argv[]) {
     const bool demo = parser.isSet(QStringLiteral("demo"));
     IpcClient ipc(demo);
     QQmlApplicationEngine engine;
+    engine.addImageProvider(QStringLiteral("browser"), ipc.browserFrames());
     engine.rootContext()->setContextProperty(QStringLiteral("ipc"), &ipc);
     engine.rootContext()->setContextProperty(QStringLiteral("startPage"), parser.value(QStringLiteral("page")));
     engine.rootContext()->setContextProperty(QStringLiteral("startPopup"), parser.value(QStringLiteral("popup")));

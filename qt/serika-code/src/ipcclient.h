@@ -1,6 +1,9 @@
 #pragma once
 
 #include <QHash>
+#include <QImage>
+#include <QMutex>
+#include <QQuickImageProvider>
 #include <QSet>
 #include <QJsonObject>
 #include <QObject>
@@ -11,6 +14,28 @@
 #include <QVariantMap>
 
 #include "turnmodel.h"
+
+/// The browser's latest frame for QML ("image://browser/<n>"). Decoded once when it arrives
+/// and handed over synchronously, so the page never goes blank between two frames (a data:
+/// URL is decoded in the background, and the Image is empty until it is done).
+class BrowserFrames : public QQuickImageProvider {
+public:
+    BrowserFrames() : QQuickImageProvider(QQuickImageProvider::Image) {}
+    void set(const QImage &image) {
+        QMutexLocker lock(&m_mutex);
+        m_image = image;
+    }
+    QImage requestImage(const QString &, QSize *size, const QSize &) override {
+        QMutexLocker lock(&m_mutex);
+        if (size)
+            *size = m_image.size();
+        return m_image;
+    }
+
+private:
+    QMutex m_mutex;
+    QImage m_image;
+};
 
 /// Bridge between the QML interface and `serika ipc`, the Rust agent runtime.
 class IpcClient : public QObject {
@@ -90,6 +115,8 @@ class IpcClient : public QObject {
 
 public:
     explicit IpcClient(bool demo = false, QObject *parent = nullptr);
+    // Serves browser frames to QML; the engine takes ownership when it is added.
+    BrowserFrames *browserFrames() { return m_frames; }
     ~IpcClient() override;
 
     bool signedIn() const { return m_signedIn; }
@@ -420,6 +447,9 @@ private:
     QVariantMap m_mcp;
     QVariantList m_skills;
     QString m_browserImage;
+    BrowserFrames *m_frames = new BrowserFrames;
+    quint64 m_frameSerial = 0;
+    void setBrowserFrame(const QString &base64);
     bool m_browserStreaming = false;
     int m_streamHolders = 0;                // panels that want the live picture
     // Tab actions go out one at a time, in order; polls sent before the latest action are dropped.

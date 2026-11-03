@@ -465,10 +465,8 @@ void IpcClient::applyFrame(const QJsonObject &frame) {
     else if (m_browser.contains(QStringLiteral("agentAt")))
         map.insert(QStringLiteral("agentAt"), m_browser.value(QStringLiteral("agentAt")));
     const QString image = frame.value(QStringLiteral("image")).toString();
-    if (!image.isEmpty()) {
-        m_browserImage = dataUrl(image);
-        emit browserImageChanged();
-    }
+    if (!image.isEmpty())
+        setBrowserFrame(image);
     // A frame without a picture (streaming, or a quick tab switch) keeps the last one.
     map.insert(QStringLiteral("imageUrl"), m_browserImage);
     map.insert(QStringLiteral("running"), true);
@@ -477,6 +475,16 @@ void IpcClient::applyFrame(const QJsonObject &frame) {
     m_browserBusy = false;
     m_browserError.clear();
     emit browserChanged();
+}
+
+void IpcClient::setBrowserFrame(const QString &base64) {
+    QImage image;
+    if (!image.loadFromData(QByteArray::fromBase64(base64.toLatin1())))
+        return; // a broken frame keeps the last good one on screen
+    m_frames->set(image);
+    // A new name each time, or the Image would think nothing changed.
+    m_browserImage = QStringLiteral("image://browser/%1").arg(++m_frameSerial);
+    emit browserImageChanged();
 }
 
 // Keep one row per changed file, and link the change to the edit tool that made it, so its
@@ -664,8 +672,7 @@ void IpcClient::handleEvent(const QJsonObject &obj) {
         applyFrame(obj);
         emit browserActivity();
     } else if (event == QLatin1String("browserImage")) {
-        m_browserImage = dataUrl(obj.value(QStringLiteral("image")).toString());
-        emit browserImageChanged();
+        setBrowserFrame(obj.value(QStringLiteral("image")).toString());
     } else if (event == QLatin1String("terminal")) {
         const QString id = obj.value(QStringLiteral("id")).toString();
         const QString kind = obj.value(QStringLiteral("kind")).toString();

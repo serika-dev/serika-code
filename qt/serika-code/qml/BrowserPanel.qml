@@ -460,6 +460,10 @@ Item {
                 fillMode: Image.PreserveAspectFit
                 horizontalAlignment: Image.AlignLeft
                 verticalAlignment: Image.AlignTop
+                // Frames come from C++ (image://browser), loaded at once; and should one ever
+                // take a moment, the last frame stays up instead of a blank page.
+                asynchronous: false
+                retainWhileLoading: true
                 cache: false
                 smooth: true
                 mipmap: panel.zoom < 1
