@@ -2,32 +2,47 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// The panel beside or below the chat: Changes, Browser, and Sub-agents as closable tabs
-// (or split side by side), with a + menu to bring panes back. A floating card under the
-// title row. ShellPage owns all state; this asks for changes through signals.
+// One dock (right or bottom) holding panes as tabs, like VS Code's panels: one pane in front,
+// tabs dragged to the other dock or reordered, and a + menu to pull any pane in here.
+// ShellPage owns all state; this asks for changes through signals.
 Item {
     id: dock
+    property string where: "right"               // "right" or "bottom"
     property bool open: false
-    property var tabs: ["changes", "browser"]   // open panes, in tab order
-    property string tab: "changes"               // the one in front (tabs mode)
-    property string mode: "tabs"                 // "tabs" or "split"
-    property string side: "right"                // "right" or "bottom"
+    property var tabs: []                        // panes in this dock, in tab order
+    property string tab: ""                      // the one in front
     property bool maximized: false
+    property bool dropTarget: false              // a dragged tab would land here
+    property string dragging: ""                 // id of the tab being dragged anywhere
     signal tabRequested(string id)
     signal tabClosed(string id)
+    signal moveRequested(string id, string target)
     signal closeRequested()
     signal maximizeRequested()
-    signal modeRequested(string mode)
-    signal sideRequested(string side)
+    signal dragStarted(string id)
+    signal dragMoved(point scenePos)
+    signal dragFinished()
     readonly property var dict: ipc.strings
+    readonly property string other: where === "right" ? "bottom" : "right"
     readonly property var catalog: ({
         changes: { id: "changes", label: Format.tr(dict, "Changes", "Changes"), icon: "git-branch", count: ipc.diffs.length, live: false },
         browser: { id: "browser", label: Format.tr(dict, "Browser", "Browser"), icon: "globe", count: (ipc.browser.tabs || []).length, live: false },
         agents: { id: "agents", label: Format.tr(dict, "Subagents", "Sub-agents"), icon: "users", count: ipc.agents.length,
-                  live: ipc.agents.some(function (a) { return a.status === "running" }) }
+                  live: ipc.agents.some(function (a) { return a.status === "running" }) },
+        terminal: { id: "terminal", label: Format.tr(dict, "Terminal", "Terminal"), icon: "terminal", count: ipc.terminals.length,
+                    live: ipc.terminals.some(function (t) { return t.running === true }) }
     })
-    readonly property var allIds: ["changes", "browser", "agents"]
-    function paneIndex(id) { return Math.max(0, allIds.indexOf(id)) }
+    readonly property var allIds: ["changes", "browser", "agents", "terminal"]
+
+    // Where in this dock's tab row a tab dropped at a scene point would go.
+    function indexAt(scenePos) {
+        const p = tabRow.mapFromItem(null, scenePos.x, scenePos.y)
+        for (let i = 0; i < tabRepeater.count; i++) {
+            const item = tabRepeater.itemAt(i)
+            if (item && p.x < item.x + item.width / 2) return i
+        }
+        return tabs.length
+    }
 
     // Slide and fade in from the edge it is docked to.
     property real slide: open ? 0 : 28
@@ -36,8 +51,8 @@ Item {
     Behavior on opacity { NumberAnimation { duration: Theme.motionBase; easing.type: Theme.easeOut } }
     visible: opacity > 0.01
     transform: Translate {
-        x: dock.side === "right" && !dock.maximized ? dock.slide : 0
-        y: dock.side === "bottom" && !dock.maximized ? dock.slide : 0
+        x: dock.where === "right" && !dock.maximized ? dock.slide : 0
+        y: dock.where === "bottom" && !dock.maximized ? dock.slide : 0
     }
 
     Rectangle {
@@ -45,8 +60,9 @@ Item {
         anchors.fill: parent
         radius: 14
         color: Theme.card
-        border.width: 1
-        border.color: Theme.borderSubtle
+        border.width: dock.dropTarget ? 2 : 1
+        border.color: dock.dropTarget ? Theme.accent : Theme.borderSubtle
+        Behavior on border.color { ColorAnimation { duration: Theme.motionFast } }
         clip: true
 
         ColumnLayout {
@@ -58,8 +74,7 @@ Item {
             Item {
                 id: tabBar
                 Layout.fillWidth: true
-                Layout.preferredHeight: 44
-                // Room left of the controls; tabs drop their labels (all but the front one) when it runs out.
+                Layout.preferredHeight: dock.where === "bottom" ? 38 : 44
                 readonly property real room: width - controls.width - 18
                 readonly property bool compact: dock.tabs.length * 122 + 34 > room
 
@@ -68,23 +83,27 @@ Item {
                     anchors.leftMargin: 6
                     anchors.bottom: parent.bottom
                     width: Math.max(0, tabBar.room)
-                    height: 38
+                    height: tabBar.height - 6
                     clip: true
                 Row {
                     id: tabRow
                     anchors.left: parent.left
                     anchors.bottom: parent.bottom
-                    height: 38
+                    height: parent.height
                     spacing: 2
+                    move: Transition { NumberAnimation { properties: "x"; duration: Theme.motionBase; easing.type: Theme.easeEmphasis } }
                     Repeater {
+                        id: tabRepeater
                         model: dock.tabs
                         delegate: Item {
                             id: tabItem
                             required property string modelData
                             readonly property var pane: dock.catalog[modelData] || dock.catalog.changes
-                            readonly property bool current: dock.mode === "split" || dock.tab === modelData
+                            readonly property bool current: dock.tab === modelData
                             width: tabInner.implicitWidth + 26
                             height: tabRow.height
+                            opacity: dock.dragging === modelData ? 0.35 : 1
+                            Behavior on opacity { NumberAnimation { duration: Theme.motionFast } }
                             HoverHandler { id: tabHover }
 
                             Rectangle {
@@ -92,16 +111,15 @@ Item {
                                 anchors.bottomMargin: -1
                                 topLeftRadius: 9
                                 topRightRadius: 9
-                                color: tabItem.current && dock.mode === "tabs" ? Theme.bg : (tabHover.hovered ? Theme.hover : "transparent")
+                                color: tabItem.current ? Theme.bg : (tabHover.hovered ? Theme.hover : "transparent")
                                 Behavior on color { ColorAnimation { duration: Theme.motionFast } }
                             }
-                            // Accent line under the tab in front
                             Rectangle {
                                 anchors.bottom: parent.bottom
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 height: 2
                                 radius: 1
-                                width: tabItem.current && dock.mode === "tabs" ? parent.width - 20 : 0
+                                width: tabItem.current ? parent.width - 20 : 0
                                 color: Theme.accent
                                 Behavior on width { NumberAnimation { duration: Theme.motionBase; easing.type: Theme.easeEmphasis } }
                             }
@@ -120,7 +138,6 @@ Item {
                                         size: 15
                                         color: tabItem.current ? Theme.text : Theme.textSecondary
                                     }
-                                    // Something is happening in this pane
                                     Rectangle {
                                         visible: tabItem.pane.live
                                         anchors.right: parent.right
@@ -142,7 +159,7 @@ Item {
                                     }
                                 }
                                 Text {
-                                    visible: !tabBar.compact || (tabItem.current && dock.mode === "tabs")
+                                    visible: !tabBar.compact || tabItem.current
                                     anchors.verticalCenter: parent.verticalCenter
                                     text: tabItem.pane.label
                                     color: tabItem.current ? Theme.text : Theme.textSecondary
@@ -158,13 +175,13 @@ Item {
                                     font.family: Theme.sans
                                     font.pixelSize: 11
                                 }
-                                // Close, on hover or for the tab in front
                                 Rectangle {
+                                    id: closeButton
                                     anchors.verticalCenter: parent.verticalCenter
                                     width: 18
                                     height: 18
                                     radius: 5
-                                    opacity: tabHover.hovered || (tabItem.current && dock.mode === "tabs") ? 1 : 0
+                                    opacity: tabHover.hovered || tabItem.current ? 1 : 0
                                     Behavior on opacity { NumberAnimation { duration: Theme.motionFast } }
                                     color: closeArea.containsMouse ? Theme.active : "transparent"
                                     Icon { anchors.centerIn: parent; name: "x"; size: 11; color: Theme.textSecondary }
@@ -177,19 +194,30 @@ Item {
                                     }
                                 }
                             }
-                            MouseArea {
-                                anchors.fill: parent
-                                z: -1
-                                acceptedButtons: Qt.LeftButton | Qt.MiddleButton
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: (mouse) => mouse.button === Qt.MiddleButton ? dock.tabClosed(tabItem.modelData) : dock.tabRequested(tabItem.modelData)
+                            TapHandler {
+                                acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+                                onTapped: (point, button) => {
+                                    // The close button handles its own click; don't also bring the tab back.
+                                    const p = closeButton.mapFromItem(tabItem, point.position.x, point.position.y)
+                                    if (closeButton.contains(p)) return
+                                    if (button === Qt.MiddleButton) dock.tabClosed(tabItem.modelData)
+                                    else if (button === Qt.RightButton) { tabMenu.paneId = tabItem.modelData; tabMenu.parent = tabItem; tabMenu.y = tabItem.height + 4; tabMenu.open() }
+                                    else dock.tabRequested(tabItem.modelData)
+                                }
                             }
-                            ToolTip.visible: tabBar.compact && tabHover.hovered && !(tabItem.current && dock.mode === "tabs")
+                            // Drag a tab to the other dock or to a new spot in this one.
+                            DragHandler {
+                                target: null
+                                cursorShape: active ? Qt.ClosedHandCursor : Qt.ArrowCursor
+                                onActiveChanged: active ? dock.dragStarted(tabItem.modelData) : dock.dragFinished()
+                                onCentroidChanged: if (active) dock.dragMoved(tabItem.mapToItem(null, centroid.position.x, centroid.position.y))
+                            }
+                            ToolTip.visible: tabBar.compact && tabHover.hovered && !tabItem.current
                             ToolTip.delay: 400
                             ToolTip.text: tabItem.pane.label
                         }
                     }
-                    // + : open another pane
+                    // + : bring any pane into this dock
                     IconButton {
                         id: addButton
                         anchors.verticalCenter: parent.verticalCenter
@@ -229,42 +257,11 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 0
                     IconButton {
-                        id: layoutButton
-                        icon: dock.mode === "split" ? "columns" : "layout"
+                        icon: dock.where === "right" ? "panel-bottom" : "panel-right"
                         iconSize: 15
-                        active: layoutMenu.opened
-                        tip: Format.tr(dock.dict, "DockLayout", "Panel layout")
-                        onClicked: layoutMenu.opened ? layoutMenu.close() : layoutMenu.open()
-                        Popover {
-                            id: layoutMenu
-                            x: layoutButton.width - width
-                            y: layoutButton.height + 6
-                            width: 252
-                            contentItem: ColumnLayout {
-                                spacing: 8
-                                Text { Layout.leftMargin: 6; Layout.topMargin: 4; text: Format.tr(dock.dict, "DockShow", "Show panels"); color: Theme.textDim; font.family: Theme.sans; font.pixelSize: 12 }
-                                Segmented {
-                                    Layout.leftMargin: 4
-                                    options: [
-                                        { value: "tabs", label: Format.tr(dock.dict, "DockTabsShort", "As tabs"), icon: "square" },
-                                        { value: "split", label: Format.tr(dock.dict, "DockSplitShort", "Side by side"), icon: "columns" }
-                                    ]
-                                    value: dock.mode
-                                    onPicked: (v) => dock.modeRequested(v)
-                                }
-                                Text { Layout.leftMargin: 6; text: Format.tr(dock.dict, "DockPlace", "Position"); color: Theme.textDim; font.family: Theme.sans; font.pixelSize: 12 }
-                                Segmented {
-                                    Layout.leftMargin: 4
-                                    Layout.bottomMargin: 4
-                                    options: [
-                                        { value: "right", label: Format.tr(dock.dict, "DockRightShort", "Right") },
-                                        { value: "bottom", label: Format.tr(dock.dict, "DockBottomShort", "Bottom") }
-                                    ]
-                                    value: dock.side
-                                    onPicked: (v) => dock.sideRequested(v)
-                                }
-                            }
-                        }
+                        tip: dock.where === "right" ? Format.tr(dock.dict, "MoveToBottom", "Move to the bottom panel")
+                                                    : Format.tr(dock.dict, "MoveToRight", "Move to the right panel")
+                        onClicked: if (dock.tab.length > 0) dock.moveRequested(dock.tab, dock.other)
                     }
                     IconButton {
                         icon: dock.maximized ? "minimize-2" : "maximize-2"
@@ -273,7 +270,7 @@ Item {
                         onClicked: dock.maximizeRequested()
                     }
                     IconButton {
-                        icon: "x"
+                        icon: dock.where === "bottom" ? "chevron-down" : "x"
                         iconSize: 16
                         tip: Format.tr(dock.dict, "ClosePanel", "Close panel")
                         onClicked: dock.closeRequested()
@@ -282,9 +279,8 @@ Item {
             }
             Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.borderSubtle }
 
-            // One pane at a time, cross-fading when you switch
+            // One pane at a time, cross-fading when you switch. Panes stay loaded while in this dock.
             Item {
-                visible: dock.mode === "tabs"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 Repeater {
@@ -295,41 +291,43 @@ Item {
                         anchors.fill: parent
                         active: dock.tabs.indexOf(modelData) >= 0
                         opacity: front ? 1 : 0
-                        visible: opacity > 0.01
+                        visible: opacity > 0.01 && dock.open
                         z: front ? 1 : 0
                         Behavior on opacity { NumberAnimation { duration: Theme.motionBase; easing.type: Theme.easeOut } }
-                        sourceComponent: modelData === "browser" ? browserPane : (modelData === "agents" ? agentsPane : changesPane)
+                        sourceComponent: modelData === "browser" ? browserPane
+                                       : modelData === "agents" ? agentsPane
+                                       : modelData === "terminal" ? terminalPane : changesPane
                     }
+                }
+                // Drop hint while a tab from elsewhere hovers this dock
+                Rectangle {
+                    anchors.fill: parent
+                    z: 5
+                    visible: opacity > 0
+                    opacity: dock.dropTarget && dock.tabs.indexOf(dock.dragging) < 0 ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: Theme.motionFast } }
+                    color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.08)
                 }
             }
+        }
+    }
 
-            // Open panes side by side: stacked when docked right, in a row below
-            SplitView {
-                id: split
-                visible: dock.mode === "split"
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                orientation: dock.side === "right" && !dock.maximized ? Qt.Vertical : Qt.Horizontal
-                handle: Rectangle {
-                    implicitWidth: split.orientation === Qt.Horizontal ? 6 : split.width
-                    implicitHeight: split.orientation === Qt.Vertical ? 6 : split.height
-                    color: SplitHandle.pressed ? Theme.accent : (SplitHandle.hovered ? Theme.border : Theme.borderSubtle)
-                    Behavior on color { ColorAnimation { duration: Theme.motionFast } }
-                }
-                Repeater {
-                    model: dock.mode === "split" ? dock.tabs : []
-                    delegate: Item {
-                        required property string modelData
-                        SplitView.fillWidth: true
-                        SplitView.fillHeight: true
-                        SplitView.minimumWidth: 220
-                        SplitView.minimumHeight: 140
-                        Loader {
-                            anchors.fill: parent
-                            sourceComponent: parent.modelData === "browser" ? browserPane : (parent.modelData === "agents" ? agentsPane : changesPane)
-                        }
-                    }
-                }
+    Popover {
+        id: tabMenu
+        property string paneId: ""
+        width: 230
+        contentItem: ColumnLayout {
+            spacing: 0
+            MenuRow {
+                icon: dock.where === "right" ? "panel-bottom" : "panel-right"
+                label: dock.where === "right" ? Format.tr(dock.dict, "MoveToBottom", "Move to the bottom panel")
+                                              : Format.tr(dock.dict, "MoveToRight", "Move to the right panel")
+                onTriggered: { tabMenu.close(); dock.moveRequested(tabMenu.paneId, dock.other) }
+            }
+            MenuRow {
+                icon: "x"
+                label: Format.tr(dock.dict, "CloseTab", "Close")
+                onTriggered: { tabMenu.close(); dock.tabClosed(tabMenu.paneId) }
             }
         }
     }
@@ -337,4 +335,5 @@ Item {
     Component { id: changesPane; DiffPanel {} }
     Component { id: browserPane; BrowserPanel {} }
     Component { id: agentsPane; AgentsPanel {} }
+    Component { id: terminalPane; TerminalPanel {} }
 }

@@ -181,6 +181,7 @@ Rectangle {
 
         ListView {
             id: list
+            SmoothWheel { flickable: list }
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.topMargin: 2
@@ -296,12 +297,36 @@ Rectangle {
                                             label: Format.tr(side.dict, "CopyPath", "Copy path")
                                             onTriggered: { headMenu.close(); ipc.copyText(head.r.path) }
                                         }
-                                        MenuDivider {}
+                                        MenuDivider { visible: !head.r.scratch || head.r.count > 0 }
+                                        // Chats stay; the folder leaves the list until you open it again.
                                         MenuRow {
-                                            icon: "x"
+                                            visible: !head.r.scratch
+                                            icon: "folder-minus"
                                             label: Format.tr(side.dict, "RemoveProject", "Remove from list")
+                                            onTriggered: {
+                                                headMenu.close()
+                                                if (head.r.current) ipc.newChat()
+                                                ipc.removeProject(head.r.path)
+                                            }
+                                        }
+                                        // Deletes the chats too (files on disk are never touched). Asks twice.
+                                        MenuRow {
+                                            id: deleteRow
+                                            visible: !head.r.scratch || head.r.count > 0
+                                            property bool armed: false
+                                            icon: "trash-2"
                                             danger: true
-                                            onTriggered: { headMenu.close(); ipc.removeProject(head.r.path) }
+                                            label: armed ? Format.tr(side.dict, "DeleteProjectConfirm", "Click again to delete {n} chats").replace("{n}", head.r.count)
+                                                         : (head.r.scratch ? Format.tr(side.dict, "DeleteScratchChats", "Delete these chats")
+                                                                           : Format.tr(side.dict, "DeleteProject", "Remove and delete its chats"))
+                                            onTriggered: {
+                                                if (!armed && head.r.count > 0) { armed = true; disarm.restart(); return }
+                                                armed = false
+                                                headMenu.close()
+                                                if (head.r.current) ipc.newChat()
+                                                ipc.deleteProject(head.r.path)
+                                            }
+                                            Timer { id: disarm; interval: 4000; onTriggered: deleteRow.armed = false }
                                         }
                                     }
                                 }

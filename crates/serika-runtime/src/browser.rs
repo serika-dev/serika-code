@@ -34,7 +34,12 @@ pub struct TabInfo {
     pub title: String,
     pub url: String,
     pub active: bool,
+    /// The page's icon, when the tab has been shown.
+    pub favicon: String,
 }
+
+/// Receives live screencast frames: base64 JPEG, width, height.
+pub type ScreenSink = Arc<dyn Fn(String, u32, u32) + Send + Sync>;
 
 /// What the browser panel shows after an action.
 #[derive(Debug, Clone, Serialize)]
@@ -177,6 +182,11 @@ pub struct BrowserHost {
     view: StdMutex<(u32, u32)>,
     /// The browser's user agent without "Headless", which some sites refuse.
     user_agent: StdMutex<Option<String>>,
+    /// Where live frames go while the panel is open, and the tab being streamed.
+    stream: StdMutex<Option<ScreenSink>>,
+    stream_session: StdMutex<Option<String>>,
+    stream_gen: Arc<AtomicU64>,
+    favicons: StdMutex<HashMap<String, String>>,
 }
 
 /// Locate a Chromium-based browser: the configured path, then common install locations.
@@ -323,6 +333,10 @@ impl BrowserHost {
             live: Mutex::new(None),
             view: StdMutex::new((VIEW_WIDTH, VIEW_HEIGHT)),
             user_agent: StdMutex::new(None),
+            stream: StdMutex::new(None),
+            stream_session: StdMutex::new(None),
+            stream_gen: Arc::new(AtomicU64::new(0)),
+            favicons: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -339,10 +353,130 @@ impl BrowserHost {
     }
 
     pub async fn shutdown(&self) {
+        self.stream_gen.fetch_add(1, Ordering::SeqCst);
+        *self.stream_session.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if let Some(mut live) = self.live.lock().await.take() {
             let _ = live.cdp.call("Browser.close", json!({}), None).await;
             let _ = live.child.kill().await;
         }
+    }
+
+    /// Stream the active tab to `sink` (None stops). Frames arrive whenever the page changes.
+    pub async fn set_stream(&self, sink: Option<ScreenSink>) {
+        *self.stream.lock().unwrap_or_else(|e| e.into_inner()) = sink;
+        *self.stream_session.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.sync_stream().await;
+    }
+
+    /// Keep the screencast on the tab in front, at the current size.
+    async fn sync_stream(&self) {
+        let sink = self.stream.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let target = {
+            let guard = self.live.lock().await;
+            guard.as_ref().filter(|l| !l.tabs.is_empty()).map(|l| (l.cdp.clone(), l.session()))
+        };
+        let current = self.stream_session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        match (sink, target) {
+            (Some(sink), Some((cdp, session))) => {
+                if current.as_deref() == Some(session.as_str()) {
+                    return;
+                }
+                if let Some(old) = current {
+                    let _ = cdp.call("Page.stopScreencast", json!({}), Some(&old)).await;
+                }
+                let generation = self.stream_gen.fetch_add(1, Ordering::SeqCst) + 1;
+                let gen = self.stream_gen.clone();
+                let mut events = cdp.events.subscribe();
+                let (width, height) = self.view();
+                let started = cdp
+                    .call(
+                        "Page.startScreencast",
+                        json!({"format": "jpeg", "quality": 72, "maxWidth": width, "maxHeight": height, "everyNthFrame": 1}),
+                        Some(&session),
+                    )
+                    .await;
+                if started.is_err() {
+                    return;
+                }
+                *self.stream_session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.clone());
+                tokio::spawn(async move {
+                    while let Ok(event) = events.recv().await {
+                        if gen.load(Ordering::SeqCst) != generation {
+                            break;
+                        }
+                        if event.get("method").and_then(|m| m.as_str()) != Some("Page.screencastFrame")
+                            || event.get("sessionId").and_then(|s| s.as_str()) != Some(session.as_str())
+                        {
+                            continue;
+                        }
+                        let params = event.get("params").cloned().unwrap_or(Value::Null);
+                        if let Some(ack) = params.get("sessionId").cloned() {
+                            let cdp = cdp.clone();
+                            let session = session.clone();
+                            tokio::spawn(async move {
+                                let _ = cdp.call("Page.screencastFrameAck", json!({"sessionId": ack}), Some(&session)).await;
+                            });
+                        }
+                        let data = params.get("data").and_then(|d| d.as_str()).unwrap_or("").to_string();
+                        let meta = params.get("metadata").cloned().unwrap_or(Value::Null);
+                        let w = meta.get("deviceWidth").and_then(|v| v.as_f64()).unwrap_or(0.0) as u32;
+                        let h = meta.get("deviceHeight").and_then(|v| v.as_f64()).unwrap_or(0.0) as u32;
+                        if !data.is_empty() {
+                            sink(data, w, h);
+                        }
+                    }
+                });
+            }
+            (None, Some((cdp, _))) => {
+                if let Some(old) = current {
+                    self.stream_gen.fetch_add(1, Ordering::SeqCst);
+                    let _ = cdp.call("Page.stopScreencast", json!({}), Some(&old)).await;
+                    *self.stream_session.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Raw mouse input from the panel: move, down, up. `buttons` is the held-button mask.
+    pub async fn mouse(&self, kind: &str, x: f64, y: f64, button: &str, buttons: u32, clicks: u32) -> Result<()> {
+        let (cdp, session) = self.live().await?;
+        let event = match kind {
+            "down" => "mousePressed",
+            "up" => "mouseReleased",
+            _ => "mouseMoved",
+        };
+        let button = match button {
+            "left" | "right" | "middle" => button,
+            _ => "none",
+        };
+        cdp.call(
+            "Input.dispatchMouseEvent",
+            json!({"type": event, "x": x, "y": y, "button": button, "buttons": buttons, "clickCount": clicks.max(if kind == "move" { 0 } else { 1 })}),
+            Some(&session),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The text selected on the page (or in the focused field), for the system clipboard.
+    pub async fn selection(&self) -> Result<String> {
+        let (cdp, session) = self.live().await?;
+        let value = self
+            .eval(
+                &cdp,
+                &session,
+                "(() => { const a = document.activeElement; if (a && typeof a.selectionStart === 'number' && a.value !== undefined) return a.value.substring(a.selectionStart, a.selectionEnd); return String(getSelection() || ''); })()",
+            )
+            .await?;
+        Ok(value.as_str().unwrap_or("").to_string())
+    }
+
+    /// Select everything in the focused field, or the whole page.
+    pub async fn select_all(&self) -> Result<()> {
+        let (cdp, session) = self.live().await?;
+        let _ = self.eval(&cdp, &session, "document.execCommand('selectAll')").await;
+        Ok(())
     }
 
     /// The connection and the active tab, starting the browser when it is not running.
@@ -460,6 +594,7 @@ impl BrowserHost {
                     title: found.map(|t| t.title.clone()).unwrap_or_default(),
                     url: found.map(|t| t.url.clone()).unwrap_or_default(),
                     active: *id == active,
+                    favicon: self.favicons.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned().unwrap_or_default(),
                 }
             })
             .collect();
@@ -519,8 +654,8 @@ impl BrowserHost {
         self.finish().await
     }
 
-    /// Close a tab. The last tab is replaced by an empty one, so the panel always has a page.
-    pub async fn close_tab(&self, id: &str) -> Result<Frame> {
+    /// Close a tab. Closing the last one closes the browser (None).
+    pub async fn close_tab(&self, id: &str) -> Result<Option<Frame>> {
         let (cdp, _) = self.live().await?;
         let empty = {
             let mut guard = self.live.lock().await;
@@ -540,9 +675,10 @@ impl BrowserHost {
             live.tabs.is_empty()
         };
         if empty {
-            return self.new_tab(None).await.map(|(_, frame)| frame);
+            self.shutdown().await;
+            return Ok(None);
         }
-        self.frame().await
+        self.frame().await.map(Some)
     }
 
     /// Render every tab at the panel's size. Sizes are clamped to what a page can use.
@@ -572,6 +708,8 @@ impl BrowserHost {
                 )
                 .await;
         }
+        // The screencast's frame size follows the viewport.
+        *self.stream_session.lock().unwrap_or_else(|e| e.into_inner()) = None;
         tokio::time::sleep(Duration::from_millis(120)).await;
         self.frame().await.map(Some)
     }
@@ -760,23 +898,38 @@ impl BrowserHost {
     }
 
     async fn take_frame(&self, cdp: &Cdp, session: &str) -> Result<Frame> {
+        self.take_frame_with(cdp, session, true).await
+    }
+
+    async fn take_frame_with(&self, cdp: &Cdp, session: &str, capture: bool) -> Result<Frame> {
         let info = self
             .eval(
                 cdp,
                 session,
-                "({url: location.href, title: document.title, loading: document.readyState !== 'complete'})",
+                "({url: location.href, title: document.title, loading: document.readyState !== 'complete', \
+                  icon: (() => { const l = document.querySelector('link[rel~=\"icon\"], link[rel=\"shortcut icon\"], link[rel=\"apple-touch-icon\"]'); \
+                  return l ? l.href : (location.protocol.startsWith('http') ? location.origin + '/favicon.ico' : ''); })()})",
             )
             .await
             .unwrap_or(Value::Null);
-        let image = cdp
-            .call(
-                "Page.captureScreenshot",
-                json!({"format": "jpeg", "quality": 60}),
-                Some(session),
-            )
-            .await
-            .ok()
-            .and_then(|shot| shot.get("data").and_then(|d| d.as_str()).map(str::to_string));
+        // Remember the icon of the tab in front for the tab strip.
+        if let Some(icon) = info.get("icon").and_then(|i| i.as_str()) {
+            let target = {
+                let guard = self.live.lock().await;
+                guard.as_ref().and_then(|l| l.tabs.iter().find(|t| t.session == session).map(|t| t.target.clone()))
+            };
+            if let Some(target) = target {
+                self.favicons.lock().unwrap_or_else(|e| e.into_inner()).insert(target, icon.to_string());
+            }
+        }
+        let image = if capture {
+            cdp.call("Page.captureScreenshot", json!({"format": "jpeg", "quality": 60}), Some(session))
+                .await
+                .ok()
+                .and_then(|shot| shot.get("data").and_then(|d| d.as_str()).map(str::to_string))
+        } else {
+            None
+        };
         let (back, forward) = self.history(cdp, session).await;
         let (tabs, active_tab) = self.tab_infos(cdp).await;
         let (width, height) = self.view();
@@ -834,6 +987,7 @@ impl BrowserHost {
         let (cdp, session) = self.live().await?;
         let snapshot = self.take_snapshot(&cdp, &session).await?;
         let frame = self.take_frame(&cdp, &session).await?;
+        self.sync_stream().await;
         Ok((snapshot, frame))
     }
 
@@ -868,7 +1022,21 @@ impl BrowserHost {
     pub async fn frame(&self) -> Result<Frame> {
         self.adopt_popups().await;
         let (cdp, session) = self.live().await?;
-        self.take_frame(&cdp, &session).await
+        let frame = self.take_frame(&cdp, &session).await?;
+        self.sync_stream().await;
+        Ok(frame)
+    }
+
+    /// Address, title, tabs, and history without a screenshot (the screencast carries pictures).
+    pub async fn frame_meta(&self) -> Result<Option<Frame>> {
+        if !self.is_running().await {
+            return Ok(None);
+        }
+        self.adopt_popups().await;
+        let (cdp, session) = self.live().await?;
+        let frame = self.take_frame_with(&cdp, &session, false).await?;
+        self.sync_stream().await;
+        Ok(Some(frame))
     }
 
     async fn element_center(&self, cdp: &Cdp, session: &str, id: u32) -> Result<(f64, f64)> {
@@ -993,6 +1161,12 @@ impl BrowserHost {
         Ok(())
     }
 
+    /// Scroll without waiting for a picture (the screencast shows the result).
+    pub async fn scroll_by(&self, x: f64, y: f64, delta_y: f64) -> Result<()> {
+        let (cdp, session) = self.live().await?;
+        self.wheel_raw(&cdp, &session, x, y, delta_y).await
+    }
+
     pub async fn wheel_at(&self, x: f64, y: f64, delta_y: f64) -> Result<Frame> {
         let (cdp, session) = self.live().await?;
         self.wheel_raw(&cdp, &session, x, y, delta_y).await?;
@@ -1090,7 +1264,7 @@ async fn kill_profile_orphans(profile: &Path) {
 /// On Windows the browser lives in a job object that is closed when Serika exits, however it
 /// exits, so a killed or crashed app never leaves a headless browser holding the profile.
 #[cfg(windows)]
-mod job {
+pub(crate) mod job {
     use std::sync::OnceLock;
 
     #[repr(C)]

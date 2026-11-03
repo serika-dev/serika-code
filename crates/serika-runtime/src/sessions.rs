@@ -135,6 +135,7 @@ impl SessionStore {
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN model TEXT", []);
         let _ = conn.execute("ALTER TABLE provider_sessions ADD COLUMN synced_through INTEGER", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN parent_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE projects ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0", []);
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -173,8 +174,8 @@ impl SessionStore {
             params![id, project, title, model_id, permission.as_str(), now],
         )?;
         conn.execute(
-            "INSERT INTO projects (path, last_opened) VALUES (?1, ?2)
-             ON CONFLICT(path) DO UPDATE SET last_opened = excluded.last_opened",
+            "INSERT INTO projects (path, last_opened, hidden) VALUES (?1, ?2, 0)
+             ON CONFLICT(path) DO UPDATE SET last_opened = excluded.last_opened, hidden = 0",
             params![project, now],
         )?;
         Ok(())
@@ -213,8 +214,8 @@ impl SessionStore {
             return Err(Error::msg("session not found"));
         }
         conn.execute(
-            "INSERT INTO projects (path, last_opened) VALUES (?1, ?2)
-             ON CONFLICT(path) DO UPDATE SET last_opened = excluded.last_opened",
+            "INSERT INTO projects (path, last_opened, hidden) VALUES (?1, ?2, 0)
+             ON CONFLICT(path) DO UPDATE SET last_opened = excluded.last_opened, hidden = 0",
             params![project, now],
         )?;
         Ok(())
@@ -353,8 +354,8 @@ impl SessionStore {
     pub fn remember_project(&self, project: &Path) -> Result<()> {
         let conn = self.lock();
         conn.execute(
-            "INSERT INTO projects (path, last_opened) VALUES (?1, ?2)
-             ON CONFLICT(path) DO UPDATE SET last_opened = excluded.last_opened",
+            "INSERT INTO projects (path, last_opened, hidden) VALUES (?1, ?2, 0)
+             ON CONFLICT(path) DO UPDATE SET last_opened = excluded.last_opened, hidden = 0",
             params![project.to_string_lossy().to_string(), now_secs()],
         )?;
         Ok(())
@@ -426,13 +427,26 @@ impl SessionStore {
     }
 
     /// Remove a project from the project list. Its chats stay in the history.
+    /// Hide a project from the list. Its chats stay saved; it returns when the folder is opened again.
     pub fn forget_project(&self, project: &Path) -> Result<()> {
         let conn = self.lock();
         conn.execute(
-            "DELETE FROM projects WHERE path = ?1",
-            params![project.to_string_lossy().to_string()],
+            "INSERT INTO projects (path, last_opened, hidden) VALUES (?1, ?2, 1)
+             ON CONFLICT(path) DO UPDATE SET hidden = 1",
+            params![project.to_string_lossy().to_string(), now_secs()],
         )?;
         Ok(())
+    }
+
+    /// Delete every chat (and its sub-agents) stored for this exact folder spelling.
+    pub fn delete_project_chats(&self, project: &Path) -> Result<usize> {
+        let conn = self.lock();
+        let path = project.to_string_lossy().to_string();
+        conn.execute(
+            "DELETE FROM sessions WHERE parent_id IN (SELECT id FROM sessions WHERE project_path = ?1)",
+            params![path],
+        )?;
+        Ok(conn.execute("DELETE FROM sessions WHERE project_path = ?1", params![path])?)
     }
 
     /// Every project the app knows, newest first: remembered folders plus folders that have chats.
@@ -440,9 +454,10 @@ impl SessionStore {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT path, MAX(seen) FROM (
-                SELECT path, last_opened AS seen FROM projects
+                SELECT path, last_opened AS seen FROM projects WHERE hidden = 0
                 UNION ALL
                 SELECT project_path AS path, updated_at AS seen FROM sessions
+                WHERE parent_id IS NULL AND project_path NOT IN (SELECT path FROM projects WHERE hidden = 1)
              ) GROUP BY path ORDER BY MAX(seen) DESC LIMIT 80",
         )?;
         let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
@@ -452,7 +467,7 @@ impl SessionStore {
     pub fn recent_projects(&self) -> Result<Vec<String>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT path FROM projects ORDER BY last_opened DESC LIMIT 20",
+            "SELECT path FROM projects WHERE hidden = 0 ORDER BY last_opened DESC LIMIT 20",
         )?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Error::from)
@@ -853,6 +868,23 @@ mod tests {
             store.append_message("s1", "assistant", reply).unwrap();
         }
         store.set_provider_session("s1", "claude", "abc").unwrap();
+    }
+
+    #[test]
+    fn removed_projects_stay_hidden_until_reopened() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("s.db")).unwrap();
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        store.create("s1", &project, "Chat", "m", PermissionMode::Standard).unwrap();
+        let shown = |store: &SessionStore| store.projects().unwrap().iter().any(|(p, _)| Path::new(p) == project);
+        assert!(shown(&store));
+        store.forget_project(&project).unwrap();
+        assert!(!shown(&store), "a project with chats must stay removed");
+        store.remember_project(&project).unwrap();
+        assert!(shown(&store));
+        assert_eq!(store.delete_project_chats(&project).unwrap(), 1);
+        assert!(store.get("s1").unwrap().is_none());
     }
 
     #[test]

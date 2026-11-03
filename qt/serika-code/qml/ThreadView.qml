@@ -3,6 +3,7 @@ import QtQuick.Controls
 
 ListView {
     id: thread
+    SmoothWheel { flickable: thread }
     property bool stick: true
     clip: true
     spacing: 0

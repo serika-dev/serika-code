@@ -7,7 +7,9 @@ Item {
     property bool browserShown: false
     property bool changesShown: false
     property bool agentsShown: false
+    property bool terminalShown: false
     signal agentsRequested()
+    signal terminalRequested()
     readonly property bool inspectorOpen: browserShown || changesShown || agentsShown
     property real rightInset: 12
     signal exportRequested()
@@ -129,6 +131,12 @@ Item {
                 radius: 3.5
                 color: Theme.accent
             }
+        }
+        IconButton {
+            icon: "terminal"
+            tip: Format.tr(header.dict, "Terminal", "Terminal") + "  (Ctrl `)"
+            active: header.terminalShown
+            onClicked: header.terminalRequested()
         }
         IconButton {
             icon: "globe"

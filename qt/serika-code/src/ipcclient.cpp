@@ -161,7 +161,25 @@ void IpcClient::handleLine(const QByteArray &line) {
         return;
     }
     const int id = obj.value(QStringLiteral("id")).toInt();
-    const QString tag = m_tags.take(id);
+    QString tag = m_tags.take(id);
+    if (tag.startsWith(QLatin1String("browserPoll#"))) {
+        // A poll that left before the latest tab action describes the old state.
+        if (tag.mid(12).toULongLong() != m_browserEpoch || m_browserInFlight)
+            return;
+        tag = QStringLiteral("browserPoll");
+    } else if (tag == QLatin1String("browserAction")) {
+        m_browserInFlight = false;
+        QTimer::singleShot(0, this, &IpcClient::browserNext);
+        tag = QStringLiteral("browser");
+        // A newer action is waiting; its answer will describe the browser.
+        if (!m_browserQueue.isEmpty() && obj.value(QStringLiteral("ok")).toBool())
+            return;
+    } else if (tag == QLatin1String("uiSet")) {
+        // Local preferences already hold the change; a late answer could undo a newer one.
+        if (!obj.value(QStringLiteral("ok")).toBool())
+            setNotice(obj.value(QStringLiteral("error")).toString());
+        return;
+    }
     if (!obj.value(QStringLiteral("ok")).toBool()) {
         const QString error = obj.value(QStringLiteral("error")).toString();
         if (tag.startsWith(QLatin1String("auth.")))
@@ -178,7 +196,8 @@ void IpcClient::handleLine(const QByteArray &line) {
             emit providersChanged();
             setNotice(error);
         } else if (tag != QLatin1String("background") && tag != QLatin1String("account") && tag != QLatin1String("models") &&
-                   tag != QLatin1String("browserPoll")) {
+                   tag != QLatin1String("browserPoll") && tag != QLatin1String("browserMouse") &&
+                   tag != QLatin1String("browserStream")) {
             setNotice(error);
         }
         return;
@@ -231,6 +250,11 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
         if (!m_demo) {
             m_projects = result.value(QStringLiteral("projects")).toArray().toVariantList();
             emit projectsChanged();
+            // Removing the folder you were in moved you to another one.
+            if (result.contains(QStringLiteral("settings"))) {
+                applySettings(result.value(QStringLiteral("settings")).toObject());
+                request(QStringLiteral("sessions.list"), {}, QStringLiteral("sessions"));
+            }
         }
     } else if (tag == QLatin1String("sessions")) {
         if (!m_demo) {
@@ -242,6 +266,7 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
         m_turns.replaceAll(result.value(QStringLiteral("turns")).toArray().toVariantList());
         m_diffs = result.value(QStringLiteral("diffs")).toArray().toVariantList();
         m_activeSession = result.value(QStringLiteral("id")).toString();
+        m_folderMissing = result.value(QStringLiteral("folderMissing")).toBool();
         emit activeSessionChanged();
         emit diffsChanged();
         emit turnsReloaded();
@@ -250,6 +275,22 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
         m_agents.clear();
         emit agentsChanged();
         request(QStringLiteral("sessions.children"), {{QStringLiteral("id"), m_activeSession}}, QStringLiteral("agents"));
+    } else if (tag == QLatin1String("terminalOpen")) {
+        QVariantMap row = result.toVariantMap();
+        row.insert(QStringLiteral("running"), false);
+        row.insert(QStringLiteral("exited"), false);
+        m_terminals.append(row);
+        emit terminalsChanged();
+    } else if (tag == QLatin1String("mcp")) {
+        m_mcp = result.toVariantMap();
+        emit mcpChanged();
+    } else if (tag == QLatin1String("skills")) {
+        m_skills = result.value(QStringLiteral("skills")).toArray().toVariantList();
+        emit skillsChanged();
+    } else if (tag == QLatin1String("browserCopy")) {
+        const QString text = result.value(QStringLiteral("text")).toString();
+        if (!text.isEmpty())
+            copyText(text);
     } else if (tag == QLatin1String("agents")) {
         m_agents = result.value(QStringLiteral("agents")).toArray().toVariantList();
         emit agentsChanged();
@@ -304,9 +345,12 @@ void IpcClient::applyFrame(const QJsonObject &frame) {
     if (frame.contains(QStringLiteral("unchanged")))
         return;
     if (frame.value(QStringLiteral("running")).toBool(true) == false) {
-        if (!m_browser.isEmpty()) {
+        m_browserBusy = false;
+        if (!m_browser.isEmpty() || !m_browserImage.isEmpty()) {
             m_browser.clear();
+            m_browserImage.clear();
             emit browserChanged();
+            emit browserImageChanged();
         }
         return;
     }
@@ -317,7 +361,13 @@ void IpcClient::applyFrame(const QJsonObject &frame) {
     else if (m_browser.contains(QStringLiteral("agentAt")))
         map.insert(QStringLiteral("agentAt"), m_browser.value(QStringLiteral("agentAt")));
     const QString image = frame.value(QStringLiteral("image")).toString();
-    map.insert(QStringLiteral("imageUrl"), image.isEmpty() ? QString() : dataUrl(image));
+    if (!image.isEmpty()) {
+        m_browserImage = dataUrl(image);
+        emit browserImageChanged();
+    }
+    // A frame without a picture (streaming, or a quick tab switch) keeps the last one.
+    map.insert(QStringLiteral("imageUrl"), m_browserImage);
+    map.insert(QStringLiteral("running"), true);
     map.remove(QStringLiteral("image"));
     m_browser = map;
     m_browserBusy = false;
@@ -415,6 +465,26 @@ void IpcClient::handleEvent(const QJsonObject &obj) {
     } else if (event == QLatin1String("browser")) {
         applyFrame(obj);
         emit browserActivity();
+    } else if (event == QLatin1String("browserImage")) {
+        m_browserImage = dataUrl(obj.value(QStringLiteral("image")).toString());
+        emit browserImageChanged();
+    } else if (event == QLatin1String("terminal")) {
+        const QString id = obj.value(QStringLiteral("id")).toString();
+        const QString kind = obj.value(QStringLiteral("kind")).toString();
+        if (kind == QLatin1String("output")) {
+            const QString text = obj.value(QStringLiteral("text")).toString();
+            QString &buffer = m_termText[id];
+            buffer.append(text);
+            if (buffer.size() > 400000)
+                buffer.remove(0, buffer.size() - 300000);
+            emit terminalOutput(id, text, obj.value(QStringLiteral("error")).toBool());
+        } else if (kind == QLatin1String("done")) {
+            updateTerminal(id, {{QStringLiteral("running"), false}, {QStringLiteral("cwd"), obj.value(QStringLiteral("cwd")).toString()},
+                                {QStringLiteral("lastCode"), obj.value(QStringLiteral("code")).toInt()}});
+            emit terminalDone(id, obj.value(QStringLiteral("code")).toInt());
+        } else if (kind == QLatin1String("exit")) {
+            updateTerminal(id, {{QStringLiteral("running"), false}, {QStringLiteral("exited"), true}});
+        }
     } else if (event == QLatin1String("subagent")) {
         // Keep one row per sub-agent and update it in place; open the Agents tab when one starts.
         QVariantMap row = obj.toVariantMap();
@@ -1101,7 +1171,7 @@ void IpcClient::setSetting(const QString &key, const QVariant &value) {
 void IpcClient::setUi(const QString &key, const QVariant &value) {
     m_ui.insert(key, value);
     emit uiChanged();
-    request(QStringLiteral("ui.set"), {{QStringLiteral("key"), key}, {QStringLiteral("value"), QJsonValue::fromVariant(value)}}, QStringLiteral("ui"));
+    request(QStringLiteral("ui.set"), {{QStringLiteral("key"), key}, {QStringLiteral("value"), QJsonValue::fromVariant(value)}}, QStringLiteral("uiSet"));
 }
 
 void IpcClient::addProject(const QUrl &folder) {
@@ -1154,25 +1224,25 @@ void IpcClient::browserOpen(const QString &url) {
     m_browserBusy = true;
     m_browserError.clear();
     emit browserChanged();
-    request(QStringLiteral("browser.open"), {{QStringLiteral("url"), url}}, QStringLiteral("browser"));
+    browserAction(QStringLiteral("browser.open"), {{QStringLiteral("url"), url}});
 }
 
 void IpcClient::browserBack() {
     m_browserBusy = true;
     emit browserChanged();
-    request(QStringLiteral("browser.back"), {}, QStringLiteral("browser"));
+    browserAction(QStringLiteral("browser.back"), {});
 }
 
 void IpcClient::browserForward() {
     m_browserBusy = true;
     emit browserChanged();
-    request(QStringLiteral("browser.forward"), {}, QStringLiteral("browser"));
+    browserAction(QStringLiteral("browser.forward"), {});
 }
 
 void IpcClient::browserReload() {
     m_browserBusy = true;
     emit browserChanged();
-    request(QStringLiteral("browser.reload"), {}, QStringLiteral("browser"));
+    browserAction(QStringLiteral("browser.reload"), {});
 }
 
 void IpcClient::browserClick(double x, double y) {
@@ -1180,7 +1250,11 @@ void IpcClient::browserClick(double x, double y) {
 }
 
 void IpcClient::browserWheel(double x, double y, double dy) {
-    request(QStringLiteral("browser.wheel"), {{QStringLiteral("x"), x}, {QStringLiteral("y"), y}, {QStringLiteral("dy"), dy}}, QStringLiteral("browser"));
+    // While streaming, the picture follows by itself, so skip the screenshot round trip.
+    if (m_browserStreaming)
+        request(QStringLiteral("browser.scroll"), {{QStringLiteral("x"), x}, {QStringLiteral("y"), y}, {QStringLiteral("dy"), dy}}, QStringLiteral("browserMouse"));
+    else
+        request(QStringLiteral("browser.wheel"), {{QStringLiteral("x"), x}, {QStringLiteral("y"), y}, {QStringLiteral("dy"), dy}}, QStringLiteral("browser"));
 }
 
 void IpcClient::browserInput(const QString &key, const QString &text) {
@@ -1191,27 +1265,203 @@ void IpcClient::browserNewTab(const QString &url) {
     m_browserBusy = true;
     m_browserError.clear();
     emit browserChanged();
-    request(QStringLiteral("browser.newTab"), {{QStringLiteral("url"), url}}, QStringLiteral("browser"));
+    browserAction(QStringLiteral("browser.newTab"), {{QStringLiteral("url"), url}});
+}
+
+void IpcClient::browserAction(const QString &method, const QJsonObject &params) {
+    if (m_demo)
+        return;
+    // Only the last of several quick switches matters.
+    if (method == QLatin1String("browser.switchTab") && !m_browserQueue.isEmpty() &&
+        m_browserQueue.last().first == method)
+        m_browserQueue.removeLast();
+    m_browserQueue.append({method, params});
+    ++m_browserEpoch;
+    if (!m_browserInFlight)
+        browserNext();
+}
+
+void IpcClient::browserNext() {
+    if (m_browserInFlight || m_browserQueue.isEmpty())
+        return;
+    const auto next = m_browserQueue.takeFirst();
+    m_browserInFlight = true;
+    request(next.first, next.second, QStringLiteral("browserAction"));
 }
 
 void IpcClient::browserSwitchTab(const QString &id) {
-    request(QStringLiteral("browser.switchTab"), {{QStringLiteral("id"), id}}, QStringLiteral("browser"));
+    // Show the switch at once; the browser's answer confirms it.
+    QVariantList tabs = m_browser.value(QStringLiteral("tabs")).toList();
+    for (QVariant &item : tabs) {
+        QVariantMap tab = item.toMap();
+        const bool active = tab.value(QStringLiteral("id")).toString() == id;
+        tab.insert(QStringLiteral("active"), active);
+        if (active) {
+            m_browser.insert(QStringLiteral("url"), tab.value(QStringLiteral("url")));
+            m_browser.insert(QStringLiteral("title"), tab.value(QStringLiteral("title")));
+            m_browser.insert(QStringLiteral("activeTab"), id);
+        }
+        item = tab;
+    }
+    m_browser.insert(QStringLiteral("tabs"), tabs);
+    emit browserChanged();
+    browserAction(QStringLiteral("browser.switchTab"), {{QStringLiteral("id"), id}});
 }
 
 void IpcClient::browserCloseTab(const QString &id) {
-    request(QStringLiteral("browser.closeTab"), {{QStringLiteral("id"), id}}, QStringLiteral("browser"));
+    QVariantList tabs = m_browser.value(QStringLiteral("tabs")).toList();
+    int index = -1;
+    bool wasActive = false;
+    for (int i = 0; i < tabs.size(); ++i) {
+        const QVariantMap tab = tabs[i].toMap();
+        if (tab.value(QStringLiteral("id")).toString() == id) {
+            index = i;
+            wasActive = tab.value(QStringLiteral("active")).toBool();
+            break;
+        }
+    }
+    if (index >= 0) {
+        tabs.removeAt(index);
+        if (tabs.isEmpty()) {
+            m_browser.clear();
+            m_browserImage.clear();
+            emit browserImageChanged();
+        } else {
+            if (wasActive) {
+                QVariantMap next = tabs[qMin(index, int(tabs.size()) - 1)].toMap();
+                next.insert(QStringLiteral("active"), true);
+                tabs[qMin(index, int(tabs.size()) - 1)] = next;
+                m_browser.insert(QStringLiteral("url"), next.value(QStringLiteral("url")));
+                m_browser.insert(QStringLiteral("title"), next.value(QStringLiteral("title")));
+            }
+            m_browser.insert(QStringLiteral("tabs"), tabs);
+        }
+        emit browserChanged();
+    }
+    browserAction(QStringLiteral("browser.closeTab"), {{QStringLiteral("id"), id}});
 }
 
 void IpcClient::browserResize(int width, int height) {
     if (m_demo)
         return;
-    request(QStringLiteral("browser.resize"), {{QStringLiteral("width"), width}, {QStringLiteral("height"), height}}, QStringLiteral("browserPoll"));
+    request(QStringLiteral("browser.resize"), {{QStringLiteral("width"), width}, {QStringLiteral("height"), height}}, QStringLiteral("browserPoll#%1").arg(m_browserEpoch));
 }
 
 void IpcClient::browserPoll() {
-    if (m_demo || m_browserBusy)
+    if (m_demo || m_browserBusy || m_browserInFlight || !m_browserQueue.isEmpty())
         return;
-    request(QStringLiteral("browser.frame"), {}, QStringLiteral("browserPoll"));
+    // While streaming, the picture arrives on its own; the poll only refreshes tabs and address.
+    QJsonObject params;
+    if (m_browserStreaming)
+        params.insert(QStringLiteral("meta"), true);
+    request(QStringLiteral("browser.frame"), params, QStringLiteral("browserPoll#%1").arg(m_browserEpoch));
+}
+
+void IpcClient::browserStream(bool on) {
+    if (m_demo)
+        return;
+    // Panels come and go (moving between docks), so count who wants the picture.
+    m_streamHolders = qMax(0, m_streamHolders + (on ? 1 : -1));
+    on = m_streamHolders > 0;
+    if (m_browserStreaming == on)
+        return;
+    m_browserStreaming = on;
+    request(QStringLiteral("browser.stream"), {{QStringLiteral("on"), on}}, QStringLiteral("browserStream"));
+}
+
+void IpcClient::browserMouse(const QString &type, double x, double y, const QString &button, int buttons, int clicks) {
+    if (m_demo)
+        return;
+    request(QStringLiteral("browser.mouse"),
+            {{QStringLiteral("type"), type}, {QStringLiteral("x"), x}, {QStringLiteral("y"), y},
+             {QStringLiteral("button"), button}, {QStringLiteral("buttons"), buttons}, {QStringLiteral("clicks"), clicks}},
+            QStringLiteral("browserMouse"));
+}
+
+void IpcClient::browserCopy() { request(QStringLiteral("browser.copy"), {}, QStringLiteral("browserCopy")); }
+void IpcClient::browserSelectAll() { request(QStringLiteral("browser.selectAll"), {}, QStringLiteral("browserMouse")); }
+
+void IpcClient::browserPaste() {
+    const QClipboard *clipboard = QGuiApplication::clipboard();
+    const QString text = clipboard ? clipboard->text() : QString();
+    if (!text.isEmpty())
+        browserInput(QString(), text);
+}
+
+void IpcClient::updateTerminal(const QString &id, const QVariantMap &changes) {
+    for (QVariant &row : m_terminals) {
+        QVariantMap map = row.toMap();
+        if (map.value(QStringLiteral("id")).toString() != id)
+            continue;
+        for (auto it = changes.begin(); it != changes.end(); ++it)
+            map.insert(it.key(), it.value());
+        row = map;
+        emit terminalsChanged();
+        return;
+    }
+}
+
+void IpcClient::terminalOpen(const QString &cwd) {
+    if (m_demo) {
+        const QString id = QStringLiteral("demo%1").arg(m_terminals.size() + 1);
+        m_terminals.append(QVariantMap{{QStringLiteral("id"), id}, {QStringLiteral("shell"), QStringLiteral("pwsh")},
+                                       {QStringLiteral("cwd"), m_projectPath}, {QStringLiteral("running"), false}, {QStringLiteral("exited"), false}});
+        m_termText[id] = QStringLiteral("PS> cargo test --workspace\n   Compiling serika-runtime v0.1.2\n    Finished test [unoptimized] target(s) in 4.31s\ntest result: ok. 76 passed; 0 failed\n");
+        emit terminalsChanged();
+        return;
+    }
+    QJsonObject params;
+    if (!cwd.isEmpty())
+        params.insert(QStringLiteral("cwd"), cwd);
+    request(QStringLiteral("terminal.open"), params, QStringLiteral("terminalOpen"));
+}
+
+void IpcClient::terminalRun(const QString &id, const QString &command) {
+    const QString shown = QStringLiteral("❯ ") + command + QLatin1Char('\n');
+    m_termText[id].append(shown);
+    emit terminalOutput(id, shown, false);
+    updateTerminal(id, {{QStringLiteral("running"), true}});
+    request(QStringLiteral("terminal.run"), {{QStringLiteral("id"), id}, {QStringLiteral("command"), command}}, QStringLiteral("terminal"));
+}
+
+void IpcClient::terminalInterrupt(const QString &id) {
+    request(QStringLiteral("terminal.interrupt"), {{QStringLiteral("id"), id}}, QStringLiteral("terminal"));
+}
+
+void IpcClient::terminalClose(const QString &id) {
+    for (int i = 0; i < m_terminals.size(); ++i) {
+        if (m_terminals[i].toMap().value(QStringLiteral("id")).toString() == id) {
+            m_terminals.removeAt(i);
+            break;
+        }
+    }
+    m_termText.remove(id);
+    emit terminalsChanged();
+    request(QStringLiteral("terminal.close"), {{QStringLiteral("id"), id}}, QStringLiteral("terminal"));
+}
+
+QString IpcClient::terminalText(const QString &id) const { return m_termText.value(id); }
+
+void IpcClient::terminalClear(const QString &id) {
+    m_termText[id].clear();
+    emit terminalsChanged();
+}
+
+void IpcClient::mcpRefresh() { request(QStringLiteral("mcp.list"), {}, QStringLiteral("mcp")); }
+void IpcClient::mcpConnect(const QString &name) { request(QStringLiteral("mcp.connect"), {{QStringLiteral("name"), name}}, QStringLiteral("mcp")); }
+void IpcClient::mcpToggle(const QString &name, bool enabled) {
+    request(QStringLiteral("mcp.toggle"), {{QStringLiteral("name"), name}, {QStringLiteral("enabled"), enabled}}, QStringLiteral("mcp"));
+}
+void IpcClient::mcpSave(const QString &name, const QString &definition) {
+    request(QStringLiteral("mcp.save"), {{QStringLiteral("name"), name}, {QStringLiteral("definition"), definition}}, QStringLiteral("mcp"));
+}
+void IpcClient::mcpRemove(const QString &name) { request(QStringLiteral("mcp.remove"), {{QStringLiteral("name"), name}}, QStringLiteral("mcp")); }
+void IpcClient::skillsRefresh() { request(QStringLiteral("skills.list"), {}, QStringLiteral("skills")); }
+void IpcClient::skillsToggle(const QString &name, bool enabled) {
+    request(QStringLiteral("skills.toggle"), {{QStringLiteral("name"), name}, {QStringLiteral("enabled"), enabled}}, QStringLiteral("skills"));
+}
+void IpcClient::deleteProject(const QString &path) {
+    request(QStringLiteral("projects.delete"), {{QStringLiteral("path"), path}}, QStringLiteral("projects"));
 }
 
 void IpcClient::browserClose() {

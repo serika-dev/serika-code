@@ -479,14 +479,23 @@ pub fn find_cli(name: &str, configured: Option<&str>) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
+    // A CLI installed after Serika started is on the saved PATH, not the one Serika inherited.
+    dirs.extend(saved_path_dirs());
     if let Some(home) = dirs::home_dir() {
         dirs.push(home.join(".local").join("bin"));
         dirs.push(home.join(".claude").join("local"));
         dirs.push(home.join(".npm-global").join("bin"));
         dirs.push(home.join(".bun").join("bin"));
+        // Codex's own installer and its standalone package
+        dirs.push(home.join(".codex").join("packages").join("standalone").join("current").join("bin"));
     }
     if let Some(app) = std::env::var_os("APPDATA") {
         dirs.push(PathBuf::from(app).join("npm"));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let local = PathBuf::from(local);
+        dirs.push(local.join("Programs").join("OpenAI").join("Codex").join("bin"));
+        dirs.push(local.join("Programs").join("claude"));
     }
     dirs.push(PathBuf::from("/usr/local/bin"));
     dirs.push(PathBuf::from("/opt/homebrew/bin"));
@@ -499,6 +508,70 @@ pub fn find_cli(name: &str, configured: Option<&str>) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The user's and the machine's PATH as saved in the registry (Windows), with %VARS% expanded.
+fn saved_path_dirs() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut dirs = Vec::new();
+        for key in [r"HKCU\Environment", r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"] {
+            let Ok(out) = std::process::Command::new("reg")
+                .args(["query", key, "/v", "Path"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+            else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                let line = line.trim();
+                let Some(rest) = line.strip_prefix("Path").or_else(|| line.strip_prefix("PATH")) else { continue };
+                let value = rest.trim_start().splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim();
+                for part in value.split(';').filter(|p| !p.trim().is_empty()) {
+                    dirs.push(PathBuf::from(expand_percent_vars(part.trim())));
+                }
+            }
+        }
+        dirs
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// Expand `%NAME%` from the environment; unknown names stay as written.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn expand_percent_vars(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match after.find('%') {
+            Some(end) => {
+                let name = &after[..end];
+                match std::env::var(name) {
+                    Ok(value) if !name.is_empty() => out.push_str(&value),
+                    _ => {
+                        out.push('%');
+                        out.push_str(name);
+                        out.push('%');
+                    }
+                }
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn command_for(binary: &Path) -> Command {
@@ -800,6 +873,31 @@ impl Runtime {
     }
 
     /// One tiny Claude request to read the subscription windows. It costs a few tokens.
+    /// An `--mcp-config` file for Claude Code: Serika's browser endpoint and servers the user
+    /// added in Serika. None when there is nothing to add.
+    fn claude_mcp_config(&self, project: &Path, config: &Config) -> Option<PathBuf> {
+        let mut servers = serde_json::Map::new();
+        let own = self.own_mcp.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(endpoint) = own.filter(|_| config.browser_enabled) {
+            servers.insert(
+                crate::mcp_server::SERVER_NAME.into(),
+                serde_json::json!({"type": "http", "url": endpoint.url, "headers": {"Authorization": format!("Bearer {}", endpoint.token)}}),
+            );
+        }
+        for entry in crate::mcp_hub::load_servers(&self.paths.data_dir, project) {
+            if entry.enabled && entry.source == "Serika" {
+                servers.insert(entry.name.clone(), crate::mcp_hub::claude_json(&entry.transport));
+            }
+        }
+        if servers.is_empty() {
+            return None;
+        }
+        let path = self.paths.data_dir.join("claude-mcp.json");
+        let body = serde_json::json!({ "mcpServers": servers });
+        std::fs::write(&path, serde_json::to_string_pretty(&body).ok()?).ok()?;
+        Some(path)
+    }
+
     /// The saved effort level, when the chosen model is known to accept it.
     fn effort_for(&self, agent: CliAgent, config: &Config, model: &str) -> Option<String> {
         let effort = match agent {
@@ -962,6 +1060,21 @@ impl Runtime {
                 if let Some(effort) = &effort {
                     command.args(["--effort", effort]);
                 }
+                // Serika's browser (and servers added in Serika) as MCP servers. Claude Code reads
+                // its own MCP setup itself.
+                if let Some(file) = self.claude_mcp_config(project, &config) {
+                    command.arg("--mcp-config").arg(file);
+                    let allowed: Vec<String> = crate::mcp_server::tool_names()
+                        .into_iter()
+                        .filter(|n| {
+                            let acting = n.ends_with("_click") || n.ends_with("_type") || n.ends_with("_press");
+                            !acting || matches!(permission, PermissionMode::Standard | PermissionMode::Full)
+                        })
+                        .collect();
+                    if !allowed.is_empty() {
+                        command.arg("--allowedTools").arg(allowed.join(","));
+                    }
+                }
                 if let Some(id) = &resume {
                     command.args(["--resume", id]);
                 }
@@ -985,6 +1098,13 @@ impl Runtime {
                 }
                 if let Some(effort) = &effort {
                     command.arg("-c").arg(format!("model_reasoning_effort=\"{effort}\""));
+                }
+                // Serika's browser as an MCP server; the token travels in an environment variable.
+                let own = self.own_mcp.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(endpoint) = own.filter(|_| config.browser_enabled) {
+                    command.arg("-c").arg(format!("mcp_servers.serika.url=\"{}\"", endpoint.url));
+                    command.arg("-c").arg("mcp_servers.serika.bearer_token_env_var=\"SERIKA_MCP_TOKEN\"");
+                    command.env("SERIKA_MCP_TOKEN", &endpoint.token);
                 }
                 for image in attachments
                     .iter()

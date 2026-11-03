@@ -45,6 +45,7 @@ const KNOWN_TOOLS: &[&str] = &[
     "browser_new_tab",
     "browser_switch_tab",
     "delegate_task",
+    "use_skill",
 ];
 
 /// Split assistant text into `(visible_prose, extracted_reasoning, tool_calls)`.
@@ -208,7 +209,7 @@ fn parse_call_body(
         && (parsed.is_empty()
             || !parsed
                 .iter()
-                .all(|c| KNOWN_TOOLS.contains(&c.name.as_str())))
+                .all(|c| KNOWN_TOOLS.contains(&c.name.as_str()) || c.name.starts_with("mcp__")))
     {
         return Err("not a known serika tool".into());
     }

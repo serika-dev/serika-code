@@ -50,6 +50,8 @@ Sheet {
                 border.color: Theme.borderSubtle
                 clip: true
                 Flickable {
+                    id: approvalFlick
+                    SmoothWheel { flickable: approvalFlick }
                     anchors.fill: parent
                     anchors.margins: 12
                     contentWidth: width

@@ -89,6 +89,7 @@ Item {
 
     ListView {
         id: list
+        SmoothWheel { flickable: list }
         visible: ipc.agents.length > 0
         anchors.top: header.bottom
         anchors.topMargin: 1

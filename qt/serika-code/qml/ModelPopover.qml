@@ -95,6 +95,7 @@ Popover {
 
         ListView {
             id: list
+            SmoothWheel { flickable: list }
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.leftMargin: 4

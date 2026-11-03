@@ -229,119 +229,82 @@ ColumnLayout {
         }
     }
 
-    // Where the Browser and Changes panels go, and how wide the chat is.
+    // Which dock each panel lives in, how big the docks are, and how wide the chat is.
     SettingsCard {
         title: section.t("LayoutTitle", "Layout")
-        Item {
-            Layout.fillWidth: true
-            implicitHeight: layoutGrid.implicitHeight + 32
-            GridLayout {
-                id: layoutGrid
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.leftMargin: 16
-                anchors.rightMargin: 16
-                columns: width > 560 ? 4 : 2
-                columnSpacing: 10
-                rowSpacing: 10
-                Repeater {
-                    model: [
-                        { side: "right", mode: "tabs", label: section.t("LayoutRightTabs", "Right · tabs") },
-                        { side: "right", mode: "split", label: section.t("LayoutRightSplit", "Right · stacked") },
-                        { side: "bottom", mode: "tabs", label: section.t("LayoutBottomTabs", "Bottom · tabs") },
-                        { side: "bottom", mode: "split", label: section.t("LayoutBottomSplit", "Bottom · side by side") }
+        readonly property var paneIds: ["changes", "browser", "agents", "terminal"]
+        function tabsOf(key, fallback) {
+            const raw = ipc.ui[key]
+            if (raw === undefined || raw === null) return fallback
+            return String(raw).split(",").filter(function (t) { return paneIds.indexOf(t) >= 0 })
+        }
+        readonly property var rightTabs: tabsOf("rightTabs", tabsOf("dockTabs", ["changes", "browser"]))
+        readonly property var bottomTabs: tabsOf("bottomTabs", ["terminal"]).filter(function (t) { return rightTabs.indexOf(t) < 0 })
+        function place(id, where) {
+            const right = rightTabs.filter(function (t) { return t !== id })
+            const bottom = bottomTabs.filter(function (t) { return t !== id })
+            if (where === "right") right.push(id)
+            else if (where === "bottom") bottom.push(id)
+            ipc.setUi("rightTabs", right.join(","))
+            ipc.setUi("bottomTabs", bottom.join(","))
+        }
+        id: layoutCard
+        Repeater {
+            model: [
+                { id: "changes", label: section.t("Changes", "Changes"), icon: "git-branch" },
+                { id: "browser", label: section.t("Browser", "Browser"), icon: "globe" },
+                { id: "agents", label: section.t("Subagents", "Sub-agents"), icon: "users" },
+                { id: "terminal", label: section.t("Terminal", "Terminal"), icon: "terminal" }
+            ]
+            delegate: SettingRow {
+                required property var modelData
+                heading: modelData.label
+                help: section.t("PanePlaceHelp", "Drag its tab between docks, or pick a dock here.")
+                Segmented {
+                    options: [
+                        { value: "right", label: section.t("DockRightShort", "Right"), icon: "panel-right" },
+                        { value: "bottom", label: section.t("DockBottomShort", "Bottom"), icon: "panel-bottom" },
+                        { value: "none", label: section.t("DockHidden", "Hidden") }
                     ]
-                    delegate: Rectangle {
-                        id: tile
-                        required property var modelData
-                        readonly property bool current: (ipc.ui.dockSide === "bottom" ? "bottom" : "right") === modelData.side
-                                                        && (ipc.ui.dockMode === "split" ? "split" : "tabs") === modelData.mode
-                        readonly property bool atRight: modelData.side === "right"
-                        readonly property bool splitMode: modelData.mode === "split"
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 118
-                        radius: 12
-                        color: tileArea.containsMouse ? Theme.hover : "transparent"
-                        border.width: current ? 2 : 1
-                        border.color: current ? Theme.accent : Theme.borderSubtle
-                        // Miniature window: sidebar, chat, dock
-                        Rectangle {
-                            id: mini
-                            anchors.top: parent.top
-                            anchors.topMargin: 12
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            width: Math.min(parent.width - 24, 132)
-                            height: 70
-                            radius: 6
-                            color: Theme.bg
-                            border.width: 1
-                            border.color: Theme.border
-                            Rectangle { x: 3; y: 3; width: 18; height: parent.height - 6; radius: 3; color: Theme.card }
-                            Rectangle {
-                                id: dockMini
-                                x: tile.atRight ? parent.width - width - 3 : 24
-                                y: tile.atRight ? 3 : parent.height - height - 3
-                                width: tile.atRight ? parent.width * 0.38 : parent.width - 27
-                                height: tile.atRight ? parent.height - 6 : parent.height * 0.42
-                                radius: 3
-                                color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.22)
-                                border.width: 1
-                                border.color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.55)
-                                // Split line, or a tab row
-                                Rectangle {
-                                    visible: tile.splitMode
-                                    x: tile.atRight ? 2 : parent.width / 2
-                                    y: tile.atRight ? parent.height * 0.55 : 2
-                                    width: tile.atRight ? parent.width - 4 : 1
-                                    height: tile.atRight ? 1 : parent.height - 4
-                                    color: Theme.accent
-                                }
-                                Row {
-                                    visible: !tile.splitMode
-                                    x: 3
-                                    y: 3
-                                    spacing: 2
-                                    Rectangle { width: 9; height: 4; radius: 2; color: Theme.accent }
-                                    Rectangle { width: 9; height: 4; radius: 2; color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.45) }
-                                }
-                            }
-                            // Chat lines
-                            Column {
-                                x: 28
-                                y: 10
-                                spacing: 4
-                                Repeater {
-                                    model: tile.atRight ? 4 : 2
-                                    Rectangle { width: (tile.atRight ? mini.width * 0.3 : mini.width * 0.55) - index * 6; height: 3; radius: 1.5; color: Theme.textDim; opacity: 0.5 }
-                                }
-                            }
-                        }
-                        Text {
-                            anchors.bottom: parent.bottom
-                            anchors.bottomMargin: 10
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            width: parent.width - 12
-                            horizontalAlignment: Text.AlignHCenter
-                            elide: Text.ElideRight
-                            text: tile.modelData.label
-                            color: tile.current ? Theme.text : Theme.textSecondary
-                            font.family: Theme.sans
-                            font.pixelSize: 12
-                            font.weight: tile.current ? Font.Medium : Font.Normal
-                        }
-                        MouseArea {
-                            id: tileArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: { ipc.setUi("dockSide", tile.modelData.side); ipc.setUi("dockMode", tile.modelData.mode) }
-                        }
-                    }
+                    value: layoutCard.rightTabs.indexOf(modelData.id) >= 0 ? "right" : (layoutCard.bottomTabs.indexOf(modelData.id) >= 0 ? "bottom" : "none")
+                    onPicked: (v) => layoutCard.place(modelData.id, v)
                 }
             }
         }
         SettingRow {
+            heading: section.t("RightDockWidth", "Right dock width")
+            help: section.t("RightDockWidthHelp", "Or drag its left edge. Double-click the edge to reset.")
+            RowLayout {
+                spacing: 10
+                Slider {
+                    id: widthSlider
+                    Layout.preferredWidth: 180
+                    from: 300
+                    to: 1100
+                    stepSize: 10
+                    value: Number(ipc.ui.rightWidth || ipc.ui.dockWidth) > 0 ? Number(ipc.ui.rightWidth || ipc.ui.dockWidth) : 480
+                    onMoved: ipc.setUi("rightWidth", Math.round(value))
+                }
+                Text { text: Math.round(widthSlider.value) + " px"; color: Theme.textSecondary; font.family: Theme.sans; font.pixelSize: 12; Layout.preferredWidth: 52 }
+            }
+        }
+        SettingRow {
+            heading: section.t("BottomDockHeight", "Bottom dock height")
+            help: section.t("BottomDockHeightHelp", "Or drag its top edge. Double-click the edge to reset.")
+            RowLayout {
+                spacing: 10
+                Slider {
+                    id: heightSlider
+                    Layout.preferredWidth: 180
+                    from: 140
+                    to: 900
+                    stepSize: 10
+                    value: Number(ipc.ui.bottomHeight) > 0 ? Number(ipc.ui.bottomHeight) : 280
+                    onMoved: ipc.setUi("bottomHeight", Math.round(value))
+                }
+                Text { text: Math.round(heightSlider.value) + " px"; color: Theme.textSecondary; font.family: Theme.sans; font.pixelSize: 12; Layout.preferredWidth: 52 }
+            }
+        }        SettingRow {
             heading: section.t("ChatWidth", "Chat width")
             help: section.t("ChatWidthHelp", "How wide messages and the message box can grow.")
             Segmented {
@@ -357,11 +320,11 @@ ColumnLayout {
         }
         SettingRow {
             heading: section.t("PanelSizes", "Panel sizes")
-            help: section.t("PanelSizesHelp", "Drag the edge of the sidebar or the dock to resize. Double-click an edge to reset it.")
+            help: section.t("PanelSizesHelp", "Drag the edge of the sidebar or a dock to resize. Double-click an edge to reset it.")
             ChipButton {
                 text: section.t("ResetSizes", "Reset sizes")
                 iconName: "rotate-ccw"
-                onClicked: { ipc.setUi("sidebarWidth", 0); ipc.setUi("dockWidth", 0); ipc.setUi("dockHeight", 0) }
+                onClicked: { ipc.setUi("sidebarWidth", 0); ipc.setUi("dockWidth", 0); ipc.setUi("rightWidth", 0); ipc.setUi("bottomHeight", 0) }
             }
         }
     }

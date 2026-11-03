@@ -24,6 +24,10 @@ pub struct Runtime {
     pub approvals: Arc<ApprovalHub>,
     /// The browser the agent drives and the desktop panel shows. Starts on first use.
     pub browser: Arc<crate::browser::BrowserHost>,
+    /// Serika's own MCP endpoint (browser tools) while the desktop backend serves it.
+    pub own_mcp: std::sync::Mutex<Option<crate::mcp_server::Endpoint>>,
+    /// Connections to the user's MCP servers, opened on first use.
+    pub mcp: crate::mcp_hub::McpHub,
 }
 
 impl Runtime {
@@ -60,6 +64,8 @@ impl Runtime {
             client,
             approvals: Arc::new(ApprovalHub::new()),
             browser,
+            own_mcp: std::sync::Mutex::new(None),
+            mcp: crate::mcp_hub::McpHub::default(),
         })
     }
 

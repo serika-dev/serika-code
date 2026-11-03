@@ -89,6 +89,20 @@ impl Runtime {
 
         // Top-level chats may delegate to sub-agents; sub-agents may not delegate further.
         let is_child = self.sessions.parent(&session_id).ok().flatten().is_some();
+        // Skills and MCP tools available in this project.
+        let skills = crate::skills::discover(&project, &self.paths.data_dir);
+        let servers = crate::mcp_hub::load_servers(&self.paths.data_dir, &project);
+        let mcp_tools = if servers.iter().any(|s| s.enabled) {
+            emit(&request.events, AgentEvent::Status("Connecting MCP servers".into()));
+            self.mcp.ensure(&servers, &project).await
+        } else {
+            Vec::new()
+        };
+        let extras = [crate::skills::instructions(&skills), crate::mcp_hub::instructions(&mcp_tools)]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut changed = Vec::new();
         let files = context::snapshot(&project, &exclusions).unwrap_or_default();
         let max_rounds = self.config.max_tool_rounds;
@@ -104,9 +118,10 @@ impl Runtime {
             let stored = self.sessions.messages(&session_id)?;
             let brief = clip_chars(&context::brief(&project, &files, &changed), 12_000);
             let instructions = format!(
-                "{}{}\n\nPermission mode: {permission}.\n{brief}",
+                "{}{}{}\n\nPermission mode: {permission}.\n{brief}",
                 protocol::tool_instructions(),
-                if is_child { String::new() } else { format!("\n\n{}", crate::subagents::instructions()) }
+                if is_child { String::new() } else { format!("\n\n{}", crate::subagents::instructions()) },
+                if extras.is_empty() { String::new() } else { format!("\n\n{extras}") }
             );
             let (history, message, message_images) =
                 pack_history(&stored, &instructions, self.config.max_context_chars);
@@ -251,6 +266,8 @@ impl Runtime {
                 approvals: &self.approvals,
                 browser: &self.browser,
                 browser_enabled: self.config.browser_enabled,
+                skills: &skills,
+                mcp: &self.mcp,
             };
             let mut packed = String::from("Tool results:\n");
             // Sub-agents of this reply start together, then their reports join the results in order.

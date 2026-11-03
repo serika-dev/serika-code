@@ -17,7 +17,9 @@ Rectangle {
             { id: "general", label: t("General", "General"), icon: "sliders", sub: t("GeneralSub", "Language, model, sending") },
             { id: "providers", label: t("Providers", "Providers"), icon: "cpu", sub: t("ProvidersSub", "Serika, Claude Code, Codex") },
             { id: "agent", label: t("Agent", "Agent"), icon: "zap", sub: t("AgentSub", "Permissions and limits") },
-            { id: "browser", label: t("Browser", "Browser"), icon: "globe", sub: t("BrowserSub", "Let Serika browse the web") }
+            { id: "browser", label: t("Browser", "Browser"), icon: "globe", sub: t("BrowserSub", "Let Serika browse the web") },
+            { id: "mcp", label: t("McpNav", "MCP servers"), icon: "server", sub: t("McpSub", "Tools from Claude Code, Codex and your own servers") },
+            { id: "skills", label: t("SkillsNav", "Skills"), icon: "package", sub: t("SkillsSub", "Reusable instructions Serika can load") }
         ] },
         { title: t("SettingsInterface", "Interface"), items: [
             { id: "appearance", label: t("Appearance", "Appearance"), icon: "droplet", sub: t("AppearanceSub", "Themes, accent, text") },
@@ -90,6 +92,8 @@ Rectangle {
                 }
 
                 Flickable {
+                    id: navFlick
+                    SmoothWheel { flickable: navFlick }
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     Layout.topMargin: 4
@@ -170,6 +174,7 @@ Rectangle {
 
             Flickable {
                 id: flick
+                SmoothWheel { flickable: flick }
                 anchors.fill: parent
                 contentWidth: width
                 contentHeight: content.implicitHeight + 120
@@ -209,6 +214,8 @@ Rectangle {
                             case "appearance": return appearance
                             case "agent": return agent
                             case "browser": return browser
+                            case "mcp": return mcpSection
+                            case "skills": return skillsSection
                             case "keys": return keys
                             case "data": return dataSection
                             case "account": return account
@@ -225,6 +232,8 @@ Rectangle {
             Component { id: appearance; SettingsAppearance {} }
             Component { id: agent; SettingsAgent {} }
             Component { id: browser; SettingsBrowser {} }
+            Component { id: mcpSection; SettingsMcp {} }
+            Component { id: skillsSection; SettingsSkills {} }
             Component { id: keys; SettingsKeys {} }
             Component { id: dataSection; SettingsData {} }
             Component { id: account; SettingsAccount {} }

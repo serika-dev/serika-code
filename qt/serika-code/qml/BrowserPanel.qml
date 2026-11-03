@@ -9,8 +9,49 @@ Item {
     readonly property var dict: ipc.strings
     readonly property var frame: ipc.browser
     readonly property var tabs: frame.tabs || []
-    readonly property bool running: (frame.imageUrl || "").length > 0
+    // Running as soon as the browser reports tabs; a blank new tab has no picture yet.
+    readonly property bool running: frame.running === true && tabs.length > 0
     readonly property bool blank: !running || (frame.url || "") === "about:blank" || (frame.url || "") === ""
+    readonly property bool wantStream: visible && running && !blank && Qt.application.state === Qt.ApplicationActive
+    // Each panel holds the live picture while it shows a page; moving between docks makes a new panel.
+    property bool streamHeld: false
+    function holdStream(on) {
+        if (on === streamHeld) return
+        streamHeld = on
+        ipc.browserStream(on)
+    }
+    onWantStreamChanged: holdStream(wantStream)
+    Component.onCompleted: { holdStream(wantStream); syncTabs() }
+    Component.onDestruction: holdStream(false)
+
+    // Tabs live in a model that is updated in place, so polls never rebuild (and flicker) the strip.
+    ListModel { id: tabModel }
+    onFrameChanged: syncTabs()
+    function syncTabs() {
+        // From ipc directly: the panel's own bindings may not have caught up inside this handler.
+        const f = ipc.browser
+        const live = f.running === true && (f.tabs || []).length > 0
+        const list = live ? f.tabs : [{ id: "", title: "", url: "", favicon: "", active: true }]
+        for (let i = 0; i < list.length; i++) {
+            const t = list[i]
+            const row = { tabId: t.id || "", title: t.title || "", url: t.url || "", favicon: t.favicon || "", active: t.active === true }
+            if (i < tabModel.count && tabModel.get(i).tabId !== row.tabId) {
+                let found = -1
+                for (let j = i + 1; j < tabModel.count; j++)
+                    if (tabModel.get(j).tabId === row.tabId) { found = j; break }
+                if (found >= 0) tabModel.move(found, i, 1)
+                else tabModel.insert(i, row)
+            }
+            if (i < tabModel.count) {
+                const old = tabModel.get(i)
+                if (old.title !== row.title || old.url !== row.url || old.favicon !== row.favicon || old.active !== row.active)
+                    tabModel.set(i, row)
+            } else {
+                tabModel.append(row)
+            }
+        }
+        while (tabModel.count > list.length) tabModel.remove(tabModel.count - 1)
+    }
     readonly property bool loading: ipc.browserBusy || frame.loading === true
     readonly property bool enabledInSettings: ipc.settings.browserEnabled !== false
     readonly property bool detected: (ipc.settings.browserDetected || "").length > 0
@@ -34,6 +75,13 @@ Item {
         const m = (url || "").match(/^[a-z]+:\/\/([^\/?#]+)/i)
         return m ? m[1].replace(/^www\./, "") : (url || "")
     }
+    function closeTab(id) {
+        ipc.browserCloseTab(id)
+    }
+    function newTab() {
+        if (panel.running) ipc.browserNewTab("")
+        Qt.callLater(function () { startSearch.forceActiveFocus() })
+    }
     function tabTitle(tab) {
         if (!tab.url || tab.url === "about:blank") return panel.tr("NewTab", "New tab")
         return tab.title || panel.host(tab.url)
@@ -47,16 +95,16 @@ Item {
     Timer { id: idle; interval: 4000; onTriggered: panel.agentActive = false }
     Timer {
         id: wheelFlush
-        interval: 90
+        interval: 33
         onTriggered: {
             if (panel.wheelAccumulated !== 0)
                 ipc.browserWheel(panel.wheelX, panel.wheelY, panel.wheelAccumulated)
             panel.wheelAccumulated = 0
         }
     }
-    // Keep the picture live (animations, pages that finish loading, the agent's clicks).
+    // Keep tabs and the address current; while streaming the picture arrives on its own.
     Timer {
-        interval: panel.loading ? 450 : 1000
+        interval: panel.wantStream ? 1200 : (panel.loading ? 450 : 1000)
         repeat: true
         running: panel.visible && panel.running && Qt.application.state === Qt.ApplicationActive
         onTriggered: ipc.browserPoll()
@@ -90,11 +138,19 @@ Item {
                 anchors.topMargin: 6
                 spacing: 2
                 Repeater {
-                    model: panel.running ? panel.tabs : [{ id: "", title: "", url: "", active: true }]
+                    model: tabModel
                     delegate: Rectangle {
                         id: tabItem
-                        required property var modelData
-                        readonly property bool current: modelData.active === true
+                        required property string tabId
+                        required property string title
+                        required property string url
+                        required property string favicon
+                        required property bool active
+                        readonly property var modelData: ({ id: tabId, title: title, url: url, favicon: favicon, active: active })
+                        readonly property bool current: active
+                        opacity: 0
+                        Component.onCompleted: opacity = 1
+                        Behavior on opacity { NumberAnimation { duration: Theme.motionFast } }
                         Layout.fillWidth: true
                         Layout.maximumWidth: 210
                         Layout.minimumWidth: 70
@@ -119,9 +175,18 @@ Item {
                                     color: Theme.accentSecondary
                                     RotationAnimator on rotation { running: tabSpinner.visible; from: 0; to: 360; duration: 900; loops: Animation.Infinite }
                                 }
+                                Image {
+                                    id: faviconImage
+                                    anchors.fill: parent
+                                    visible: !tabSpinner.visible && status === Image.Ready
+                                    source: (tabItem.modelData.favicon || "").indexOf("http") === 0 || (tabItem.modelData.favicon || "").indexOf("data:") === 0 ? tabItem.modelData.favicon : ""
+                                    sourceSize: Qt.size(28, 28)
+                                    smooth: true
+                                    asynchronous: true
+                                }
                                 Icon {
                                     anchors.fill: parent
-                                    visible: !tabSpinner.visible
+                                    visible: !tabSpinner.visible && !faviconImage.visible
                                     name: (tabItem.modelData.url || "").indexOf("localhost") >= 0 || (tabItem.modelData.url || "").indexOf("127.0.0.1") >= 0 ? "terminal" : "globe"
                                     size: 14
                                     color: tabItem.current ? Theme.textSecondary : Theme.textDim
@@ -147,7 +212,7 @@ Item {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: ipc.browserCloseTab(tabItem.modelData.id)
+                                    onClicked: panel.closeTab(tabItem.modelData.id)
                                 }
                             }
                         }
@@ -160,7 +225,7 @@ Item {
                             cursorShape: Qt.PointingHandCursor
                             onClicked: (mouse) => {
                                 if (!panel.running) return
-                                if (mouse.button === Qt.MiddleButton) ipc.browserCloseTab(tabItem.modelData.id)
+                                if (mouse.button === Qt.MiddleButton) panel.closeTab(tabItem.modelData.id)
                                 else if (!tabItem.current) ipc.browserSwitchTab(tabItem.modelData.id)
                             }
                         }
@@ -176,7 +241,7 @@ Item {
                     icon: "plus"
                     iconSize: 15
                     tip: panel.tr("NewTab", "New tab") + "  (Ctrl T)"
-                    onClicked: panel.running ? ipc.browserNewTab("") : address.forceActiveFocus()
+                    onClicked: panel.newTab()
                 }
                 Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }
             }
@@ -246,13 +311,18 @@ Item {
                         font.family: Theme.sans
                         font.pixelSize: 13
                         verticalAlignment: TextInput.AlignVCenter
-                        text: panel.blank ? "" : (panel.frame.url || "")
+                        text: (panel.frame.url || "") === "about:blank" ? "" : (panel.frame.url || "")
                         onAccepted: { panel.go(text); viewport.forceActiveFocus() }
                         onActiveFocusChanged: if (activeFocus) selectAll()
                         Keys.onEscapePressed: { text = panel.blank ? "" : (panel.frame.url || ""); viewport.forceActiveFocus() }
                         Connections {
                             target: panel
-                            function onFrameChanged() { if (!address.activeFocus) address.text = panel.blank ? "" : (panel.frame.url || "") }
+                            // Read the frame itself: panel.blank may not have caught up with it yet.
+                        function onFrameChanged() {
+                            if (address.activeFocus) return
+                            const url = panel.frame.url || ""
+                            address.text = url === "about:blank" ? "" : url
+                        }
                         }
                     }
                     // Zoom, shown when it is not 100 %
@@ -386,7 +456,7 @@ Item {
                 id: shot
                 visible: panel.running && !panel.blank
                 anchors.fill: parent
-                source: panel.frame.imageUrl || ""
+                source: ipc.browserImage
                 fillMode: Image.PreserveAspectFit
                 horizontalAlignment: Image.AlignLeft
                 verticalAlignment: Image.AlignTop
@@ -394,34 +464,77 @@ Item {
                 smooth: true
                 mipmap: panel.zoom < 1
             }
+            // The page gets real mouse events: hover menus, drag to select, double-click a word.
             MouseArea {
+                id: pageMouse
                 anchors.fill: parent
                 enabled: shot.visible
-                cursorShape: Qt.PointingHandCursor
+                hoverEnabled: true
+                acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+                cursorShape: Qt.ArrowCursor
+                property real lastMoveX: -1
+                property real lastMoveY: -1
+                property real pendingX: 0
+                property real pendingY: 0
                 function pageX(x) { return x * (panel.frame.width || 1280) / Math.max(1, shot.paintedWidth) }
                 function pageY(y) { return y * (panel.frame.height || 800) / Math.max(1, shot.paintedHeight) }
-                onClicked: (mouse) => {
+                function buttonName(b) { return b === Qt.RightButton ? "right" : (b === Qt.MiddleButton ? "middle" : "left") }
+                function heldMask() {
+                    let mask = 0
+                    if (pressedButtons & Qt.LeftButton) mask |= 1
+                    if (pressedButtons & Qt.RightButton) mask |= 2
+                    if (pressedButtons & Qt.MiddleButton) mask |= 4
+                    return mask
+                }
+                onPressed: (mouse) => {
                     viewport.forceActiveFocus()
-                    if (mouse.x <= shot.paintedWidth && mouse.y <= shot.paintedHeight)
-                        ipc.browserClick(pageX(mouse.x), pageY(mouse.y))
+                    ipc.browserMouse("down", pageX(mouse.x), pageY(mouse.y), buttonName(mouse.button), heldMask(), 1)
+                }
+                onReleased: (mouse) => ipc.browserMouse("up", pageX(mouse.x), pageY(mouse.y), buttonName(mouse.button), heldMask(), 1)
+                onDoubleClicked: (mouse) => {
+                    ipc.browserMouse("down", pageX(mouse.x), pageY(mouse.y), "left", 1, 2)
+                    ipc.browserMouse("up", pageX(mouse.x), pageY(mouse.y), "left", 0, 2)
+                }
+                onPositionChanged: (mouse) => {
+                    pendingX = mouse.x
+                    pendingY = mouse.y
+                    if (!moveThrottle.running) moveThrottle.start()
+                }
+                Timer {
+                    id: moveThrottle
+                    interval: 33
+                    onTriggered: {
+                        if (Math.abs(pageMouse.pendingX - pageMouse.lastMoveX) < 1 && Math.abs(pageMouse.pendingY - pageMouse.lastMoveY) < 1) return
+                        pageMouse.lastMoveX = pageMouse.pendingX
+                        pageMouse.lastMoveY = pageMouse.pendingY
+                        const held = pageMouse.heldMask()
+                        ipc.browserMouse("move", pageMouse.pageX(pageMouse.pendingX), pageMouse.pageY(pageMouse.pendingY),
+                                         held & 1 ? "left" : "none", held, 0)
+                    }
                 }
                 onWheel: (wheel) => {
                     if (wheel.modifiers & Qt.ControlModifier) {
                         panel.setZoom(panel.zoom + (wheel.angleDelta.y > 0 ? 0.1 : -0.1))
                     } else {
-                        panel.wheelAccumulated += -wheel.angleDelta.y
+                        // Throttle, not debounce: keep sending while the wheel keeps turning.
+                        panel.wheelAccumulated += wheel.pixelDelta.y !== 0 ? -wheel.pixelDelta.y : -wheel.angleDelta.y
                         panel.wheelX = pageX(wheel.x)
                         panel.wheelY = pageY(wheel.y)
-                        wheelFlush.restart()
+                        if (!wheelFlush.running) wheelFlush.start()
                     }
                     wheel.accepted = true
                 }
             }
             Keys.onPressed: (event) => {
-                if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_L) {
-                    address.forceActiveFocus()
-                    event.accepted = true
-                    return
+                if (event.modifiers & Qt.ControlModifier) {
+                    let handled = true
+                    if (event.key === Qt.Key_L) address.forceActiveFocus()
+                    else if (event.key === Qt.Key_C) ipc.browserCopy()
+                    else if (event.key === Qt.Key_V) ipc.browserPaste()
+                    else if (event.key === Qt.Key_A) ipc.browserSelectAll()
+                    else if (event.key === Qt.Key_R) ipc.browserReload()
+                    else handled = false
+                    if (handled) { event.accepted = true; return }
                 }
                 const names = {}
                 names[Qt.Key_Return] = "enter"; names[Qt.Key_Enter] = "enter"
@@ -443,6 +556,7 @@ Item {
             // New tab page, also shown before the browser has started
             Flickable {
                 id: start
+                SmoothWheel { flickable: start }
                 visible: panel.blank && !ipc.browserBusy
                 anchors.fill: parent
                 contentHeight: startColumn.implicitHeight + 80
@@ -676,6 +790,14 @@ Item {
     Shortcut {
         enabled: panel.visible
         sequence: "Ctrl+T"
-        onActivated: panel.running ? ipc.browserNewTab("") : address.forceActiveFocus()
+        onActivated: panel.newTab()
+    }
+    Shortcut {
+        enabled: panel.visible && panel.running && (viewport.activeFocus || address.activeFocus)
+        sequence: "Ctrl+W"
+        onActivated: {
+            const active = panel.tabs.filter(function (t) { return t.active === true })[0]
+            if (active) panel.closeTab(active.id)
+        }
     }
 }

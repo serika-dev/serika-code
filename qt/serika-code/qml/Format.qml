@@ -208,7 +208,7 @@ QtObject {
             if (q && h.chats.length === 0) return
             var path = h.p.path
             var isCollapsed = !q && collapsed && collapsed[path] === true
-            rows.push({ kind: "project", path: path, name: h.p.name, exists: h.p.exists !== false, current: h.p.current === true,
+            rows.push({ kind: "project", path: path, name: h.p.name, exists: h.p.exists !== false, current: h.p.current === true, scratch: h.p.scratch === true,
                         count: h.chats.length, collapsed: isCollapsed })
             if (isCollapsed) return
             var showAll = q.length > 0 || (expanded && expanded[path] === true)

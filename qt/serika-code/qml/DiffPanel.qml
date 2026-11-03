@@ -127,6 +127,7 @@ Item {
 
     Flickable {
         id: flick
+        SmoothWheel { flickable: flick }
         visible: ipc.diffs.length > 0
         anchors.top: summary.bottom
         anchors.left: parent.left

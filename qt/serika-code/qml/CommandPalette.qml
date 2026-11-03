@@ -15,6 +15,9 @@ Popup {
         { id: "changes", label: Format.tr(dict, "ShowChanges", "Show changes"), icon: "git-branch", keys: "Ctrl B" },
         { id: "browser", label: Format.tr(dict, "ShowBrowser", "Show browser"), icon: "globe", keys: "Ctrl Shift B" },
         { id: "agents", label: Format.tr(dict, "ShowSubagents", "Show sub-agents"), icon: "users", keys: "Ctrl Shift A" },
+        { id: "terminal", label: Format.tr(dict, "ShowTerminal", "Show terminal"), icon: "terminal", keys: "Ctrl `" },
+        { id: "mcp", label: Format.tr(dict, "ManageMcp", "MCP servers"), icon: "server", keys: "" },
+        { id: "skills", label: Format.tr(dict, "ManageSkills", "Skills"), icon: "package", keys: "" },
         { id: "sidebar", label: Format.tr(dict, "ToggleSidebar", "Toggle sidebar"), icon: "sidebar", keys: "Ctrl Shift S" },
         { id: "project", label: Format.tr(dict, "AddProject", "Add project folder"), icon: "folder-plus", keys: "" },
         { id: "export", label: Format.tr(dict, "ExportMarkdown", "Export chat as Markdown"), icon: "download", keys: "" },
@@ -120,6 +123,7 @@ Popup {
         Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: Theme.borderSubtle }
         ListView {
             id: list
+            SmoothWheel { flickable: list }
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.margins: 6

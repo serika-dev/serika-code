@@ -26,6 +26,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tokio-util = "0.7"
 zeroize = { version = "1", features = ["derive"] }
+toml = "0.8"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

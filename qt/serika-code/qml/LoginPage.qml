@@ -36,6 +36,7 @@ Item {
 
         Flickable {
             id: scroller
+            SmoothWheel { flickable: scroller }
             anchors.fill: parent
             anchors.topMargin: 36
             contentWidth: width

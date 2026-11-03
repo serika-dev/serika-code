@@ -23,6 +23,7 @@ struct Host {
     stdout: Mutex<std::io::Stdout>,
     cancel: Mutex<Option<CancellationToken>>,
     providers: Mutex<Option<Vec<ProviderStatus>>>,
+    terminals: serika_runtime::terminal::TerminalHost,
 }
 
 /// The project to open first: the folder the app was started in when it is a git checkout,
@@ -60,7 +61,22 @@ pub async fn serve(runtime: Runtime) -> serika_runtime::Result<i32> {
         stdout: Mutex::new(std::io::stdout()),
         cancel: Mutex::new(None),
         providers: Mutex::new(None),
+        terminals: Default::default(),
     });
+    // Serika's browser as an MCP server, so Claude Code and Codex can drive it too.
+    {
+        let sink_host = host.clone();
+        let on_frame: serika_runtime::mcp_server::FrameSink = Arc::new(move |frame: Frame| {
+            let mut value = frame_value(&frame);
+            value["event"] = json!("browser");
+            value["agent"] = json!(true);
+            sink_host.emit(&value);
+        });
+        match serika_runtime::mcp_server::start(host.runtime.clone(), on_frame).await {
+            Ok(endpoint) => *host.runtime.own_mcp.lock().unwrap_or_else(|e| e.into_inner()) = Some(endpoint),
+            Err(err) => eprintln!("serika: Serika's MCP server did not start: {err}"),
+        }
+    }
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines
         .next_line()
@@ -100,6 +116,8 @@ pub async fn serve(runtime: Runtime) -> serika_runtime::Result<i32> {
     }
     host.runtime.approvals.deny_all();
     host.runtime.browser.shutdown().await;
+    host.runtime.mcp.shutdown().await;
+    host.terminals.close_all().await;
     Ok(0)
 }
 
@@ -198,19 +216,50 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
             Ok(serde_json::to_value(usage).unwrap_or(Value::Null))
         }
         "projects.list" => Ok(projects(&host)),
-        "projects.remove" => {
+        "projects.remove" | "projects.delete" => {
             let wanted = text(&params, "path");
+            let delete_chats = method == "projects.delete";
             // The list may hold the same folder under more than one spelling.
             let wanted_key = canon_key(&wanted);
-            for (known, _) in runtime.sessions.projects().unwrap_or_default() {
-                if canon_key(&known) == wanted_key {
-                    runtime
-                        .sessions
-                        .forget_project(&PathBuf::from(known))
-                        .map_err(|err| err.to_string())?;
+            let mut spellings: Vec<String> = runtime
+                .sessions
+                .projects()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(p, _)| p)
+                .chain(runtime.sessions.list(None).unwrap_or_default().into_iter().map(|s| s.project_path))
+                .filter(|p| canon_key(p) == wanted_key)
+                .collect();
+            spellings.push(wanted.clone());
+            spellings.sort();
+            spellings.dedup();
+            for known in &spellings {
+                let path = PathBuf::from(known);
+                if delete_chats {
+                    runtime.sessions.delete_project_chats(&path).map_err(|err| err.to_string())?;
                 }
+                runtime.sessions.forget_project(&path).map_err(|err| err.to_string())?;
             }
-            Ok(projects(&host))
+            // Removing the folder you are in moves you to the next one (or the scratch folder).
+            let current = host.project();
+            if canon_key(&current.display().to_string()) == wanted_key {
+                let next = runtime
+                    .sessions
+                    .projects()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(p, _)| PathBuf::from(p))
+                    .find(|p| canon_key(&p.display().to_string()) != wanted_key && p.is_dir())
+                    .unwrap_or_else(|| {
+                        let scratch = runtime.paths.scratch_dir();
+                        let _ = std::fs::create_dir_all(&scratch);
+                        scratch
+                    });
+                *host.project.lock().unwrap_or_else(|e| e.into_inner()) = next;
+            }
+            let mut out = projects(&host);
+            out["settings"] = settings(&host);
+            Ok(out)
         }
         "project.set" => {
             let path = PathBuf::from(text(&params, "path"));
@@ -324,6 +373,13 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
         "browser.back" => frame_json(runtime.browser.back().await.map(|(_, f)| f)),
         "browser.forward" => frame_json(runtime.browser.forward().await.map(|(_, f)| f)),
         "browser.reload" => frame_json(runtime.browser.reload().await.map(|(_, f)| f)),
+        "browser.frame" if params.get("meta").and_then(Value::as_bool) == Some(true) => {
+            match runtime.browser.frame_meta().await {
+                Ok(Some(frame)) => Ok(frame_value(&frame)),
+                Ok(None) => Ok(json!({"running": false})),
+                Err(err) => Err(err.to_string()),
+            }
+        }
         "browser.frame" => match runtime.browser.frame_if_running().await {
             Ok(Some(frame)) => Ok(frame_value(&frame)),
             Ok(None) => Ok(json!({"running": false})),
@@ -339,7 +395,43 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
         "browser.switchTab" => frame_json(
             runtime.browser.switch_tab(&text(&params, "id")).await.map(|(_, f)| f),
         ),
-        "browser.closeTab" => frame_json(runtime.browser.close_tab(&text(&params, "id")).await),
+        "browser.closeTab" => match runtime.browser.close_tab(&text(&params, "id")).await {
+            Ok(Some(frame)) => Ok(frame_value(&frame)),
+            Ok(None) => Ok(json!({"running": false})),
+            Err(err) => Err(err.to_string()),
+        },
+        "browser.stream" => {
+            let on = params.get("on").and_then(Value::as_bool).unwrap_or(false);
+            let sink = on.then(|| {
+                let h = host.clone();
+                let sink: serika_runtime::browser::ScreenSink = Arc::new(move |image: String, width: u32, height: u32| {
+                    h.emit(&json!({"event": "browserImage", "image": image, "width": width, "height": height}));
+                });
+                sink
+            });
+            runtime.browser.set_stream(sink).await;
+            Ok(json!({"streaming": on}))
+        }
+        "browser.mouse" => {
+            runtime
+                .browser
+                .mouse(
+                    &text(&params, "type"),
+                    number(&params, "x"),
+                    number(&params, "y"),
+                    &text(&params, "button"),
+                    number(&params, "buttons").max(0.0) as u32,
+                    number(&params, "clicks").max(0.0) as u32,
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+            Ok(json!({"ok": true}))
+        }
+        "browser.copy" => Ok(json!({"text": runtime.browser.selection().await.map_err(|err| err.to_string())?})),
+        "browser.selectAll" => {
+            runtime.browser.select_all().await.map_err(|err| err.to_string())?;
+            Ok(json!({"ok": true}))
+        }
         "browser.resize" => {
             let width = number(&params, "width").round().max(0.0) as u32;
             let height = number(&params, "height").round().max(0.0) as u32;
@@ -355,6 +447,14 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
                 .click_at(number(&params, "x"), number(&params, "y"))
                 .await,
         ),
+        "browser.scroll" => {
+            runtime
+                .browser
+                .scroll_by(number(&params, "x"), number(&params, "y"), number(&params, "dy"))
+                .await
+                .map_err(|err| err.to_string())?;
+            Ok(json!({"ok": true}))
+        }
         "browser.wheel" => frame_json(
             runtime
                 .browser
@@ -373,6 +473,59 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
         "browser.close" => {
             runtime.browser.shutdown().await;
             Ok(json!({"closed": true}))
+        }
+        "terminal.open" => {
+            let cwd = optional_text(&params, "cwd").map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| host.project());
+            let (id, shell) = host
+                .terminals
+                .open(&cwd, terminal_sink(&host))
+                .await
+                .map_err(|err| err.to_string())?;
+            Ok(json!({"id": id, "shell": shell, "cwd": plain(&cwd.display().to_string())}))
+        }
+        "terminal.run" => {
+            host.terminals.run(&text(&params, "id"), &raw(&params, "command")).await.map_err(|err| err.to_string())?;
+            Ok(json!({"ok": true}))
+        }
+        "terminal.interrupt" => {
+            host.terminals.interrupt(&text(&params, "id"), terminal_sink(&host)).await.map_err(|err| err.to_string())?;
+            Ok(json!({"ok": true}))
+        }
+        "terminal.close" => {
+            host.terminals.close(&text(&params, "id")).await;
+            Ok(json!({"ok": true}))
+        }
+        "mcp.list" => Ok(mcp_list(&host)),
+        "mcp.connect" => {
+            let name = text(&params, "name");
+            let project = host.project();
+            let entries = serika_runtime::mcp_hub::load_servers(&runtime.paths.data_dir, &project);
+            runtime.mcp.restart(&entries, &name, &project).await;
+            Ok(mcp_list(&host))
+        }
+        "mcp.toggle" => {
+            let enabled = params.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+            serika_runtime::mcp_hub::set_enabled(&runtime.paths.data_dir, &text(&params, "name"), enabled).map_err(|err| err.to_string())?;
+            Ok(mcp_list(&host))
+        }
+        "mcp.save" => {
+            let definition = params.get("definition").cloned().unwrap_or(Value::Null);
+            let definition = match definition {
+                Value::String(text) => serde_json::from_str(&text).map_err(|err| format!("not valid JSON: {err}"))?,
+                other => other,
+            };
+            serika_runtime::mcp_hub::save_server(&runtime.paths.data_dir, &text(&params, "name"), &definition).map_err(|err| err.to_string())?;
+            Ok(mcp_list(&host))
+        }
+        "mcp.remove" => {
+            serika_runtime::mcp_hub::remove_server(&runtime.paths.data_dir, &text(&params, "name")).map_err(|err| err.to_string())?;
+            Ok(mcp_list(&host))
+        }
+        "skills.list" => Ok(skills_list(&host)),
+        "skills.toggle" => {
+            let enabled = params.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+            serika_runtime::skills::set_enabled(&runtime.paths.data_dir, &text(&params, "name"), enabled).map_err(|err| err.to_string())?;
+            Ok(skills_list(&host))
         }
         "attachments.add" => {
             let sources: Vec<PathBuf> = params
@@ -401,6 +554,115 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
         }
         other => Err(format!("unknown method {other}")),
     }
+}
+
+fn terminal_sink(host: &Arc<Host>) -> serika_runtime::terminal::Sink {
+    use serika_runtime::terminal::TerminalEvent;
+    let h = host.clone();
+    Arc::new(move |event: TerminalEvent| {
+        let value = match event {
+            TerminalEvent::Output { id, text, error } => json!({"event": "terminal", "kind": "output", "id": id, "text": text, "error": error}),
+            TerminalEvent::Done { id, code, cwd } => json!({"event": "terminal", "kind": "done", "id": id, "code": code, "cwd": plain(&cwd)}),
+            TerminalEvent::Exited { id } => json!({"event": "terminal", "kind": "exit", "id": id}),
+        };
+        h.emit(&value);
+    })
+}
+
+/// Every MCP server with where it is defined and how its connection is doing.
+fn mcp_list(host: &Host) -> Value {
+    let runtime = &host.runtime;
+    let entries = serika_runtime::mcp_hub::load_servers(&runtime.paths.data_dir, &host.project());
+    let statuses = runtime.mcp.statuses();
+    let servers: Vec<Value> = entries
+        .iter()
+        .map(|entry| {
+            let status = statuses.get(&entry.name).cloned().unwrap_or_default();
+            // Imported servers cannot be edited here, so their keys and tokens never need to reach the UI.
+            let mut definition = serika_runtime::mcp_hub::claude_json(&entry.transport);
+            if !entry.editable {
+                mask_secrets(&mut definition);
+            }
+            let (kind, target) = match &entry.transport {
+                serika_runtime::mcp::Transport::Stdio { command, .. } => {
+                    let args: Vec<String> = definition
+                        .get("args")
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                        .unwrap_or_default();
+                    ("stdio", format!("{command} {}", args.join(" ")).trim().to_string())
+                }
+                serika_runtime::mcp::Transport::Http { .. } => ("http", definition.get("url").and_then(Value::as_str).unwrap_or("").to_string()),
+                serika_runtime::mcp::Transport::Sse { .. } => ("sse", definition.get("url").and_then(Value::as_str).unwrap_or("").to_string()),
+            };
+            json!({
+                "name": entry.name, "source": entry.source, "enabled": entry.enabled, "editable": entry.editable,
+                "transport": kind, "target": target,
+                "definition": definition,
+                "state": if status.state.is_empty() { "idle".to_string() } else { status.state },
+                "error": status.error, "protocol": status.protocol, "era": status.era,
+                "serverName": status.server_name, "tools": status.tools,
+            })
+        })
+        .collect();
+    let own = runtime.own_mcp.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|e| e.url.clone());
+    json!({"servers": servers, "ownEndpoint": own, "latestVersion": serika_runtime::mcp::MODERN_VERSION})
+}
+
+/// Hide env values, headers, header-like arguments and secret-looking query parameters.
+fn mask_secrets(definition: &mut Value) {
+    const HIDDEN: &str = "••••••";
+    let secretish = |name: &str| {
+        let name = name.to_ascii_lowercase();
+        ["key", "token", "secret", "password", "authorization", "auth", "bearer", "cookie"].iter().any(|w| name.contains(w))
+    };
+    for field in ["env", "headers"] {
+        if let Some(map) = definition.get_mut(field).and_then(Value::as_object_mut) {
+            for value in map.values_mut() {
+                *value = json!(HIDDEN);
+            }
+        }
+    }
+    if let Some(args) = definition.get_mut("args").and_then(Value::as_array_mut) {
+        let mut after_header = false;
+        for arg in args.iter_mut() {
+            let Some(text) = arg.as_str().map(str::to_string) else { continue };
+            let masked = if after_header {
+                Some(match text.split_once(':') {
+                    Some((name, _)) => format!("{name}: {HIDDEN}"),
+                    None => HIDDEN.to_string(),
+                })
+            } else if let Some((name, _)) = text.split_once(['=', ':']).filter(|(name, _)| secretish(name) && !name.contains('/')) {
+                Some(format!("{name}={HIDDEN}"))
+            } else {
+                None
+            };
+            after_header = matches!(text.as_str(), "--header" | "-H" | "--headers");
+            if let Some(masked) = masked {
+                *arg = json!(masked);
+            }
+        }
+    }
+    if let Some(url) = definition.get("url").and_then(Value::as_str).map(str::to_string) {
+        if let Some((base, query)) = url.split_once('?') {
+            let query: Vec<String> = query
+                .split('&')
+                .map(|pair| match pair.split_once('=') {
+                    Some((name, _)) if secretish(name) => format!("{name}={HIDDEN}"),
+                    _ => pair.to_string(),
+                })
+                .collect();
+            definition["url"] = json!(format!("{base}?{}", query.join("&")));
+        }
+    }
+}
+
+fn skills_list(host: &Host) -> Value {
+    let skills = serika_runtime::skills::discover(&host.project(), &host.runtime.paths.data_dir);
+    json!({"skills": skills.iter().map(|s| json!({
+        "name": s.name, "description": s.description, "source": s.source,
+        "path": plain(&s.dir.display().to_string()), "enabled": s.enabled,
+    })).collect::<Vec<_>>()})
 }
 
 fn attachments_dir(runtime: &Runtime) -> PathBuf {
@@ -456,6 +718,7 @@ fn frame_value(frame: &Frame) -> Value {
             "title": tab.title,
             "url": tab.url,
             "active": tab.active,
+            "favicon": tab.favicon,
         })).collect::<Vec<_>>(),
     })
 }
@@ -569,6 +832,9 @@ fn set_ui_pref(data_dir: &Path, key: &str, value: Option<&Value>) -> Result<(), 
     if key.is_empty() || key.len() > 48 {
         return Err("invalid preference name".into());
     }
+    // Requests run concurrently; without this two quick writes read the same file and one is lost.
+    static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let mut prefs = ui_prefs(data_dir);
     let map = prefs.as_object_mut().ok_or("preferences are corrupt")?;
     match value {
@@ -863,6 +1129,7 @@ fn projects(host: &Host) -> Value {
     let runtime = &host.runtime;
     let current = host.project();
     let current_key = canon_key(&current.display().to_string());
+    let scratch_key = canon_key(&runtime.paths.scratch_dir().display().to_string());
     let all = runtime.sessions.list(None).unwrap_or_default();
 
     // Merge every spelling of the same folder into one row.
@@ -906,6 +1173,8 @@ fn projects(host: &Host) -> Value {
                 "lastUsed": row.last,
                 "sessionCount": row.count,
                 "current": *key == current_key,
+                // The scratch folder is where chats without a project go; it cannot leave the list.
+                "scratch": *key == scratch_key,
             })
         })
         .collect();
@@ -987,14 +1256,12 @@ fn open_session(host: &Host, id: &str) -> Result<Value, String> {
         .get(id)
         .map_err(|err| err.to_string())?
         .ok_or_else(|| "that chat no longer exists".to_string())?;
+    // A chat whose folder is gone still opens so it can be read; new messages need the folder.
     let folder = PathBuf::from(&summary.project_path);
-    if !folder.is_dir() {
-        return Err(format!(
-            "the folder for this chat is missing: {}",
-            summary.project_path
-        ));
+    let folder_missing = !folder.is_dir();
+    if !folder_missing {
+        host.set_project(folder);
     }
-    host.set_project(folder);
     let messages = runtime.sessions.messages(id).map_err(|err| err.to_string())?;
     let tools = runtime.sessions.tool_runs(id).unwrap_or_default();
     let diffs = runtime.sessions.changes(id).unwrap_or_default();
@@ -1002,6 +1269,7 @@ fn open_session(host: &Host, id: &str) -> Result<Value, String> {
         "id": id,
         "model": summary.model_id,
         "project": summary.project_path,
+        "folderMissing": folder_missing,
         "settings": settings(host),
         "turns": build_turns(&messages, &tools),
         "diffs": diffs

@@ -3,27 +3,54 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
 
-// The workspace: sidebar, chat, and the optional diff inspector.
+// The workspace: sidebar, chat, and two docks (right and bottom) for changes, browser, sub-agents and terminal.
 Item {
     id: shell
     property bool sidebarOpen: true
-    property bool inspectorOpen: false
-    property string inspectorTab: "changes"
     property bool settingsOpen: false
-    // Dock layout, kept in ui.json: tabs or split, right or bottom, and its size.
-    readonly property string dockMode: ipc.ui.dockMode === "split" ? "split" : "tabs"
-    readonly property string dockSide: ipc.ui.dockSide === "bottom" ? "bottom" : "right"
-    // Panes open as tabs in the panel, remembered between runs.
-    property var openTabs: {
-        const saved = (ipc.ui.dockTabs || "").split(",").filter(function (t) { return ["changes", "browser", "agents"].indexOf(t) >= 0 })
-        return saved.length > 0 ? saved : ["changes", "browser"]
+    // Two docks like VS Code: one on the right, one at the bottom. Each holds panes as tabs; any
+    // pane can sit in either, and the layout (tabs, sizes, which is open) is kept in ui.json.
+    readonly property var paneIds: ["changes", "browser", "agents", "terminal"]
+    function tabList(text) {
+        return text.split(",").filter(function (t) { return paneIds.indexOf(t) >= 0 })
     }
-    property bool dockMaximized: false
-    property real dockSizeLive: -1
-    readonly property real dockSize: {
-        if (dockSizeLive > 0) return dockSizeLive
-        const saved = Number(dockSide === "bottom" ? ipc.ui.dockHeight : ipc.ui.dockWidth)
-        return saved > 0 ? saved : (dockSide === "bottom" ? 340 : 480)
+    // Settings can rearrange these too, so they always come from ui.json. The lists hang off plain
+    // strings, which only notify when they really change, so tab rows aren't rebuilt by unrelated settings.
+    readonly property string rightKey: ipc.ui.rightTabs !== undefined ? String(ipc.ui.rightTabs)
+                                     : (ipc.ui.dockTabs !== undefined ? String(ipc.ui.dockTabs) : "changes,browser")
+    readonly property string bottomKey: ipc.ui.bottomTabs !== undefined ? String(ipc.ui.bottomTabs) : "terminal"
+    readonly property var rightTabs: tabList(rightKey)
+    readonly property var bottomTabs: tabList(bottomKey).filter(function (t) { return rightTabs.indexOf(t) < 0 })
+    property string rightPick: ""
+    property string bottomPick: ""
+    readonly property string rightTab: rightTabs.indexOf(rightPick) >= 0 ? rightPick : (rightTabs.length > 0 ? rightTabs[0] : "")
+    readonly property string bottomTab: bottomTabs.indexOf(bottomPick) >= 0 ? bottomPick : (bottomTabs.length > 0 ? bottomTabs[0] : "")
+    property bool rightOpen: false
+    property bool bottomOpen: ipc.ui.bottomOpen === true
+    property string maximizedDock: ""            // "", "right" or "bottom"
+    property real rightWidthLive: -1
+    property real bottomHeightLive: -1
+    readonly property real rightWidth: {
+        if (rightWidthLive > 0) return rightWidthLive
+        const saved = Number(ipc.ui.rightWidth || ipc.ui.dockWidth)
+        return saved > 0 ? saved : 480
+    }
+    readonly property real bottomHeight: {
+        if (bottomHeightLive > 0) return bottomHeightLive
+        const saved = Number(ipc.ui.bottomHeight)
+        return saved > 0 ? saved : 280
+    }
+    // Pane drag between docks
+    property string dragPane: ""
+    property point dragPos: Qt.point(0, 0)
+    readonly property string dropDock: {
+        if (dragPane.length === 0) return ""
+        const p = dragPos
+        if (rightDock.open && p.x >= rightDock.x) return "right"
+        if (bottomDock.open && p.y >= bottomDock.y && p.x >= bottomDock.x && p.x <= bottomDock.x + bottomDock.width) return "bottom"
+        if (p.x > shell.width - 240) return "right"
+        if (p.y > shell.height - 180 && p.x > sidebar.width) return "bottom"
+        return ""
     }
     readonly property bool hero: ipc.turns.count === 0 && !ipc.running
     readonly property var dict: ipc.strings
@@ -36,38 +63,87 @@ Item {
         settingsPage.tab = tab
         shell.settingsOpen = true
     }
-    function saveTabs(list) {
-        openTabs = list
-        ipc.setUi("dockTabs", list.join(","))
+    function dockOf(id) {
+        if (rightTabs.indexOf(id) >= 0) return "right"
+        if (bottomTabs.indexOf(id) >= 0) return "bottom"
+        return ""
     }
-    function showPanel(tab) {
-        if (openTabs.indexOf(tab) < 0) saveTabs(openTabs.concat([tab]))
-        inspectorTab = tab
-        inspectorOpen = true
+    function saveLayout(right, bottom) {
+        ipc.setUi("rightTabs", right.join(","))
+        ipc.setUi("bottomTabs", bottom.join(","))
     }
-    function togglePanel(tab) {
-        if (!inspectorOpen || openTabs.indexOf(tab) < 0) { showPanel(tab); return }
-        if (dockMode === "tabs" && inspectorTab !== tab) { inspectorTab = tab; return }
-        inspectorOpen = false
+    function front(where, id) {
+        if (where === "right") rightPick = id
+        else bottomPick = id
     }
-    function closeTab(tab) {
-        const rest = openTabs.filter(function (t) { return t !== tab })
-        if (rest.length === 0) {
-            inspectorOpen = false
-            dockMaximized = false
-            return
+    function setOpen(where, value) {
+        if (where === "right") rightOpen = value
+        else { bottomOpen = value; ipc.setUi("bottomOpen", value) }
+        if (!value && maximizedDock === where) maximizedDock = ""
+    }
+    function showPanel(id) {
+        let where = dockOf(id)
+        if (where === "") {
+            where = id === "terminal" ? "bottom" : "right"
+            if (where === "right") saveLayout(rightTabs.concat([id]), bottomTabs)
+            else saveLayout(rightTabs, bottomTabs.concat([id]))
         }
-        saveTabs(rest)
-        if (inspectorTab === tab) inspectorTab = rest[rest.length - 1]
+        front(where, id)
+        setOpen(where, true)
     }
-    function panelShown(tab) {
-        return inspectorOpen && openTabs.indexOf(tab) >= 0 && (dockMode === "split" || inspectorTab === tab)
+    function panelShown(id) {
+        const where = dockOf(id)
+        if (where === "right") return rightOpen && rightTab === id
+        if (where === "bottom") return bottomOpen && bottomTab === id
+        return false
     }
-    function clampDock(size) {
-        const limit = dockSide === "bottom" ? shell.height - 220 : shell.width - sidebar.width - 360
-        return Math.max(dockSide === "bottom" ? 180 : 320, Math.min(size, Math.max(320, limit)))
+    function togglePanel(id) {
+        if (panelShown(id)) setOpen(dockOf(id), false)
+        else showPanel(id)
     }
-
+    function closeTab(id) {
+        const where = dockOf(id)
+        if (where === "") return
+        const rest = (where === "right" ? rightTabs : bottomTabs).filter(function (t) { return t !== id })
+        const wasFront = (where === "right" ? rightTab : bottomTab) === id
+        if (where === "right") saveLayout(rest, bottomTabs)
+        else saveLayout(rightTabs, rest)
+        if (rest.length === 0) { setOpen(where, false); return }
+        if (wasFront) front(where, rest[rest.length - 1])
+    }
+    // Move a pane to a dock (and a spot in its tabs), opening that dock with the pane in front.
+    function movePane(id, target, index) {
+        const from = dockOf(id)
+        let right = rightTabs.filter(function (t) { return t !== id })
+        let bottom = bottomTabs.filter(function (t) { return t !== id })
+        const list = target === "right" ? right : bottom
+        const at = index === undefined || index < 0 ? list.length : Math.min(index, list.length)
+        list.splice(at, 0, id)
+        saveLayout(right, bottom)
+        if (from !== "" && from !== target && (from === "right" ? right : bottom).length === 0)
+            setOpen(from, false)
+        front(target, id)
+        setOpen(target, true)
+    }
+    function finishDrag() {
+        const target = dropDock
+        const id = dragPane
+        dragPane = ""
+        if (id.length === 0 || target.length === 0) return
+        const dock = target === "right" ? rightDock : bottomDock
+        let index = dock.open ? dock.indexAt(dragPos) : -1
+        // Dropping inside its own dock past itself shifts the target left by one.
+        const own = target === "right" ? rightTabs : bottomTabs
+        const was = own.indexOf(id)
+        if (was >= 0 && index > was) index -= 1
+        movePane(id, target, index)
+    }
+    function clampRight(size) {
+        return Math.max(300, Math.min(size, Math.max(300, shell.width - sidebar.width - 380)))
+    }
+    function clampBottom(size) {
+        return Math.max(140, Math.min(size, Math.max(140, shell.height - 260)))
+    }
     Rectangle { anchors.fill: parent; color: Theme.bg }
 
     Sidebar {
@@ -109,23 +185,25 @@ Item {
     Item {
         id: main
         anchors.left: sidebar.right
-        anchors.right: shell.inspectorOpen && shell.dockSide === "right" ? inspector.left : parent.right
-        anchors.rightMargin: shell.inspectorOpen && shell.dockSide === "right" ? 4 : 0
+        anchors.right: shell.rightOpen ? rightDock.left : parent.right
+        anchors.rightMargin: shell.rightOpen ? 4 : 0
         anchors.top: parent.top
-        anchors.bottom: shell.inspectorOpen && shell.dockSide === "bottom" ? inspector.top : parent.bottom
-        anchors.bottomMargin: shell.inspectorOpen && shell.dockSide === "bottom" ? 4 : 0
-        visible: !(shell.inspectorOpen && shell.dockMaximized)
+        anchors.bottom: shell.bottomOpen ? bottomDock.top : parent.bottom
+        anchors.bottomMargin: shell.bottomOpen ? 4 : 0
+        visible: shell.maximizedDock === ""
 
         ChatHeader {
             id: header
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.right: parent.right
-            rightInset: shell.inspectorOpen && shell.dockSide === "right" ? 12 : 146
+            rightInset: shell.rightOpen ? 12 : 146
             browserShown: shell.panelShown("browser")
             changesShown: shell.panelShown("changes")
             agentsShown: shell.panelShown("agents")
+            terminalShown: shell.panelShown("terminal")
             onAgentsRequested: shell.togglePanel("agents")
+            onTerminalRequested: shell.togglePanel("terminal")
             onInspectorRequested: shell.togglePanel("changes")
             onBrowserRequested: shell.togglePanel("browser")
             onProviderSetupRequested: shell.openSettings("providers")
@@ -274,66 +352,160 @@ Item {
         }
     }
 
+    // Right dock: full height under the title row, resized from its left edge.
     Inspector {
-        id: inspector
-        // A floating card: 8 px from the edges, under the title row so the window buttons stay clear.
-        readonly property bool full: shell.dockMaximized
+        id: rightDock
+        where: "right"
+        readonly property bool full: shell.maximizedDock === "right"
         readonly property real gap: 8
         readonly property real titleRow: 52
-        x: full || shell.dockSide === "bottom" ? sidebar.width + gap : shell.width - width - gap
-        y: full || shell.dockSide === "right" ? titleRow : shell.height - height - gap
-        width: full || shell.dockSide === "bottom" ? shell.width - sidebar.width - 2 * gap : shell.clampDock(shell.dockSize)
-        height: full || shell.dockSide === "right" ? shell.height - titleRow - gap : shell.clampDock(shell.dockSize)
-        open: shell.inspectorOpen
-        tab: shell.inspectorTab
-        tabs: shell.openTabs
-        mode: shell.dockMode
-        side: shell.dockSide
-        maximized: shell.dockMaximized
-        onTabRequested: (id) => shell.showPanel(id)
+        x: full ? sidebar.width + gap : shell.width - width - gap
+        y: titleRow
+        width: full ? shell.width - sidebar.width - 2 * gap : shell.clampRight(shell.rightWidth)
+        height: shell.height - titleRow - gap
+        z: full ? 3 : 1
+        open: shell.rightOpen && (shell.maximizedDock === "" || full)
+        tabs: shell.rightTabs
+        tab: shell.rightTab
+        maximized: full
+        dragging: shell.dragPane
+        dropTarget: shell.dropDock === "right"
+        onTabRequested: (id) => shell.dockOf(id) === "right" ? shell.front("right", id) : shell.movePane(id, "right")
         onTabClosed: (id) => shell.closeTab(id)
-        onCloseRequested: { shell.inspectorOpen = false; shell.dockMaximized = false }
-        onMaximizeRequested: shell.dockMaximized = !shell.dockMaximized
-        onModeRequested: (mode) => ipc.setUi("dockMode", mode)
-        onSideRequested: (side) => { shell.dockSizeLive = -1; ipc.setUi("dockSide", side) }
+        onMoveRequested: (id, target) => shell.movePane(id, target)
+        onCloseRequested: shell.setOpen("right", false)
+        onMaximizeRequested: shell.maximizedDock = full ? "" : "right"
+        onDragStarted: (id) => shell.dragPane = id
+        onDragMoved: (p) => shell.dragPos = p
+        onDragFinished: shell.finishDrag()
 
-        // Drag the inner edge to resize the dock
         MouseArea {
             z: 10
-            visible: !shell.dockMaximized
-            x: shell.dockSide === "right" ? -7 : 0
-            y: shell.dockSide === "bottom" ? -7 : 0
-            width: shell.dockSide === "right" ? 8 : parent.width
-            height: shell.dockSide === "bottom" ? 8 : parent.height
-            cursorShape: shell.dockSide === "right" ? Qt.SizeHorCursor : Qt.SizeVerCursor
+            visible: !rightDock.full
+            x: -7
+            width: 8
+            height: parent.height
+            cursorShape: Qt.SizeHorCursor
             hoverEnabled: true
-            // A grip shows where to drag, as in T3.
             Rectangle {
                 anchors.centerIn: parent
-                width: shell.dockSide === "right" ? 4 : 44
-                height: shell.dockSide === "right" ? 44 : 4
+                width: 4
+                height: 44
                 radius: 2
                 color: parent.pressed ? Theme.accent : Theme.textDim
                 opacity: parent.pressed ? 1 : (parent.containsMouse ? 0.8 : 0)
                 Behavior on opacity { NumberAnimation { duration: Theme.motionFast } }
-                Behavior on color { ColorAnimation { duration: Theme.motionFast } }
             }
-            property point start
+            property real startX: 0
             property real startSize: 0
-            onPressed: (mouse) => { start = mapToItem(shell, mouse.x, mouse.y); startSize = shell.clampDock(shell.dockSize) }
+            onPressed: (mouse) => { startX = mapToItem(shell, mouse.x, 0).x; startSize = shell.clampRight(shell.rightWidth) }
             onPositionChanged: (mouse) => {
-                if (!pressed) return
-                const p = mapToItem(shell, mouse.x, mouse.y)
-                shell.dockSizeLive = shell.clampDock(startSize + (shell.dockSide === "right" ? start.x - p.x : start.y - p.y))
+                if (pressed) shell.rightWidthLive = shell.clampRight(startSize + startX - mapToItem(shell, mouse.x, 0).x)
             }
-            onReleased: {
-                if (shell.dockSizeLive > 0)
-                    ipc.setUi(shell.dockSide === "bottom" ? "dockHeight" : "dockWidth", Math.round(shell.dockSizeLive))
-            }
-            onDoubleClicked: { shell.dockSizeLive = -1; ipc.setUi(shell.dockSide === "bottom" ? "dockHeight" : "dockWidth", 0) }
+            onReleased: if (shell.rightWidthLive > 0) ipc.setUi("rightWidth", Math.round(shell.rightWidthLive))
+            onDoubleClicked: { shell.rightWidthLive = -1; ipc.setUi("rightWidth", 0) }
         }
     }
 
+    // Bottom dock: under the chat, between the sidebar and the right dock, resized from its top edge.
+    Inspector {
+        id: bottomDock
+        where: "bottom"
+        readonly property bool full: shell.maximizedDock === "bottom"
+        readonly property real gap: 8
+        x: sidebar.width + gap
+        y: full ? 52 : shell.height - height - gap
+        width: (shell.rightOpen && !full ? rightDock.x - 4 : shell.width - gap) - x
+        height: full ? shell.height - 52 - gap : shell.clampBottom(shell.bottomHeight)
+        z: full ? 3 : 1
+        open: shell.bottomOpen && (shell.maximizedDock === "" || full)
+        tabs: shell.bottomTabs
+        tab: shell.bottomTab
+        maximized: full
+        dragging: shell.dragPane
+        dropTarget: shell.dropDock === "bottom"
+        onTabRequested: (id) => shell.dockOf(id) === "bottom" ? shell.front("bottom", id) : shell.movePane(id, "bottom")
+        onTabClosed: (id) => shell.closeTab(id)
+        onMoveRequested: (id, target) => shell.movePane(id, target)
+        onCloseRequested: shell.setOpen("bottom", false)
+        onMaximizeRequested: shell.maximizedDock = full ? "" : "bottom"
+        onDragStarted: (id) => shell.dragPane = id
+        onDragMoved: (p) => shell.dragPos = p
+        onDragFinished: shell.finishDrag()
+
+        MouseArea {
+            z: 10
+            visible: !bottomDock.full
+            y: -7
+            width: parent.width
+            height: 8
+            cursorShape: Qt.SizeVerCursor
+            hoverEnabled: true
+            Rectangle {
+                anchors.centerIn: parent
+                width: 44
+                height: 4
+                radius: 2
+                color: parent.pressed ? Theme.accent : Theme.textDim
+                opacity: parent.pressed ? 1 : (parent.containsMouse ? 0.8 : 0)
+                Behavior on opacity { NumberAnimation { duration: Theme.motionFast } }
+            }
+            property real startY: 0
+            property real startSize: 0
+            onPressed: (mouse) => { startY = mapToItem(shell, 0, mouse.y).y; startSize = shell.clampBottom(shell.bottomHeight) }
+            onPositionChanged: (mouse) => {
+                if (pressed) shell.bottomHeightLive = shell.clampBottom(startSize + startY - mapToItem(shell, 0, mouse.y).y)
+            }
+            onReleased: if (shell.bottomHeightLive > 0) ipc.setUi("bottomHeight", Math.round(shell.bottomHeightLive))
+            onDoubleClicked: { shell.bottomHeightLive = -1; ipc.setUi("bottomHeight", 0) }
+        }
+    }
+
+    // Where a dragged tab will land when the target dock is closed: a glowing edge zone.
+    Rectangle {
+        z: 40
+        readonly property bool showRight: shell.dropDock === "right" && !rightDock.open
+        readonly property bool showBottom: shell.dropDock === "bottom" && !bottomDock.open
+        visible: opacity > 0
+        opacity: showRight || showBottom ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: Theme.motionFast } }
+        x: showRight ? shell.width - shell.clampRight(shell.rightWidth) - 8 : sidebar.width + 8
+        y: showRight ? 52 : shell.height - shell.clampBottom(shell.bottomHeight) - 8
+        width: showRight ? shell.clampRight(shell.rightWidth) : shell.width - sidebar.width - 16
+        height: showRight ? shell.height - 60 : shell.clampBottom(shell.bottomHeight)
+        radius: 14
+        color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.10)
+        border.width: 2
+        border.color: Theme.accent
+    }
+    // The tab following the pointer while dragging
+    Rectangle {
+        z: 41
+        visible: shell.dragPane.length > 0
+        x: shell.dragPos.x + 12
+        y: shell.dragPos.y + 10
+        width: ghostRow.implicitWidth + 24
+        height: 30
+        radius: 9
+        color: Theme.card
+        border.width: 1
+        border.color: Theme.accent
+        Row {
+            id: ghostRow
+            anchors.centerIn: parent
+            spacing: 7
+            readonly property var pane: rightDock.catalog[shell.dragPane] || null
+            Icon { anchors.verticalCenter: parent.verticalCenter; name: ghostRow.pane ? ghostRow.pane.icon : "square"; size: 14; color: Theme.text }
+            Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: ghostRow.pane ? ghostRow.pane.label : ""
+                color: Theme.text
+                font.family: Theme.sans
+                font.pixelSize: 13
+                font.weight: Font.Medium
+            }
+        }
+    }
     SettingsPage {
         id: settingsPage
         anchors.fill: parent
@@ -454,7 +626,9 @@ Item {
         onActionTriggered: (id) => {
             if (id === "new") shell.newChat()
             else if (id === "model") header.openModels()
-            else if (id === "changes" || id === "browser" || id === "agents") shell.showPanel(id)
+            else if (id === "changes" || id === "browser" || id === "agents" || id === "terminal") shell.showPanel(id)
+            else if (id === "mcp") shell.openSettings("mcp")
+            else if (id === "skills") shell.openSettings("skills")
             else if (id === "sidebar") shell.sidebarOpen = !shell.sidebarOpen
             else if (id === "project") folderDialog.open()
             else if (id === "export") exportDialog.open()
@@ -469,6 +643,7 @@ Item {
     Shortcut { sequence: "Ctrl+,"; onActivated: shell.openSettings("general") }
     Shortcut { sequence: "Ctrl+Shift+M"; onActivated: header.openModels() }
     Shortcut { sequence: "Ctrl+Shift+A"; onActivated: shell.togglePanel("agents") }
+    Shortcut { sequences: ["Ctrl+`", "Ctrl+J"]; onActivated: { shell.togglePanel("terminal") } }
     Shortcut { sequence: "Ctrl+/"; onActivated: shortcuts.open() }
 
     Component.onCompleted: Qt.callLater(function () {

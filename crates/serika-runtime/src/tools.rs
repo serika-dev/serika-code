@@ -28,6 +28,10 @@ pub struct ToolContext<'a> {
     pub approvals: &'a ApprovalHub,
     pub browser: &'a crate::browser::BrowserHost,
     pub browser_enabled: bool,
+    /// Skills the agent may load with `use_skill`.
+    pub skills: &'a [crate::skills::Skill],
+    /// Live MCP connections for `mcp__server__tool` calls.
+    pub mcp: &'a crate::mcp_hub::McpHub,
 }
 
 pub struct ToolOutcome {
@@ -98,11 +102,34 @@ async fn dispatch(name: &str, args: &Value, ctx: &ToolContext<'_>, id: &str) -> 
             Ok((gitinfo::log(ctx.root, limit).await?, true, None))
         }
         "git_commit" => git_commit(args, ctx).await,
+        "use_skill" => {
+            let name = arg_str(args, "name")?;
+            let file = args.get("file").and_then(|v| v.as_str());
+            match crate::skills::load(ctx.skills, name, file) {
+                Ok(text) => Ok((text, true, None)),
+                Err(message) => Ok((message, false, None)),
+            }
+        }
+        name if name.starts_with("mcp__") => mcp_tool(name, args, ctx).await,
         "browser_open" | "browser_snapshot" | "browser_click" | "browser_type" | "browser_press"
         | "browser_scroll" | "browser_back" | "browser_new_tab" | "browser_switch_tab" => {
             browser_tool(name, args, ctx).await
         }
         other => Ok((format!("unknown tool \"{other}\""), false, None)),
+    }
+}
+
+/// A tool from one of the user's MCP servers. It can do anything, so it asks like a command.
+async fn mcp_tool(name: &str, args: &Value, ctx: &ToolContext<'_>) -> Result<Done, Error> {
+    let detail = format!("{name} {}", args);
+    ensure(ctx, ActionKind::CommandDev, &detail, "use an MCP tool", false).await?;
+    let result = tokio::select! {
+        _ = ctx.cancel.cancelled() => return Err(Error::Cancelled),
+        result = ctx.mcp.call(name, args.clone(), ctx.timeout) => result,
+    };
+    match result {
+        Ok(result) => Ok((crate::mcp_hub::result_text(&result), !result.is_error, None)),
+        Err(message) => Ok((message, false, None)),
     }
 }
 

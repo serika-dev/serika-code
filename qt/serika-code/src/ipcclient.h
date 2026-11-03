@@ -61,6 +61,11 @@ class IpcClient : public QObject {
     Q_PROPERTY(QObject *turns READ turns CONSTANT)
     Q_PROPERTY(QVariantList diffs READ diffs NOTIFY diffsChanged)
     Q_PROPERTY(QVariantList agents READ agents NOTIFY agentsChanged)
+    Q_PROPERTY(QVariantList terminals READ terminals NOTIFY terminalsChanged)
+    Q_PROPERTY(QVariantMap mcp READ mcp NOTIFY mcpChanged)
+    Q_PROPERTY(QVariantList skills READ skills NOTIFY skillsChanged)
+    Q_PROPERTY(QString browserImage READ browserImage NOTIFY browserImageChanged)
+    Q_PROPERTY(bool folderMissing READ folderMissing NOTIFY activeSessionChanged)
     Q_PROPERTY(QVariantList attachments READ attachments NOTIFY attachmentsChanged)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
     Q_PROPERTY(QVariantList queue READ queue NOTIFY queueChanged)
@@ -124,6 +129,11 @@ public:
     QVariantList attachments() const { return m_attachments; }
     QVariantList queue() const { return m_queue; }
     QVariantList agents() const { return m_agents; }
+    QVariantList terminals() const { return m_terminals; }
+    QVariantMap mcp() const { return m_mcp; }
+    QVariantList skills() const { return m_skills; }
+    QString browserImage() const { return m_browserImage; }
+    bool folderMissing() const { return m_folderMissing; }
     bool queuePaused() const { return m_queuePaused; }
     qint64 queueResumeAt() const { return m_queueResumeAt; }
     bool running() const { return m_running; }
@@ -194,6 +204,28 @@ public:
     Q_INVOKABLE QString modelName(const QString &id) const;
     Q_INVOKABLE QString lastReplyModel() const;
     Q_INVOKABLE void revealFile(const QString &path);
+    // Terminal panel
+    Q_INVOKABLE void terminalOpen(const QString &cwd = QString());
+    Q_INVOKABLE void terminalRun(const QString &id, const QString &command);
+    Q_INVOKABLE void terminalInterrupt(const QString &id);
+    Q_INVOKABLE void terminalClose(const QString &id);
+    Q_INVOKABLE QString terminalText(const QString &id) const;
+    Q_INVOKABLE void terminalClear(const QString &id);
+    // Browser: live picture, raw mouse, clipboard
+    Q_INVOKABLE void browserStream(bool on);
+    Q_INVOKABLE void browserMouse(const QString &type, double x, double y, const QString &button, int buttons, int clicks);
+    Q_INVOKABLE void browserCopy();
+    Q_INVOKABLE void browserPaste();
+    Q_INVOKABLE void browserSelectAll();
+    // MCP servers and skills
+    Q_INVOKABLE void mcpRefresh();
+    Q_INVOKABLE void mcpConnect(const QString &name);
+    Q_INVOKABLE void mcpToggle(const QString &name, bool enabled);
+    Q_INVOKABLE void mcpSave(const QString &name, const QString &definition);
+    Q_INVOKABLE void mcpRemove(const QString &name);
+    Q_INVOKABLE void skillsRefresh();
+    Q_INVOKABLE void skillsToggle(const QString &name, bool enabled);
+    Q_INVOKABLE void deleteProject(const QString &path);
     Q_INVOKABLE void browserNewTab(const QString &url = QString());
     Q_INVOKABLE void browserSwitchTab(const QString &id);
     Q_INVOKABLE void browserCloseTab(const QString &id);
@@ -227,6 +259,12 @@ signals:
     void browserActivity();
     void queueChanged();
     void agentsChanged();
+    void terminalsChanged();
+    void terminalOutput(const QString &id, const QString &text, bool error);
+    void terminalDone(const QString &id, int code);
+    void mcpChanged();
+    void skillsChanged();
+    void browserImageChanged();
     // Put text back in the message box (edit a sent or queued message).
     void composerFill(const QString &text);
     void diffFocus(const QString &path);
@@ -289,6 +327,21 @@ private:
     QVariantList m_attachments;
     QVariantList m_queue;
     QVariantList m_agents;   // sub-agents of the open chat, oldest first
+    QVariantList m_terminals;               // {id, shell, cwd, running, exited}
+    QHash<QString, QString> m_termText;     // output per terminal, capped
+    QVariantMap m_mcp;
+    QVariantList m_skills;
+    QString m_browserImage;
+    bool m_browserStreaming = false;
+    int m_streamHolders = 0;                // panels that want the live picture
+    // Tab actions go out one at a time, in order; polls sent before the latest action are dropped.
+    QList<QPair<QString, QJsonObject>> m_browserQueue;
+    bool m_browserInFlight = false;
+    quint64 m_browserEpoch = 0;
+    void browserAction(const QString &method, const QJsonObject &params);
+    void browserNext();
+    bool m_folderMissing = false;
+    void updateTerminal(const QString &id, const QVariantMap &changes);
     bool m_queuePaused = false;
     qint64 m_queueResumeAt = 0;
     QTimer m_queueTimer;
