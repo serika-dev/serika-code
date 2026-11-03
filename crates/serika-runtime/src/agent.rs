@@ -98,7 +98,11 @@ impl Runtime {
         } else {
             Vec::new()
         };
-        let extras = [crate::skills::instructions(&skills), crate::mcp_hub::instructions(&mcp_tools)]
+        let extras = [
+            crate::project::instructions_prompt(&project),
+            crate::skills::instructions(&skills),
+            crate::mcp_hub::instructions(&mcp_tools),
+        ]
             .into_iter()
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()

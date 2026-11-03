@@ -517,10 +517,10 @@ mod tests {
         if init == "git is not installed" {
             return;
         }
-        run_git_args(root, &["config", "user.name", "Pikachubolk"]).unwrap();
+        run_git_args(root, &["config", "user.name", "Tester"]).unwrap();
         run_git_args(
             root,
-            &["config", "user.email", "58044069+Pikachubolk@users.noreply.github.com"],
+            &["config", "user.email", "tester@example.com"],
         )
         .unwrap();
         std::fs::write(root.join("hello.txt"), "one\n").unwrap();

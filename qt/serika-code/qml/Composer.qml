@@ -45,6 +45,9 @@ Rectangle {
     readonly property bool hasText: input.text.trim().length > 0 || ipc.attachments.length > 0
     function t(key) { return Format.t(dict, key) }
     function focusInput() { input.forceActiveFocus() }
+    // Unsent text is kept per chat (and makes a new chat a draft in the sidebar).
+    property bool filling: false
+    Timer { id: draftTimer; interval: 250; onTriggered: ipc.setDraftText(input.text) }
     // While a reply runs, sending adds the message to the queue.
     function submit() {
         if (!hasText) return
@@ -63,7 +66,9 @@ Rectangle {
     Connections {
         target: ipc
         function onComposerFill(text) {
+            composer.filling = true
             input.text = text
+            composer.filling = false
             input.cursorPosition = text.length
             input.forceActiveFocus()
         }
@@ -259,6 +264,7 @@ Rectangle {
             clip: true
             TextArea {
                 id: input
+                onTextChanged: if (!composer.filling) draftTimer.restart()
                 placeholderText: composer.t("MessageSerika")
                 placeholderTextColor: Theme.textDim
                 color: Theme.text

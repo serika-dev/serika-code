@@ -260,6 +260,13 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
             return;
         m_ui = result.toVariantMap();
         emit uiChanged();
+        if (!m_draftsLoaded) {
+            m_draftsLoaded = true;
+            const QJsonDocument doc = QJsonDocument::fromJson(m_ui.value(QStringLiteral("drafts")).toString().toUtf8());
+            if (doc.isObject())
+                m_drafts = doc.object().toVariantMap();
+            emit draftsChanged();
+        }
     } else if (tag == QLatin1String("i18n")) {
         applyDictionary(result);
     } else if (tag == QLatin1String("projects")) {
@@ -299,13 +306,23 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
         emit gitMessage(message.isEmpty() ? QStringLiteral("Done.") : message, false);
         if (action == QLatin1String("switch") || action == QLatin1String("branch.create") || action == QLatin1String("fetch"))
             gitBranchesRefresh();
+    } else if (tag.startsWith(QLatin1String("projectDetails:"))) {
+        if (result.contains(QStringLiteral("accounts"))) {
+            m_gitAccounts = result.value(QStringLiteral("accounts")).toObject().toVariantMap();
+            emit gitAccountsChanged();
+        }
+        emit projectDetailsReady(tag.mid(15), result.toVariantMap());
+    } else if (tag.startsWith(QLatin1String("projectInstructions:"))) {
+        const QString path = result.value(QStringLiteral("path")).toString();
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+        projectDetails(tag.mid(20));
     } else if (tag.startsWith(QLatin1String("gitAccountIn:"))) {
         const QString project = tag.mid(13);
         m_gitAccounts = result.value(QStringLiteral("accounts")).toObject().toVariantMap();
         emit gitAccountsChanged();
         if (project == m_projectPath)
             setGit(result.value(QStringLiteral("overview")).toObject().toVariantMap());
-        gitRemoteAuth(project);
+        projectDetails(project);
     } else if (tag.startsWith(QLatin1String("gitRemoteAuth:"))) {
         const QString project = tag.mid(14);
         if (result.contains(QStringLiteral("accounts"))) {
@@ -313,6 +330,7 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
             emit gitAccountsChanged();
         }
         emit gitRemoteAuthReady(project, result.toVariantMap());
+        projectDetails(project);
         if (project == m_projectPath)
             gitRefresh();
     } else if (tag == QLatin1String("gitBranches")) {
@@ -348,6 +366,7 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
         emit activeSessionChanged();
         emit diffsChanged();
         emit turnsReloaded();
+        emit composerFill(m_drafts.value(m_activeSession).toMap().value(QStringLiteral("text")).toString());
         request(QStringLiteral("projects.list"), {}, QStringLiteral("projects"));
         request(QStringLiteral("sessions.list"), {}, QStringLiteral("sessions"));
         m_agents.clear();
@@ -566,6 +585,18 @@ void IpcClient::handleEvent(const QJsonObject &obj) {
     const QString event = obj.value(QStringLiteral("event")).toString();
     if (event == QLatin1String("runs")) {
         emit liveChatsChanged();
+        return;
+    }
+    // Fresh lists that arrive after a quick answer from the saved ones.
+    if (event == QLatin1String("models")) {
+        if (!m_demo)
+            applyModels(obj);
+        return;
+    }
+    if (event == QLatin1String("gitAccounts")) {
+        m_gitAccounts = obj.toVariantMap();
+        m_gitAccounts.remove(QStringLiteral("event"));
+        emit gitAccountsChanged();
         return;
     }
     // Events of a chat that is not on screen go to that chat's own state.
@@ -1016,6 +1047,13 @@ void IpcClient::send(const QString &prompt) {
 }
 
 void IpcClient::startSend(const QString &trimmed, const QVariantList &files) {
+    // What was typed is now a message; the draft (and a new chat's draft row) goes away.
+    if (m_drafts.remove(currentDraftKey()) > 0)
+        saveDrafts();
+    if (!m_draftKey.isEmpty()) {
+        m_draftKey.clear();
+    }
+    emit draftsChanged();
     Turn user;
     user.role = QStringLiteral("user");
     user.raw = trimmed;
@@ -1238,6 +1276,14 @@ void IpcClient::gitAccountUse(const QString &id, bool makeDefault) {
     setGit(m_git);
     request(QStringLiteral("git.accountUse"), {{QStringLiteral("project"), m_projectPath}, {QStringLiteral("id"), id}, {QStringLiteral("makeDefault"), makeDefault}},
             QStringLiteral("gitAction"));
+}
+
+void IpcClient::projectDetails(const QString &project) {
+    request(QStringLiteral("project.details"), {{QStringLiteral("project"), project}}, QStringLiteral("projectDetails:") + project);
+}
+
+void IpcClient::projectCreateInstructions(const QString &project) {
+    request(QStringLiteral("project.createInstructions"), {{QStringLiteral("project"), project}}, QStringLiteral("projectInstructions:") + project);
 }
 
 void IpcClient::gitRemoteAuth(const QString &project) {
@@ -1480,6 +1526,29 @@ void IpcClient::clearQueue() {
 void IpcClient::openSession(const QString &id) {
     if (id == m_activeSession && m_view->count() > 0)
         return;
+    if (id.startsWith(QLatin1String("draft:"))) {
+        if (id == m_draftKey)
+            return;
+        const QVariantMap draft = m_drafts.value(id).toMap();
+        const QString folder = draft.value(QStringLiteral("project")).toString();
+        detachView();
+        leaveDraft();
+        m_activeSession.clear();
+        m_view->clear();
+        m_diffs.clear();
+        m_agents.clear();
+        setStatus(QString());
+        m_draftKey = id;
+        emit activeSessionChanged();
+        emit diffsChanged();
+        emit agentsChanged();
+        emit draftsChanged();
+        emit composerFill(draft.value(QStringLiteral("text")).toString());
+        if (!folder.isEmpty() && folder != m_projectPath)
+            request(QStringLiteral("project.set"), {{QStringLiteral("path"), folder}}, QStringLiteral("settings"));
+        return;
+    }
+    leaveDraft();
     // A chat that is still running opens live, exactly where it is.
     for (const LiveRun &run : std::as_const(m_runs)) {
         if (run.sessionId == id) {
@@ -1492,9 +1561,90 @@ void IpcClient::openSession(const QString &id) {
     request(QStringLiteral("sessions.open"), {{QStringLiteral("id"), id}}, QStringLiteral("session"));
 }
 
+QVariantList IpcClient::drafts() const {
+    // "fresh" drafts are new chats (their own sidebar row); the others mark unsent text in
+    // an existing chat.
+    QVariantList out;
+    for (auto it = m_drafts.cbegin(); it != m_drafts.cend(); ++it) {
+        QVariantMap row = it.value().toMap();
+        row.insert(QStringLiteral("id"), it.key());
+        row.insert(QStringLiteral("fresh"), it.key().startsWith(QLatin1String("draft:")));
+        out.append(row);
+    }
+    return out;
+}
+
+QString IpcClient::draftText() const {
+    return m_drafts.value(currentDraftKey()).toMap().value(QStringLiteral("text")).toString();
+}
+
+void IpcClient::setDraftText(const QString &text) {
+    const QString key = currentDraftKey();
+    if (key.isEmpty())
+        return;
+    QVariantMap draft = m_drafts.value(key).toMap();
+    if (draft.value(QStringLiteral("text")).toString() == text && m_drafts.contains(key))
+        return;
+    const bool newChat = key.startsWith(QLatin1String("draft:"));
+    if (text.trimmed().isEmpty() && !newChat) {
+        if (m_drafts.remove(key) > 0) {
+            emit draftsChanged();
+            saveDrafts();
+        }
+        return;
+    }
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    draft.insert(QStringLiteral("text"), text);
+    draft.insert(QStringLiteral("updatedAt"), now);
+    if (!draft.contains(QStringLiteral("createdAt")))
+        draft.insert(QStringLiteral("createdAt"), now);
+    if (!draft.contains(QStringLiteral("project")))
+        draft.insert(QStringLiteral("project"), m_projectPath);
+    m_drafts.insert(key, draft);
+    emit draftsChanged();
+    saveDrafts();
+}
+
+void IpcClient::saveDrafts() {
+    // Only drafts with text are worth keeping across restarts.
+    if (!m_draftSave.isSingleShot()) {
+        m_draftSave.setSingleShot(true);
+        m_draftSave.setInterval(600);
+        connect(&m_draftSave, &QTimer::timeout, this, [this] {
+            QJsonObject keep;
+            for (auto it = m_drafts.cbegin(); it != m_drafts.cend(); ++it)
+                if (!it.value().toMap().value(QStringLiteral("text")).toString().trimmed().isEmpty())
+                    keep.insert(it.key(), QJsonObject::fromVariantMap(it.value().toMap()));
+            setUi(QStringLiteral("drafts"), QString::fromUtf8(QJsonDocument(keep).toJson(QJsonDocument::Compact)));
+        });
+    }
+    m_draftSave.start();
+}
+
+void IpcClient::leaveDraft() {
+    if (m_draftKey.isEmpty())
+        return;
+    if (m_drafts.value(m_draftKey).toMap().value(QStringLiteral("text")).toString().trimmed().isEmpty()) {
+        m_drafts.remove(m_draftKey);
+        saveDrafts();
+    }
+    m_draftKey.clear();
+    emit draftsChanged();
+}
+
 void IpcClient::newChat() {
     detachView();
+    leaveDraft();
     m_activeSession.clear();
+    // The new chat shows in the sidebar right away, as a draft, until its first message.
+    if (!m_demo) {
+        m_draftKey = QStringLiteral("draft:") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        m_drafts.insert(m_draftKey, QVariantMap{{QStringLiteral("text"), QString()}, {QStringLiteral("project"), m_projectPath},
+                                                {QStringLiteral("createdAt"), now}, {QStringLiteral("updatedAt"), now}});
+        emit draftsChanged();
+        emit composerFill(QString());
+    }
     m_view->clear();
     m_diffs.clear();
     m_agents.clear();
@@ -1506,6 +1656,12 @@ void IpcClient::newChat() {
 
 void IpcClient::newChatIn(const QString &folder) {
     newChat();
+    if (!m_draftKey.isEmpty()) {
+        QVariantMap draft = m_drafts.value(m_draftKey).toMap();
+        draft.insert(QStringLiteral("project"), folder);
+        m_drafts.insert(m_draftKey, draft);
+        emit draftsChanged();
+    }
     if (folder != m_projectPath) {
         request(QStringLiteral("project.set"), {{QStringLiteral("path"), folder}}, QStringLiteral("settings"));
     }
@@ -1518,6 +1674,17 @@ void IpcClient::renameSession(const QString &id, const QString &title) {
 }
 
 void IpcClient::deleteSession(const QString &id) {
+    if (id.startsWith(QLatin1String("draft:"))) {
+        const bool current = id == m_draftKey;
+        m_drafts.remove(id);
+        if (current)
+            m_draftKey.clear();
+        saveDrafts();
+        emit draftsChanged();
+        if (current)
+            newChat();
+        return;
+    }
     for (const LiveRun &run : std::as_const(m_runs))
         if (run.sessionId == id)
             stopChat(id);
@@ -1788,7 +1955,7 @@ void IpcClient::terminalOpen(const QString &cwd) {
         const QString id = QStringLiteral("demo%1").arg(m_terminals.size() + 1);
         m_terminals.append(QVariantMap{{QStringLiteral("id"), id}, {QStringLiteral("shell"), QStringLiteral("pwsh")},
                                        {QStringLiteral("cwd"), m_projectPath}, {QStringLiteral("running"), false}, {QStringLiteral("exited"), false}});
-        m_termText[id] = QStringLiteral("PS> cargo test --workspace\n   Compiling serika-runtime v0.1.2\n    Finished test [unoptimized] target(s) in 4.31s\ntest result: ok. 76 passed; 0 failed\n");
+        m_termText[id] = QStringLiteral("PS> cargo test --workspace\n   Compiling serika-runtime v0.2.0\n    Finished test [unoptimized] target(s) in 4.31s\ntest result: ok. 76 passed; 0 failed\n");
         emit terminalsChanged();
         return;
     }
@@ -1886,8 +2053,8 @@ void IpcClient::loadDemo() {
         m_selectedModel = qEnvironmentVariable("SERIKA_DEMO_MODEL");
     m_signedIn = true;
     m_accountLoaded = true;
-    m_username = QStringLiteral("pikachubolk");
-    m_email = QStringLiteral("pikachubolk@example.com");
+    m_username = QStringLiteral("alex");
+    m_email = QStringLiteral("alex@example.com");
     m_plan = QStringLiteral("Serika+ AI Max");
     m_isPremium = true;
     m_periodEnd = QStringLiteral("2026-11-30T00:00:00Z");
@@ -1958,41 +2125,41 @@ void IpcClient::loadDemo() {
         return QVariantMap{{QStringLiteral("id"), s(id)}, {QStringLiteral("title"), s(title)}, {QStringLiteral("updatedAt"), now - ago}, {QStringLiteral("project"), s(project)}};
     };
     const QString here = QDir::currentPath();
-    m_sessions = {session("a", "Wire live /models discovery", 3600 * 2, "C:/Code/SerikaCode"),
-                  session("b", "Yo, how's it going?", 3600 * 20, "C:/Code/SerikaCode"),
-                  session("c", "can you check where tickets are handled?", 86400 * 3, "C:/Code/neoforce-app"),
+    m_sessions = {session("a", "Wire live /models discovery", 3600 * 2, "C:/Code/acme-api"),
+                  session("b", "Add rate limiting to uploads", 3600 * 20, "C:/Code/acme-api"),
+                  session("c", "Why is the checkout test flaky?", 86400 * 3, "C:/Code/storefront"),
                   session("d", "Build Pomodoro timer in React", 86400 * 12, "C:/Code/pomodoro"),
-                  session("e", "OAuth 2.0 flow diagram", 86400 * 40, "C:/Code/neoforce-app")};
+                  session("e", "OAuth 2.0 flow diagram", 86400 * 40, "C:/Code/storefront")};
     emit sessionsChanged();
-    m_projects = {QVariantMap{{QStringLiteral("path"), s("C:/Code/SerikaCode")}, {QStringLiteral("name"), s("SerikaCode")}, {QStringLiteral("exists"), true}, {QStringLiteral("sessionCount"), 2}, {QStringLiteral("current"), true}},
-                  QVariantMap{{QStringLiteral("path"), s("C:/Code/neoforce-app")}, {QStringLiteral("name"), s("neoforce-app")}, {QStringLiteral("exists"), true}, {QStringLiteral("sessionCount"), 2}, {QStringLiteral("current"), false}},
+    m_projects = {QVariantMap{{QStringLiteral("path"), s("C:/Code/acme-api")}, {QStringLiteral("name"), s("acme-api")}, {QStringLiteral("exists"), true}, {QStringLiteral("sessionCount"), 2}, {QStringLiteral("current"), true}},
+                  QVariantMap{{QStringLiteral("path"), s("C:/Code/storefront")}, {QStringLiteral("name"), s("storefront")}, {QStringLiteral("exists"), true}, {QStringLiteral("sessionCount"), 2}, {QStringLiteral("current"), false}},
                   QVariantMap{{QStringLiteral("path"), s("C:/Code/pomodoro")}, {QStringLiteral("name"), s("pomodoro")}, {QStringLiteral("exists"), true}, {QStringLiteral("sessionCount"), 1}, {QStringLiteral("current"), false}},
                   QVariantMap{{QStringLiteral("path"), s("C:/Code/old-prototype")}, {QStringLiteral("name"), s("old-prototype")}, {QStringLiteral("exists"), false}, {QStringLiteral("sessionCount"), 0}, {QStringLiteral("current"), false}}};
     emit projectsChanged();
-    m_projectName = QStringLiteral("SerikaCode");
-    m_projectPath = s("C:/Code/SerikaCode");
+    m_projectName = QStringLiteral("acme-api");
+    m_projectPath = s("C:/Code/acme-api");
     emit settingsChanged();
     Q_UNUSED(here)
 
     QVariantList turns;
     turns.append(QVariantMap{{QStringLiteral("role"), QStringLiteral("user")},
-                             {QStringLiteral("content"), QStringLiteral("can you check where tickets are handled and wire live /models discovery?")}});
+                             {QStringLiteral("content"), QStringLiteral("wire live /models discovery and check every provider call has a timeout")}});
     turns.append(QVariantMap{
         {QStringLiteral("role"), QStringLiteral("assistant")},
         {QStringLiteral("reasoning"),
-         QStringLiteral("1. Searching the workspace for ticket handlers and model discovery entry points.\n"
+         QStringLiteral("1. Searching the workspace for model discovery and provider calls.\n"
                         "2. Inspected providers.rs and client.rs.\n"
                         "3. Verified the chat client streams reasoning and tool calls separately.\n"
                         "4. Ran the workspace tests to confirm everything passes.")},
         {QStringLiteral("tools"),
-         QVariantList{QVariantMap{{QStringLiteral("name"), QStringLiteral("search_text")}, {QStringLiteral("state"), QStringLiteral("ok")}, {QStringLiteral("summary"), QStringLiteral("ticket")}, {QStringLiteral("result"), QStringLiteral("14 matches in 5 files")}, {QStringLiteral("output"), QStringLiteral("crates/serika-runtime/src/providers.rs:212: // tickets\ncrates/serika-runtime/src/client.rs:88: fn ticket_url")}},
-                      QVariantMap{{QStringLiteral("name"), QStringLiteral("read_file")}, {QStringLiteral("state"), QStringLiteral("ok")}, {QStringLiteral("summary"), QStringLiteral("crates/serika-runtime/src/providers.rs")}, {QStringLiteral("result"), QStringLiteral("Read 142 lines")}},
-                      QVariantMap{{QStringLiteral("name"), QStringLiteral("replace_in_file")}, {QStringLiteral("state"), QStringLiteral("ok")}, {QStringLiteral("summary"), QStringLiteral("crates/serika-runtime/src/providers.rs")}, {QStringLiteral("result"), QStringLiteral("Updated providers.rs (+28 -4)")}, {QStringLiteral("diffPath"), QStringLiteral("crates/serika-runtime/src/providers.rs")}},
+         QVariantList{QVariantMap{{QStringLiteral("name"), QStringLiteral("search_text")}, {QStringLiteral("state"), QStringLiteral("ok")}, {QStringLiteral("summary"), QStringLiteral("timeout")}, {QStringLiteral("result"), QStringLiteral("14 matches in 5 files")}, {QStringLiteral("output"), QStringLiteral("src/providers.rs:212: // no timeout here\nsrc/client.rs:88: fn with_timeout")}},
+                      QVariantMap{{QStringLiteral("name"), QStringLiteral("read_file")}, {QStringLiteral("state"), QStringLiteral("ok")}, {QStringLiteral("summary"), QStringLiteral("src/providers.rs")}, {QStringLiteral("result"), QStringLiteral("Read 142 lines")}},
+                      QVariantMap{{QStringLiteral("name"), QStringLiteral("replace_in_file")}, {QStringLiteral("state"), QStringLiteral("ok")}, {QStringLiteral("summary"), QStringLiteral("src/providers.rs")}, {QStringLiteral("result"), QStringLiteral("Updated providers.rs (+28 -4)")}, {QStringLiteral("diffPath"), QStringLiteral("src/providers.rs")}},
                       QVariantMap{{QStringLiteral("name"), QStringLiteral("browser_open")}, {QStringLiteral("state"), QStringLiteral("ok")}, {QStringLiteral("summary"), QStringLiteral("https://docs.rs/tokio")}, {QStringLiteral("result"), QStringLiteral("Title: tokio - Rust")}},
                       QVariantMap{{QStringLiteral("name"), QStringLiteral("run_command")}, {QStringLiteral("state"), QStringLiteral("ok")}, {QStringLiteral("summary"), QStringLiteral("cargo test --workspace")}, {QStringLiteral("result"), QStringLiteral("test result: ok. 37 passed")}, {QStringLiteral("output"), QStringLiteral("running 37 tests\n...\ntest result: ok. 37 passed; 0 failed; finished in 1.74s")}},
                       QVariantMap{{QStringLiteral("name"), QStringLiteral("run_command")}, {QStringLiteral("state"), QStringLiteral("failed")}, {QStringLiteral("summary"), QStringLiteral("cargo clippy -- -D warnings")}, {QStringLiteral("result"), QStringLiteral("error: unused variable")}}}},
         {QStringLiteral("content"),
-         QStringLiteral("### Ticket handling and live `/models` discovery\n\n"
+         QStringLiteral("### Live `/models` discovery\n\n"
                         "I traced the code and updated the runtime:\n\n"
                         "- **Reasoning traces** are captured from streaming deltas and stored with the session.\n"
                         "- **Live `/models`** now queries every provider you have a key for, then merges the Serika catalog.\n\n"
@@ -2015,7 +2182,7 @@ void IpcClient::loadDemo() {
     m_view->replaceAll(turns);
     m_activeSession = QStringLiteral("a");
     emit activeSessionChanged();
-    m_diffs = {QVariantMap{{QStringLiteral("path"), QStringLiteral("crates/serika-runtime/src/providers.rs")},
+    m_diffs = {QVariantMap{{QStringLiteral("path"), QStringLiteral("src/providers.rs")},
                            {QStringLiteral("diff"), QStringLiteral("@@ -172,6 +172,12 @@ pub async fn discover_all_models(\n-    let models = builtin_static_models();\n+    let (ollama, openai, claude) = tokio::join!(\n+        fetch_ollama(http, cfg),\n+        fetch_openai(http, cfg),\n+        fetch_anthropic(http, cfg),\n+    );\n     report\n }")}}};
     emit diffsChanged();
 
@@ -2053,9 +2220,47 @@ void IpcClient::loadDemo() {
                             {QStringLiteral("agentAt"), QDateTime::currentMSecsSinceEpoch() + 60000},
                             {QStringLiteral("tabs"), QVariantList{
                                 QVariantMap{{QStringLiteral("id"), QStringLiteral("t1")}, {QStringLiteral("title"), QStringLiteral("tokio - Rust")}, {QStringLiteral("url"), QStringLiteral("https://docs.rs/tokio")}, {QStringLiteral("active"), true}},
-                                QVariantMap{{QStringLiteral("id"), QStringLiteral("t2")}, {QStringLiteral("title"), QStringLiteral("serika-dev/chat-web: SerikaChat web app")}, {QStringLiteral("url"), QStringLiteral("https://github.com/serika-dev/chat-web")}, {QStringLiteral("active"), false}},
+                                QVariantMap{{QStringLiteral("id"), QStringLiteral("t2")}, {QStringLiteral("title"), QStringLiteral("tokio-rs/axum: Ergonomic web framework")}, {QStringLiteral("url"), QStringLiteral("https://github.com/tokio-rs/axum")}, {QStringLiteral("active"), false}},
                                 QVariantMap{{QStringLiteral("id"), QStringLiteral("t3")}, {QStringLiteral("title"), QStringLiteral("localhost:5173")}, {QStringLiteral("url"), QStringLiteral("http://localhost:5173/")}, {QStringLiteral("active"), false}}}}};
     emit browserChanged();
+
+    // A repository with stashes per ticket, an incoming commit and two to push.
+    const auto commit = [now](const char *hash, const char *subject, const char *author, qint64 ago) {
+        return QVariantMap{{QStringLiteral("hash"), s(hash)}, {QStringLiteral("short"), s(hash).left(7)}, {QStringLiteral("subject"), s(subject)},
+                           {QStringLiteral("author"), s(author)}, {QStringLiteral("time"), now - ago}};
+    };
+    const auto stash = [now](int index, const char *message, const char *branch, qint64 ago) {
+        return QVariantMap{{QStringLiteral("index"), index}, {QStringLiteral("name"), QStringLiteral("stash@{%1}").arg(index)},
+                           {QStringLiteral("message"), s(message)}, {QStringLiteral("branch"), s(branch)}, {QStringLiteral("time"), now - ago}};
+    };
+    const auto change = [](const char *path, const char *code, bool untracked) {
+        return QVariantMap{{QStringLiteral("path"), s(path)}, {QStringLiteral("code"), s(code)}, {QStringLiteral("staged"), false}, {QStringLiteral("untracked"), untracked}};
+    };
+    m_git = QVariantMap{
+        {QStringLiteral("repo"), true}, {QStringLiteral("root"), s("C:/Code/acme-api")}, {QStringLiteral("branch"), s("feature/live-models")},
+        {QStringLiteral("detached"), false}, {QStringLiteral("upstream"), s("origin/feature/live-models")},
+        {QStringLiteral("ahead"), 2}, {QStringLiteral("behind"), 1}, {QStringLiteral("fetchedAt"), now - 240},
+        {QStringLiteral("changes"), QVariantList{change("src/providers.rs", ".M", false), change("src/client.rs", ".M", false), change("tests/models.rs", "??", true)}},
+        {QStringLiteral("stashes"), QVariantList{stash(0, "ACME-142 retry uploads on 503", "main", 3600), stash(1, "ACME-157 dark mode for settings", "main", 86400 * 2),
+                                                 stash(2, "ACME-163 export CSV button", "feature/reports", 86400 * 5), stash(3, "spike: streaming JSON parser", "main", 86400 * 9)}},
+        {QStringLiteral("incoming"), QVariantList{commit("9f2c1aa31b", "Bump axum to 0.8", "Sam Lee", 1800)}},
+        {QStringLiteral("outgoing"), QVariantList{commit("4b7e90d2c1", "Query every provider for live models", "Alex Rivera", 2400),
+                                                  commit("1c0d5e7f88", "Give each provider fetch its own timeout", "Alex Rivera", 5400)}},
+        {QStringLiteral("history"), QVariantList{commit("4b7e90d2c1", "Query every provider for live models", "Alex Rivera", 2400),
+                                                 commit("1c0d5e7f88", "Give each provider fetch its own timeout", "Alex Rivera", 5400),
+                                                 commit("77aa21c903", "Merge pull request #48 from acme/uploads", "Sam Lee", 86400),
+                                                 commit("e01f9b4d22", "Add rate limiting to uploads", "Alex Rivera", 86400 * 2)}},
+        {QStringLiteral("identity"), QVariantMap{{QStringLiteral("name"), s("Alex Rivera")}, {QStringLiteral("email"), s("alex@example.com")},
+                                                 {QStringLiteral("account"), s("work")}}}};
+    m_gitAccounts = QVariantMap{
+        {QStringLiteral("accounts"), QVariantList{
+            QVariantMap{{QStringLiteral("id"), s("work")}, {QStringLiteral("label"), s("Work")}, {QStringLiteral("name"), s("Alex Rivera")},
+                        {QStringLiteral("email"), s("alex@example.com")}, {QStringLiteral("username"), s("alex-acme")}},
+            QVariantMap{{QStringLiteral("id"), s("personal")}, {QStringLiteral("label"), s("Personal")}, {QStringLiteral("name"), s("Alex R.")},
+                        {QStringLiteral("email"), s("alex.r@example.net")}, {QStringLiteral("username"), s("alexr")}}}},
+        {QStringLiteral("projectDefault"), s("work")}};
+    emit gitChanged();
+    emit gitAccountsChanged();
 }
 
 void IpcClient::focusDiff(const QString &path) {

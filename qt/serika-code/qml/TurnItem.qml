@@ -230,7 +230,7 @@ Item {
             id: assistant
             visible: !item.isUser
             width: parent.width
-            spacing: 10
+            spacing: 12
 
             ReasoningTrace {
                 Layout.fillWidth: true
@@ -277,6 +277,8 @@ Item {
 
             Row {
                 visible: !item.streaming && (item.content.length > 0 || item.tools.length > 0)
+                // Room between the reply and its model / copy row.
+                Layout.topMargin: 6
                 spacing: 2
                 // Which model wrote this reply
                 Row {

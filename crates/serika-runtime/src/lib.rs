@@ -25,6 +25,7 @@ pub mod i18n;
 pub mod logsetup;
 pub mod git;
 pub mod mcp;
+pub mod project;
 pub mod mcp_hub;
 pub mod mcp_server;
 pub mod model;

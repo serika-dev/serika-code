@@ -420,7 +420,7 @@ mod tests {
         let nested = AccountProfile::from_value(&serde_json::json!({
             "user": {
                 "id": 42,
-                "username": "pikachubolk",
+                "username": "alex",
                 "email": "ada@example.com",
                 "isPremium": true,
                 "avatar": "https://cdn.serika.dev/avatars/ada.png",
@@ -429,7 +429,7 @@ mod tests {
             }
         }))
         .unwrap();
-        assert_eq!(nested.username, "pikachubolk");
+        assert_eq!(nested.username, "alex");
         assert_eq!(nested.id, "42");
         assert_eq!(
             nested.avatar.as_deref(),

@@ -648,6 +648,16 @@ Item {
     Shortcut { sequence: "Ctrl+Shift+M"; onActivated: header.openModels() }
     Shortcut { sequence: "Ctrl+Shift+A"; onActivated: shell.togglePanel("agents") }
     Shortcut { sequence: "Ctrl+Shift+G"; onActivated: shell.togglePanel("git") }
+    // Ctrl+1..9 open the chats in sidebar order; Ctrl+Tab steps through them.
+    Repeater {
+        model: 9
+        delegate: Item {
+            required property int index
+            Shortcut { sequence: "Ctrl+" + (index + 1); onActivated: sidebar.openNth(index) }
+        }
+    }
+    Shortcut { sequence: "Ctrl+Tab"; onActivated: sidebar.step(1) }
+    Shortcut { sequence: "Ctrl+Shift+Tab"; onActivated: sidebar.step(-1) }
     Shortcut { sequences: ["Ctrl+`", "Ctrl+J"]; onActivated: { shell.togglePanel("terminal") } }
     Shortcut { sequence: "Ctrl+/"; onActivated: shortcuts.open() }
 

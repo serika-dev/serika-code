@@ -89,6 +89,7 @@ pub async fn serve(runtime: Runtime) -> serika_runtime::Result<i32> {
             Err(err) => eprintln!("serika: Serika's MCP server did not start: {err}"),
         }
     }
+    serika_runtime::git::warm_up(host.runtime.paths.data_dir.clone());
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines
         .next_line()
@@ -228,7 +229,36 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
             Ok(ui_prefs(&runtime.paths.data_dir))
         }
         "i18n" => Ok(dictionary(&text(&params, "locale"))),
-        "models" => models(&host).await,
+        // Answer from the last list at once; a fresh one follows as a "models" event.
+        "models" => {
+            let cache = runtime.paths.data_dir.join("models-cache.json");
+            let cached = std::fs::read_to_string(&cache).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+            match cached {
+                Some(mut value) => {
+                    let config = Config::load_or_create(&runtime.paths).unwrap_or_else(|_| runtime.config.clone());
+                    value["selected"] = json!(selected_model(&config));
+                    value["cached"] = json!(true);
+                    static REFRESHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !REFRESHING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        let h = host.clone();
+                        tokio::spawn(async move {
+                            if let Ok(mut fresh) = models(&h).await {
+                                let _ = std::fs::write(h.runtime.paths.data_dir.join("models-cache.json"), fresh.to_string());
+                                fresh["event"] = json!("models");
+                                h.emit(&fresh);
+                            }
+                            REFRESHING.store(false, std::sync::atomic::Ordering::SeqCst);
+                        });
+                    }
+                    Ok(value)
+                }
+                None => {
+                    let fresh = models(&host).await?;
+                    let _ = std::fs::write(&cache, fresh.to_string());
+                    Ok(fresh)
+                }
+            }
+        }
         "providers.status" => {
             let refresh = params.get("refresh").and_then(|v| v.as_bool()).unwrap_or(false);
             let statuses = runtime.provider_statuses(refresh).await;
@@ -413,9 +443,19 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
             Ok(value)
         }
         "git.accounts" => {
-            // GitHub logins from the GitHub CLI and Git Credential Manager join the list by themselves.
-            serika_runtime::git::import_detected(&runtime.paths.data_dir).await;
-            Ok(git_accounts_json(&host, optional_text(&params, "project")))
+            // GitHub logins from the GitHub CLI and Git Credential Manager join the list by
+            // themselves, in the background; the list you have answers at once.
+            let project = optional_text(&params, "project");
+            let h = host.clone();
+            let p = project.clone();
+            tokio::spawn(async move {
+                if serika_runtime::git::import_detected(&h.runtime.paths.data_dir).await > 0 {
+                    let mut value = git_accounts_json(&h, p);
+                    value["event"] = json!("gitAccounts");
+                    h.emit(&value);
+                }
+            });
+            Ok(git_accounts_json(&host, project))
         }
         "git.accountSave" => {
             let account: serika_runtime::git::Account = serde_json::from_value(params.get("account").cloned().unwrap_or(Value::Null))
@@ -452,6 +492,39 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
             serika_runtime::git::set_default(&runtime.paths.data_dir, &canon_key(&project), &text(&params, "id"))
                 .map_err(|err| err.to_string())?;
             Ok(git_accounts_json(&host, Some(project)))
+        }
+        // Everything the project settings page shows, in one round trip.
+        "project.details" => {
+            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            let (auth, identity, overview) = tokio::join!(
+                serika_runtime::git::remote_auth(&project),
+                serika_runtime::git::identity(&project),
+                serika_runtime::git::overview(&project),
+            );
+            let overview = overview.unwrap_or_default();
+            let skills = serika_runtime::skills::discover(&project, &runtime.paths.data_dir);
+            let servers = serika_runtime::mcp_hub::load_servers(&runtime.paths.data_dir, &project);
+            Ok(json!({
+                "project": project.display().to_string(),
+                "exists": project.is_dir(),
+                "repo": overview.repo,
+                "branch": overview.branch,
+                "upstream": overview.upstream,
+                "changes": overview.changes.len(),
+                "stashes": overview.stashes.len(),
+                "lastCommit": overview.history.first(),
+                "auth": auth,
+                "identity": identity,
+                "accounts": git_accounts_json(&host, Some(project.display().to_string())),
+                "instructions": serika_runtime::project::instruction_files(&project),
+                "skills": skills.iter().filter(|s| s.source.eq_ignore_ascii_case("project")).count(),
+                "mcp": servers.iter().filter(|s| s.source.eq_ignore_ascii_case("project")).count(),
+            }))
+        }
+        "project.createInstructions" => {
+            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            let path = serika_runtime::project::create_agents_md(&project).map_err(|err| err.to_string())?;
+            Ok(json!({"path": path.display().to_string()}))
         }
         "git.remoteAuth" => {
             let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());

@@ -17,11 +17,12 @@ ColumnLayout {
     Component.onCompleted: ipc.skillsRefresh()
 
     function sourceLabel(source) {
-        return source === "project" ? section.t("McpProject", "This project")
-             : source === "serika" ? "Serika"
-             : source.indexOf("claude") === 0 ? (source.indexOf("plugin") >= 0 ? section.t("SkillsClaudePlugin", "Claude Code plugin") : "Claude Code")
-             : source === "codex" ? "Codex"
-             : source === "agents" ? "~/.agents" : source
+        const s = (source || "").toLowerCase()
+        return s === "project" ? section.t("McpProject", "This project")
+             : s === "serika" ? "Serika"
+             : s.indexOf("claude") === 0 ? (s.indexOf("plugin") >= 0 ? section.t("SkillsClaudePlugin", "Claude Code plugin") : "Claude Code")
+             : s === "codex" ? "Codex"
+             : s === "agents" ? "~/.agents" : source
     }
 
     SettingsCard {

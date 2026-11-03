@@ -18,19 +18,24 @@ Popup {
     width: Math.min(maxWidth, (parent ? parent.width : 800) - 32)
     closePolicy: closable ? (Popup.CloseOnEscape | Popup.CloseOnPressOutside) : Popup.NoAutoClose
 
-    Overlay.modal: Rectangle { color: "#b3000000" }
+    Overlay.modal: Rectangle {
+        color: "#99000000"
+        Behavior on opacity { NumberAnimation { duration: Theme.motionBase } }
+    }
     background: Rectangle {
         radius: 16
         color: Theme.card
         border.width: 1
         border.color: Theme.border
     }
+    // A soft spring in, a quick fade out.
     enter: Transition {
-        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 130; easing.type: Easing.OutCubic }
-        NumberAnimation { property: "scale"; from: 0.97; to: 1; duration: 130; easing.type: Easing.OutCubic }
+        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.motionBase; easing.type: Theme.easeOut }
+        NumberAnimation { property: "scale"; from: 0.94; to: 1; duration: Theme.motionSlow; easing.type: Easing.OutBack; easing.overshoot: 0.6 }
     }
     exit: Transition {
-        NumberAnimation { property: "opacity"; to: 0; duration: 90 }
+        NumberAnimation { property: "opacity"; to: 0; duration: Theme.motionFast; easing.type: Easing.InCubic }
+        NumberAnimation { property: "scale"; to: 0.97; duration: Theme.motionFast; easing.type: Easing.InCubic }
     }
 
     contentItem: ColumnLayout {

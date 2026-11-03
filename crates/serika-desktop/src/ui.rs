@@ -1413,7 +1413,7 @@ impl SerikaApp {
         self.catalog = screenshot_catalog();
         self.profile = Some(AccountProfile {
             id: "screenshot".into(),
-            username: "pikachubolk".into(),
+            username: "alex".into(),
             email: String::new(),
             is_premium: true,
             is_verified: Some(true),
@@ -2162,8 +2162,8 @@ impl SerikaApp {
         std::env::var("USERNAME")
             .or_else(|_| std::env::var("USER"))
             .ok()
-            .filter(|u| !u.trim().is_empty() && !u.eq_ignore_ascii_case("neoforce"))
-            .unwrap_or_else(|| "pikachubolk".to_string())
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or_else(|| "there".to_string())
     }
 
     fn t(&self, key: Msg) -> &'static str {

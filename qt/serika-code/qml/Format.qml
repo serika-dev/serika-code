@@ -514,8 +514,9 @@ QtObject {
         var keep = []
         function hold(html) { keep.push(html); return "\u0001" + (keep.length - 1) + "\u0001" }
         var s = (src || "").replace(/`([^`\n]+)`/g, function (m, code) {
-            return hold("<span style=\"font-family:'" + c.mono + "';background-color:" + c.code + ";color:" + c.codeText + ";\">&nbsp;"
-                        + escapeHtml(code) + "&nbsp;</span>")
+            // Thin no-break spaces pad the tint without a full gap before punctuation.
+            return hold("<span style=\"font-family:'" + c.mono + "';background-color:" + c.code + ";color:" + c.codeText + ";\"> "
+                        + escapeHtml(code) + " </span>")
         })
         s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)[^)]*\)/g, function (m, alt, url) {
             return hold("<a href=\"" + escapeHtml(url) + "\" style=\"color:" + c.link + ";text-decoration:none;\">🖼 " + escapeHtml(alt || url) + "</a>")

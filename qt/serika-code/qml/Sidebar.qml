@@ -21,12 +21,72 @@ Rectangle {
     readonly property string groupBy: ["projects", "date", "none"].indexOf(ipc.ui.sidebarGroup) >= 0 ? ipc.ui.sidebarGroup : "projects"
     readonly property string sortBy: ["recent", "created", "title"].indexOf(ipc.ui.sidebarSort) >= 0 ? ipc.ui.sidebarSort : "recent"
     readonly property bool runningFirst: ipc.ui.sidebarRunningFirst !== false
+    // Chats plus new chats that have no message yet (drafts), which show at once.
+    readonly property var allChats: {
+        const keyOf = function (path) {
+            for (let i = 0; i < ipc.projects.length; i++)
+                if (ipc.projects[i].path === path) return ipc.projects[i].key
+            return (path || "").replace(/\\/g, "/").toLowerCase()
+        }
+        const fresh = ipc.drafts.filter(function (d) { return d.fresh }).map(function (d) {
+            const firstLine = (d.text || "").trim().split("\n")[0]
+            return { id: d.id, title: firstLine.length > 0 ? firstLine : "", updatedAt: d.updatedAt, createdAt: d.createdAt,
+                     project: d.project, key: keyOf(d.project), draft: true }
+        })
+        return fresh.concat(ipc.sessions)
+    }
+    readonly property var draftIds: {
+        const map = {}
+        ipc.drafts.forEach(function (d) { if ((d.text || "").trim().length > 0) map[d.id] = true })
+        return map
+    }
     readonly property var rows: groupBy === "projects"
-        ? Format.projectRows(ipc.projects, ipc.sessions, filter.text, collapsed, expanded, chatLimit, ipc.liveChats, sortBy, runningFirst)
-        : Format.chatRows(ipc.sessions, filter.text, collapsed, ipc.liveChats, groupBy, sortBy, runningFirst)
+        ? Format.projectRows(ipc.projects, allChats, filter.text, collapsed, expanded, chatLimit, ipc.liveChats, sortBy, runningFirst)
+        : Format.chatRows(allChats, filter.text, collapsed, ipc.liveChats, groupBy, sortBy, runningFirst)
     function t(key, values) { return Format.t(dict, key, values) }
+
+    ListModel { id: rowModel }
+    function rowKey(r) { return r.kind + ":" + (r.id || r.key || r.path || "") }
+    // Bring rowModel in line with `rows`: move, insert, update or remove only what changed.
+    function syncRows() {
+        const list = side.rows
+        for (let i = 0; i < list.length; i++) {
+            const key = rowKey(list[i])
+            const json = JSON.stringify(list[i])
+            if (i < rowModel.count && rowModel.get(i).key !== key) {
+                let found = -1
+                for (let j = i + 1; j < rowModel.count; j++)
+                    if (rowModel.get(j).key === key) { found = j; break }
+                if (found >= 0) rowModel.move(found, i, 1)
+                else rowModel.insert(i, { key: key, json: json })
+            }
+            if (i < rowModel.count) {
+                if (rowModel.get(i).json !== json) rowModel.setProperty(i, "json", json)
+            } else {
+                rowModel.append({ key: key, json: json })
+            }
+        }
+        while (rowModel.count > list.length) rowModel.remove(rowModel.count - 1)
+    }
+    onRowsChanged: syncRows()
+    Component.onCompleted: syncRows()
     function openAccount() { accountMenu.open() }
     function focusSearch() { filter.forceActiveFocus() }
+    // Chats in the order the sidebar shows them, for keyboard switching.
+    function chatIds() {
+        return side.rows.filter(function (r) { return r.kind === "session" }).map(function (r) { return r.id })
+    }
+    function openNth(n) {
+        const ids = chatIds()
+        if (n < ids.length) ipc.openSession(ids[n])
+    }
+    function step(delta) {
+        const ids = chatIds()
+        if (ids.length === 0) return
+        const current = ipc.activeSession.length > 0 ? ipc.activeSession : ipc.currentDraft
+        const at = ids.indexOf(current)
+        ipc.openSession(ids[(at < 0 ? 0 : at + delta + ids.length) % ids.length])
+    }
     // Settings of the project you are in (the first project row otherwise).
     function openProjectSettings() {
         const heads = side.rows.filter(function (r) { return r.kind === "project" })
@@ -277,13 +337,29 @@ Rectangle {
             Layout.topMargin: 2
             clip: true
             spacing: 1
-            model: side.rows
+            // Rows live in a model updated in place, so new chats slide in and the rest glide
+            // aside instead of the whole list being rebuilt.
+            model: rowModel
+            add: Transition {
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.motionBase; easing.type: Theme.easeOut }
+                    NumberAnimation { property: "x"; from: -10; to: 0; duration: Theme.motionSlow; easing.type: Theme.easeEmphasis }
+                }
+            }
+            remove: Transition {
+                NumberAnimation { property: "opacity"; to: 0; duration: Theme.motionFast; easing.type: Easing.InCubic }
+            }
+            displaced: Transition {
+                NumberAnimation { properties: "x,y"; duration: Theme.motionBase; easing.type: Theme.easeEmphasis }
+                NumberAnimation { property: "opacity"; to: 1; duration: Theme.motionFast }
+            }
             boundsBehavior: Flickable.StopAtBounds
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 6 }
 
             delegate: Item {
                 id: cell
-                required property var modelData
+                required property string json
+                readonly property var modelData: JSON.parse(json)
                 width: ListView.view.width
                 height: loader.item ? loader.item.implicitHeight : 34
 
@@ -521,11 +597,13 @@ Rectangle {
                     SessionRow {
                         sessionId: cell.modelData.id
                         title: cell.modelData.title
+                        draft: cell.modelData.id.indexOf("draft:") === 0
+                        unsent: side.draftIds[cell.modelData.id] === true
                         indent: cell.modelData.flat ? 8 : 22
                         // Without project groups, say which folder the chat belongs to.
                         time: cell.modelData.flat ? Format.ellipsize(cell.modelData.folder, 12) + " · " + Format.relTime(cell.modelData.updatedAt)
                                                   : Format.relTime(cell.modelData.updatedAt)
-                        active: cell.modelData.id === ipc.activeSession
+                        active: cell.modelData.id === ipc.activeSession || (cell.modelData.id === ipc.currentDraft && ipc.activeSession.length === 0)
                     }
                 }
 

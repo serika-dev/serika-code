@@ -7,7 +7,7 @@ import QtQuick.Layouts
 ColumnLayout {
     id: view
     property string text: ""
-    spacing: 10
+    spacing: 14
 
     // Colors the inline renderer bakes into rich text.
     readonly property var inlineColors: ({
@@ -16,7 +16,8 @@ ColumnLayout {
         link: Theme.accentSecondary,
         mono: Theme.mono
     })
-    function rich(s) { return Format.mdInline(s, inlineColors) }
+    // A touch more leading than the default, like a reading view.
+    function rich(s) { return "<div style=\"line-height:138%\">" + Format.mdInline(s, inlineColors) + "</div>" }
 
     // Code fences first, then each prose part split into its own blocks.
     readonly property var blocks: {
@@ -37,6 +38,7 @@ ColumnLayout {
         wrapMode: TextEdit.Wrap
         textFormat: TextEdit.RichText
         color: Theme.text
+
         font.family: Theme.sans
         font.pixelSize: Theme.chatPx
         onLinkActivated: (link) => Qt.openUrlExternally(link)

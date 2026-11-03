@@ -2,6 +2,44 @@
 
 All notable changes to Serika Code are documented in this file.
 
+## [0.2.0] - 2026-11-03
+
+The Qt desktop app grows into a full workspace.
+
+### Added
+- **Chats that keep running**: switch chat or project and a running chat carries on in the
+  background; the sidebar shows running, waiting-for-approval and finished chats, with stop
+  from the sidebar.
+- **Drafts**: a new chat shows in the sidebar at once; unsent text is kept per chat.
+- **Git panel**: stashes found by ticket number with per-file diffs and apply/pop/drop;
+  incoming and outgoing commits; working changes; history; fetch, pull, push and publish with
+  visible progress; branch search, switch and create.
+- **Git accounts**: commit identity and sign-in login per project, GitHub logins imported from
+  the GitHub CLI and Git Credential Manager (with profile pictures); network commands sign in
+  as the project's login and fall back to your other logins.
+- **Project settings**: overview, Git, Agent (instruction files, skills, MCP) and danger zone.
+- **Project instructions**: `AGENTS.md`, `CLAUDE.md` and `.serika/instructions.md` are read
+  by Serika's agent.
+- **MCP**: the 2026-07-28 revision plus every earlier one over stdio, Streamable HTTP and
+  HTTP+SSE; servers imported from Claude Code, Claude Desktop, Codex and `.mcp.json`;
+  Serika's browser served to Claude Code and Codex.
+- **Skills** from the project, Serika, Claude Code (and plugins) and Codex.
+- **Terminal panel** and **docks**: right and bottom docks with draggable tabs, resizable in
+  width and height.
+- **Browser**: live screencast, real mouse input, clipboard, favicons, reliable tabs.
+- **Sidebar**: group by project, date or one list; sort by activity, newest or name;
+  `Ctrl+1…9` and `Ctrl+Tab` to move between chats.
+- Richer Markdown: headings, nested and task lists, callouts, tables sized to their content.
+
+### Changed
+- Much faster: model and account lists answer from saved copies and refresh in the
+  background; git overview uses fewer git calls; GitHub CLI answers are cached.
+- Smoother motion: springy dialogs, animated sidebar rows, smooth wheel scrolling everywhere.
+
+### Fixed
+- Tab switching races in the browser and docks, lost layout writes, CLIs installed after start
+  not being found, removing the current project, and many smaller issues.
+
 ## [0.1.0] - 2026-10-30
 
 ### Added

@@ -339,7 +339,7 @@ pub async fn detect_accounts() -> Vec<Account> {
 }
 
 /// Add the GitHub logins found on this computer that are not accounts yet (and that you have
-/// not removed before). Returns how many were added.
+/// not removed before). Returns how many accounts were added or updated.
 pub async fn import_detected(data_dir: &Path) -> usize {
     let found = detect_accounts().await;
     let mut book = load_book(data_dir);
@@ -365,7 +365,7 @@ pub async fn import_detected(data_dir: &Path) -> usize {
     if added > 0 || changed {
         let _ = save_book(data_dir, &book);
     }
-    added
+    added + usize::from(changed)
 }
 
 /// How a project reaches its remote: the login it signs in with, and the GitHub CLI logins
@@ -381,16 +381,48 @@ pub struct RemoteAuth {
 
 pub async fn remote_auth(project: &Path) -> RemoteAuth {
     let mut out = RemoteAuth::default();
-    if let Some(remote) = active_remote(project).await {
-        out.url = git(project, &["remote", "get-url", &remote], TIMEOUT).await.map(|u| u.trim().to_string()).unwrap_or_default();
-        out.host = https_host(project, &remote).await.unwrap_or_default();
-        out.remote = remote;
+    // Two git calls side by side: the upstream, and every remote URL plus the login.
+    let upstream = git(project, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], TIMEOUT);
+    let config = git(project, &["config", "--get-regexp", r"^(remote\..*\.url|credential\.username)$"], TIMEOUT);
+    let (upstream, config) = tokio::join!(upstream, config);
+    let mut urls: Vec<(String, String)> = Vec::new();
+    for line in config.unwrap_or_default().lines() {
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        if key.eq_ignore_ascii_case("credential.username") {
+            out.login = value.trim().to_string();
+        } else if let Some(name) = key.strip_prefix("remote.").and_then(|k| k.strip_suffix(".url")) {
+            urls.push((name.to_string(), value.trim().to_string()));
+        }
     }
-    out.login = config_get(project, "credential.username").await;
+    let wanted = upstream.ok().and_then(|u| u.trim().split_once('/').map(|(r, _)| r.to_string()));
+    let chosen = wanted
+        .and_then(|w| urls.iter().find(|(n, _)| *n == w).cloned())
+        .or_else(|| urls.iter().find(|(n, _)| n == "origin").cloned())
+        .or_else(|| urls.first().cloned());
+    if let Some((remote, url)) = chosen {
+        out.host = url
+            .strip_prefix("https://")
+            .and_then(|rest| rest.split('/').next())
+            .map(|h| h.rsplit('@').next().unwrap_or(h).to_string())
+            .unwrap_or_default();
+        out.remote = remote;
+        out.url = url;
+    }
     if !out.host.is_empty() {
         out.logins = gh_logins(&out.host).await;
     }
     out
+}
+
+/// Ask the GitHub CLI once in the background, so the first git panel or project settings
+/// do not wait for it.
+pub fn warm_up(data_dir: std::path::PathBuf) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            let _ = gh_logins("github.com").await;
+            let _ = import_detected(&data_dir).await;
+        });
+    }
 }
 
 /// Sign in to the remote as `login` from now on ("" = whatever git picks by default).
@@ -421,15 +453,30 @@ async fn config_get(project: &Path, key: &str) -> String {
     git(project, &["config", "--get", key], TIMEOUT).await.map(|v| v.trim().to_string()).unwrap_or_default()
 }
 
+/// One `git config` call for all five settings (each git start costs tens of milliseconds).
 pub async fn identity(project: &Path) -> Identity {
-    let (name, email, username, ssh_command, account) = tokio::join!(
-        config_get(project, "user.name"),
-        config_get(project, "user.email"),
-        config_get(project, "credential.username"),
-        config_get(project, "core.sshCommand"),
-        config_get(project, "serika.account"),
-    );
-    Identity { name, email, username, ssh_command, account }
+    let text = git(
+        project,
+        &["config", "--get-regexp", r"^(user\.name|user\.email|credential\.username|core\.sshcommand|serika\.account)$"],
+        TIMEOUT,
+    )
+    .await
+    .unwrap_or_default();
+    let mut who = Identity::default();
+    // Later lines win, as in git: local settings come after global ones.
+    for line in text.lines() {
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        let value = value.to_string();
+        match key.to_ascii_lowercase().as_str() {
+            "user.name" => who.name = value,
+            "user.email" => who.email = value,
+            "credential.username" => who.username = value,
+            "core.sshcommand" => who.ssh_command = value,
+            "serika.account" => who.account = value,
+            _ => {}
+        }
+    }
+    who
 }
 
 /// Make this repository commit and authenticate as `account` (local config only), or go back
@@ -546,6 +593,7 @@ fn lock_for(project: &Path) -> std::sync::Arc<tokio::sync::Mutex<()>> {
 }
 
 const LOG_FORMAT: &str = "--format=%H%x1f%h%x1f%s%x1f%an%x1f%ct%x1e";
+const SIDES_FORMAT: &str = "--format=%m%x1f%H%x1f%h%x1f%s%x1f%an%x1f%ct%x1e";
 
 fn parse_commits(text: &str) -> Vec<Commit> {
     text.split('\u{1e}')
@@ -639,37 +687,48 @@ fn parse_stashes(text: &str) -> Vec<Stash> {
 /// Everything the panel shows, in one call. A folder that is not a repository says so.
 pub async fn overview(project: &Path) -> Result<Overview> {
     let mut overview = Overview::default();
-    let root = match git(project, &["rev-parse", "--show-toplevel"], TIMEOUT).await {
-        Ok(root) => root.trim().to_string(),
+    // The repository root and where FETCH_HEAD lives, in one call.
+    let paths = match git(project, &["rev-parse", "--show-toplevel", "--git-path", "FETCH_HEAD"], TIMEOUT).await {
+        Ok(text) => text,
         Err(_) => return Ok(overview),
     };
+    let mut lines = paths.lines();
     overview.repo = true;
-    overview.root = root;
+    overview.root = lines.next().unwrap_or("").trim().to_string();
+    let fetch_head = lines.next().unwrap_or("").trim().to_string();
+    // Status (with branch and upstream counts), stashes, history and identity side by side;
+    // incoming and outgoing come from one log over both sides of the upstream.
     let status = git(project, &["status", "--porcelain=v2", "--branch", "--untracked-files=all"], TIMEOUT);
     let stashes = git(project, &["stash", "list", "--format=%gd%x1f%gs%x1f%ct%x1e"], TIMEOUT);
     let history = git(project, &["log", "-n", "40", LOG_FORMAT], TIMEOUT);
-    let fetch_head = git(project, &["rev-parse", "--git-path", "FETCH_HEAD"], TIMEOUT);
+    let sides = git(project, &["log", "-n", "200", "--left-right", SIDES_FORMAT, "HEAD...@{upstream}"], TIMEOUT);
     let who = identity(project);
-    let (status, stashes, history, fetch_head, who) = tokio::join!(status, stashes, history, fetch_head, who);
+    let (status, stashes, history, sides, who) = tokio::join!(status, stashes, history, sides, who);
     overview.identity = who;
     parse_status(&status?, &mut overview);
     overview.stashes = parse_stashes(&stashes.unwrap_or_default());
     overview.history = parse_commits(&history.unwrap_or_default());
-    if let Ok(path) = fetch_head {
-        let path = Path::new(path.trim());
+    if overview.upstream.is_some() {
+        // "<" marks commits only on HEAD (to push), ">" only on the upstream (to pull).
+        for record in sides.unwrap_or_default().split('\u{1e}') {
+            let record = record.trim_matches(['\n', '\r']);
+            let Some((mark, rest)) = record.split_once('\u{1f}') else { continue };
+            let Some(commit) = parse_commits(&format!("{rest}\u{1e}")).into_iter().next() else { continue };
+            if mark == ">" {
+                overview.incoming.push(commit);
+            } else {
+                overview.outgoing.push(commit);
+            }
+        }
+    }
+    if !fetch_head.is_empty() {
+        let path = Path::new(&fetch_head);
         let path = if path.is_absolute() { path.to_path_buf() } else { project.join(path) };
         overview.fetched_at = std::fs::metadata(path)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64);
-    }
-    if overview.upstream.is_some() {
-        let incoming = git(project, &["log", "-n", "100", LOG_FORMAT, "HEAD..@{upstream}"], TIMEOUT);
-        let outgoing = git(project, &["log", "-n", "100", LOG_FORMAT, "@{upstream}..HEAD"], TIMEOUT);
-        let (incoming, outgoing) = tokio::join!(incoming, outgoing);
-        overview.incoming = parse_commits(&incoming.unwrap_or_default());
-        overview.outgoing = parse_commits(&outgoing.unwrap_or_default());
     }
     Ok(overview)
 }
@@ -777,8 +836,34 @@ async fn https_host(project: &Path, remote: &str) -> Option<String> {
     Some(host.to_string())
 }
 
+/// Answers from the GitHub CLI change rarely; keep them for a few minutes.
+fn gh_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<String>)>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn cached(key: &str) -> Option<Vec<String>> {
+    let cache = gh_cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache.get(key).filter(|(at, _)| at.elapsed() < Duration::from_secs(300)).map(|(_, v)| v.clone())
+}
+
+fn remember(key: &str, value: Vec<String>) {
+    gh_cache().lock().unwrap_or_else(|e| e.into_inner()).insert(key.to_string(), (std::time::Instant::now(), value));
+}
+
 /// GitHub CLI logins for `host`, the active one first.
 pub async fn gh_logins(host: &str) -> Vec<String> {
+    let key = format!("logins:{host}");
+    if let Some(list) = cached(&key) {
+        return list;
+    }
+    let list = gh_logins_now(host).await;
+    remember(&key, list.clone());
+    list
+}
+
+async fn gh_logins_now(host: &str) -> Vec<String> {
     let Some(gh) = crate::agents::find_cli("gh", None) else { return Vec::new() };
     let mut cmd = Command::new(gh);
     cmd.args(["auth", "status", "--json", "hosts"]).stdin(std::process::Stdio::null()).kill_on_drop(true);
@@ -800,6 +885,18 @@ pub async fn gh_logins(host: &str) -> Vec<String> {
 }
 
 async fn gh_token(host: &str, login: &str) -> Option<String> {
+    let key = format!("token:{host}:{}", login.to_ascii_lowercase());
+    if let Some(token) = cached(&key) {
+        return token.into_iter().next();
+    }
+    let token = gh_token_now(host, login).await;
+    if let Some(t) = &token {
+        remember(&key, vec![t.clone()]);
+    }
+    token
+}
+
+async fn gh_token_now(host: &str, login: &str) -> Option<String> {
     let gh = crate::agents::find_cli("gh", None)?;
     let mut cmd = Command::new(gh);
     cmd.args(["auth", "token", "--hostname", host, "--user", login]).stdin(std::process::Stdio::null()).kill_on_drop(true);

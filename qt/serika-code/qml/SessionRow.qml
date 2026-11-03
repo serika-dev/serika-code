@@ -12,6 +12,8 @@ Rectangle {
     property string time: ""
     property bool editing: false
     property bool confirming: false
+    property bool draft: false           // a new chat with no message yet
+    property bool unsent: false          // text typed but not sent
     readonly property var dict: ipc.strings
     // "running", "waiting" (for your approval), "done" (finished while you were elsewhere) or ""
     readonly property string live: ipc.liveChats[sessionId] || ""
@@ -42,17 +44,41 @@ Rectangle {
         anchors.leftMargin: 10 + row.indent
         anchors.right: parent.right
         anchors.rightMargin: (area.containsMouse || menuButton.hovered || menu.opened) ? (row.working ? 64 : 36)
-                           : (row.live.length > 0 ? 34 : (row.time.length > 0 ? timeLabel.implicitWidth + 18 : 10))
+                           : (row.live.length > 0 ? 34 : (draftTag.visible ? draftTag.width + 14 : (row.time.length > 0 ? timeLabel.implicitWidth + 18 : 10)))
         anchors.verticalCenter: parent.verticalCenter
         text: row.title.length > 0 ? row.title : Format.t(row.dict, "NewChat")
         elide: Text.ElideRight
         color: row.active ? Theme.text : (area.containsMouse ? Theme.text : Theme.textSecondary)
+        font.italic: row.draft && row.title.length === 0
         font.family: Theme.sans
         font.pixelSize: 14
     }
+    // Draft marker: a tag for a new chat, a pencil for unsent text in an existing chat
+    Rectangle {
+        id: draftTag
+        visible: (row.draft || row.unsent) && !row.editing && !row.confirming && row.live.length === 0 && !(area.containsMouse || menuButton.hovered || menu.opened)
+        anchors.right: parent.right
+        anchors.rightMargin: 8
+        anchors.verticalCenter: parent.verticalCenter
+        width: row.draft ? draftText.implicitWidth + 12 : 20
+        height: 18
+        radius: 6
+        color: row.draft ? Theme.accentSoft : "transparent"
+        Text {
+            id: draftText
+            visible: row.draft
+            anchors.centerIn: parent
+            text: Format.tr(row.dict, "Draft", "Draft")
+            color: Theme.accentSecondary
+            font.family: Theme.sans
+            font.pixelSize: 10
+            font.weight: Font.DemiBold
+        }
+        Icon { visible: !row.draft; anchors.centerIn: parent; name: "edit-2"; size: 12; color: Theme.accentSecondary }
+    }
     Text {
         id: timeLabel
-        visible: !row.editing && !row.confirming && row.time.length > 0 && row.live.length === 0 && !(area.containsMouse || menuButton.hovered || menu.opened)
+        visible: !row.editing && !row.confirming && row.time.length > 0 && row.live.length === 0 && !draftTag.visible && !(area.containsMouse || menuButton.hovered || menu.opened)
         anchors.right: parent.right
         anchors.rightMargin: 10
         anchors.verticalCenter: parent.verticalCenter
@@ -115,7 +141,7 @@ Rectangle {
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
         onClicked: ipc.openSession(row.sessionId)
-        onDoubleClicked: row.beginEdit()
+        onDoubleClicked: if (!row.draft) row.beginEdit()
     }
     // Stop a chat that is running in the background without opening it
     IconButton {
@@ -150,7 +176,7 @@ Rectangle {
             width: 176
             contentItem: ColumnLayout {
                 spacing: 0
-                MenuRow { icon: "edit-2"; label: Format.t(row.dict, "Rename"); onTriggered: { menu.close(); row.beginEdit() } }
+                MenuRow { visible: !row.draft; icon: "edit-2"; label: Format.t(row.dict, "Rename"); onTriggered: { menu.close(); row.beginEdit() } }
                 MenuRow { icon: "trash-2"; label: Format.t(row.dict, "Delete"); danger: true; onTriggered: { menu.close(); row.confirming = true } }
             }
         }

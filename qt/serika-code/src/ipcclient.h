@@ -66,6 +66,8 @@ class IpcClient : public QObject {
     Q_PROPERTY(QVariantList terminals READ terminals NOTIFY terminalsChanged)
     Q_PROPERTY(QVariantMap git READ git NOTIFY gitChanged)
     Q_PROPERTY(QVariantList gitBranches READ gitBranches NOTIFY gitBranchesChanged)
+    Q_PROPERTY(QVariantList drafts READ drafts NOTIFY draftsChanged)
+    Q_PROPERTY(QString currentDraft READ currentDraft NOTIFY draftsChanged)
     Q_PROPERTY(QVariantMap gitAccounts READ gitAccounts NOTIFY gitAccountsChanged)
     Q_PROPERTY(QVariantMap mcp READ mcp NOTIFY mcpChanged)
     Q_PROPERTY(QVariantList skills READ skills NOTIFY skillsChanged)
@@ -138,6 +140,8 @@ public:
     QVariantList terminals() const { return m_terminals; }
     QVariantMap git() const { return m_git; }
     QVariantList gitBranches() const { return m_gitBranches; }
+    QVariantList drafts() const;
+    QString currentDraft() const { return m_draftKey; }
     QVariantMap gitAccounts() const { return m_gitAccounts; }
     QVariantMap mcp() const { return m_mcp; }
     QVariantList skills() const { return m_skills; }
@@ -197,6 +201,11 @@ public:
     Q_INVOKABLE void gitAccountDefault(const QString &project, const QString &id);
     // Project settings: how a project commits and signs in to its remote
     Q_INVOKABLE void gitRemoteAuth(const QString &project);
+    Q_INVOKABLE void projectDetails(const QString &project);
+    // Unsent text, per chat; a new chat is a draft in the sidebar until its first message.
+    Q_INVOKABLE void setDraftText(const QString &text);
+    Q_INVOKABLE QString draftText() const;
+    Q_INVOKABLE void projectCreateInstructions(const QString &project);
     Q_INVOKABLE void gitSetLogin(const QString &project, const QString &login);
     Q_INVOKABLE void gitApplyAccountIn(const QString &project, const QString &id);
     Q_INVOKABLE void gitStashDiff(int index);
@@ -301,8 +310,10 @@ signals:
     void liveChatsChanged();
     void gitChanged();
     void gitBranchesChanged();
+    void draftsChanged();
     void gitAccountsChanged();
     void gitRemoteAuthReady(const QString &project, const QVariantMap &info);
+    void projectDetailsReady(const QString &project, const QVariantMap &details);
     void gitDiffReady(const QString &key, const QVariantList &files);
     void gitMessage(const QString &text, bool error);
 
@@ -345,6 +356,15 @@ private:
     void handleBackgroundEvent(LiveRun &run, const QString &event, const QJsonObject &obj);
     void finishRun(const QString &runId);
     QVariantMap m_git;
+    // Drafts by key: a session id, or "draft:<uuid>" for a chat with no message yet.
+    // Each is { text, project, updatedAt, createdAt }. Kept in ui.json as "drafts".
+    QVariantMap m_drafts;
+    QString m_draftKey;            // the "draft:" key of the new chat on screen, if any
+    bool m_draftsLoaded = false;
+    QTimer m_draftSave;
+    QString currentDraftKey() const { return m_activeSession.isEmpty() ? m_draftKey : m_activeSession; }
+    void leaveDraft();             // drop the new chat on screen if nothing was typed in it
+    void saveDrafts();
     // The git operation in progress, kept apart so refreshes don't wipe it:
     // {action, index, label, startedAt}. While set, no other git action starts.
     QVariantMap m_gitBusy;

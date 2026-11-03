@@ -1,91 +1,149 @@
+<div align="center">
+
+<img src="qt/serika-code/app/serika-code-256.png" width="96" alt="Serika Code" />
+
 # Serika Code
 
-Serika Code is a native coding agent for the Serika ecosystem. One Rust runtime drives a CLI (`serika`) and a desktop app (`serika-desktop`). Both sign in with a Serika account, call SerikaAI through the existing chat API, and stay inside that account's usage limits.
+**A fast, native coding agent for your desktop and terminal.**
 
-It can read a project, edit several files, run build and test commands, show diffs, and keep the session locally. It is not a chatbot with a terminal bolted on, and it is not a website in a window.
+Chat with any model, let it read and edit your project, run commands, browse the web, and
+review every change, in one app that feels as quick as your editor.
 
-## What it does
+[Download](https://github.com/serika-dev/serika-code/releases/latest) ·
+[Install](#install) ·
+[Features](#features) ·
+[Docs](#docs)
 
-- Streams replies from Serika (`POST /api/chat/message` on `https://api.serika.dev`).
-- Signs in through Serika Accounts (password or email link, refresh, logout).
-- Shows usage from `GET /api/chat/usage` — only the fields the server sends.
-- Reads, searches, and edits the project, with path checks and a permission mode.
-- Runs commands, with timeouts, streamed output, and approval for destructive ones.
-- Stores sessions in SQLite and credentials in the OS credential store.
+<img src="docs/screenshots/chat.png" alt="A chat in Serika Code: a reply with a code block, then the chat moving from one model to another" width="900" />
 
-## Platforms
+</div>
 
-Serika Code runs natively on **Windows**, **Linux** (X11 and Wayland), and **macOS** (Apple Silicon and Intel):
+## Why Serika Code
 
-- **Credentials**: Windows Credential Manager (`windows`), Secret Service / D-Bus keyring (`linux`), and macOS Keychain Services (`macos`).
-- **Config & Data**: `%APPDATA%\serika-code` / `%LOCALAPPDATA%\serika-code` on Windows, `$XDG_CONFIG_HOME/serika-code` / `$XDG_DATA_HOME/serika-code` on Linux, and `~/Library/Application Support/serika-code` on macOS.
-- **Desktop (`serika-desktop`)**: Native window and OpenGL (`glow`) renderer via `eframe`/`winit` across Win32, X11, Wayland, and Cocoa/AppKit.
-- **CLI (`serika`)**: Headless native binary with no GUI dependency.
+- **Native and quick.** A Qt 6 desktop app and a Rust runtime. No browser in a window, no
+  Electron. Lists, panels and dialogs open at once and move with smooth, springy animations.
+- **Every model in one place.** SerikaAI models, plus Claude Code and Codex on your own
+  subscriptions. Switch models in the middle of a chat and the new one gets the context.
+- **Built for real projects.** Edits across files, a terminal, a real browser, a Git panel,
+  sub-agents, MCP servers and skills, all in the same window.
 
-## Quick Install
+## Features
 
-### Linux & macOS (Bash)
+### Chats that keep going
+
+Start a chat, open another one, switch project: the first one keeps working in the
+background. The sidebar shows which chats are running, which wait for your approval, and
+which finished while you were away. A new chat shows up in the sidebar as a draft right away,
+and anything you typed but did not send is kept for later.
+
+### Every change, reviewed
+
+<img src="docs/screenshots/changes.png" alt="The Changes panel next to a chat, showing a diff with line numbers" width="900" />
+
+Each edit the agent makes appears in the Changes panel as a line-numbered diff, linked from
+the tool call that made it. Rewind a chat to undo its file changes, or fork it to try another
+direction.
+
+### Git, the way you work
+
+<img src="docs/screenshots/git.png" alt="The Git panel: branch picker, sync card with pull and push, and stashes labelled by ticket" width="900" />
+
+- **Stashes by ticket.** Keep one stash per ticket, find it by number, see its files and
+  diffs, then apply, pop or drop it.
+- **Sync at a glance.** What is waiting to pull, what is not pushed yet, and one click for
+  each, with progress you can see. Nothing runs twice if you click twice.
+- **Branches.** Search, switch (remote branches get a local copy that tracks them) or create.
+- **Accounts per project.** Commit as your work or personal identity per project. GitHub
+  logins from the GitHub CLI are picked up on their own, and fetch, pull and push sign in with
+  the right one.
+
+### A browser the agent can use
+
+<img src="docs/screenshots/browser.png" alt="The built-in browser with tabs, an address bar and a live page" width="900" />
+
+A real Chromium-based browser, streamed live into the app. The agent opens pages, reads them,
+clicks and types; you can watch, scroll and take over. Claude Code and Codex chats get the
+same browser through MCP.
+
+### Sub-agents
+
+<img src="docs/screenshots/agents.png" alt="The Sub-agents panel with one agent working and one finished" width="900" />
+
+Let a chat hand side tasks to sub-agents that run in parallel, each on the model you pick,
+and follow them in their own panel.
+
+### Make it yours
+
+- **Docks like VS Code.** Changes, Git, Browser, Sub-agents and Terminal are tabs you can drag
+  between a right and a bottom dock, resize, and maximize.
+- **Command palette** (`Ctrl+K`) and keyboard shortcuts for everything; `Ctrl+1…9` and
+  `Ctrl+Tab` move between chats.
+- **Group the sidebar** by project, by date or as one list, and sort it your way.
+- **Project settings** for each folder: who it commits as, which login it uses, its
+  instruction files, skills and MCP servers.
+- **Themes, accent colors and text sizes.**
+
+<img src="docs/screenshots/palette.png" alt="The command palette" width="900" />
+
+### Works with what you already use
+
+- **MCP**: the current spec (2026-07-28) and every earlier revision, over stdio,
+  Streamable HTTP and HTTP+SSE. Servers you set up in Claude Code, Claude Desktop, Codex or a
+  project's `.mcp.json` appear on their own.
+- **Skills**: `SKILL.md` folders from your project, Claude Code (and its plugins) and Codex.
+- **Project instructions**: `AGENTS.md`, `CLAUDE.md` or `.serika/instructions.md`, the same
+  files other coding agents read.
+
+## Install
+
+Download the latest build from [Releases](https://github.com/serika-dev/serika-code/releases/latest),
+or install the CLI with one line:
 
 ```bash
+# Linux and macOS
 curl -fsSL https://raw.githubusercontent.com/serika-dev/serika-code/main/install.sh | bash
 ```
 
-### Windows (PowerShell)
-
 ```powershell
+# Windows
 irm https://raw.githubusercontent.com/serika-dev/serika-code/main/install.ps1 | iex
 ```
 
-### Local Setup, Self-Update & Build
-
-See [docs/BUILDING.md](docs/BUILDING.md).
-
-```bash
-cargo build --release
-cargo test --workspace
-
-# Register binaries in user PATH and create desktop/application shortcuts:
-serika setup
-
-# Check for or install the latest release with SHA-256 verification:
-serika update --check
-serika update
-```
+To build it yourself, see [docs/BUILDING.md](docs/BUILDING.md).
 
 ## Use
 
 ```bash
-serika auth login
-serika doctor
-serika models
-serika usage
-serika git status
-serika desktop
+serika auth login          # sign in with your Serika account
+serika                     # chat in the terminal
 serika "Explain how this project is built"
+serika desktop             # open the desktop app
+serika doctor              # check your setup
 ```
 
-Command details: [docs/CLI.md](docs/CLI.md). Desktop: [docs/DESKTOP.md](docs/DESKTOP.md).
+More in [docs/CLI.md](docs/CLI.md) and [docs/DESKTOP.md](docs/DESKTOP.md).
 
-## Limits you should know
+## Good to know
 
-Serika's chat API meters each call and streams text. It does not return tool calls to the client. Local tools use a `serika-tool` block that this program parses and runs. That is documented in [docs/SERIKA_API.md](docs/SERIKA_API.md), including the routes that were not used because they do not apply the chat allowance.
-
-Permission checks are not a sandbox. See [docs/SECURITY.md](docs/SECURITY.md).
-
-The desktop UI is egui in a native window, not Qt. Qt was the preferred GUI and is not what shipped, because this tree is built without a Qt SDK. The reason is in [docs/ADR.md](docs/ADR.md).
-
-## License
-
-Apache-2.0. See [LICENSE](LICENSE). The implementation is original. Public coding-agent products were read for interaction ideas and were not copied.
+- Permission modes decide what the agent may do without asking; they are not a sandbox. See
+  [docs/SECURITY.md](docs/SECURITY.md).
+- Claude Code and Codex run on your own logins. Serika Code does not resell either.
+- Sessions are stored locally in SQLite; credentials go to your operating system's
+  credential store.
 
 ## Docs
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Building](docs/BUILDING.md)
-- [Configuration](docs/CONFIGURATION.md)
-- [Authentication](docs/AUTHENTICATION.md)
-- [Serika API](docs/SERIKA_API.md)
-- [Security](docs/SECURITY.md)
-- [CLI](docs/CLI.md)
-- [Desktop](docs/DESKTOP.md)
-- [Development](docs/DEVELOPMENT.md)
+[Architecture](docs/ARCHITECTURE.md) ·
+[Building](docs/BUILDING.md) ·
+[Configuration](docs/CONFIGURATION.md) ·
+[Authentication](docs/AUTHENTICATION.md) ·
+[Serika API](docs/SERIKA_API.md) ·
+[Security](docs/SECURITY.md) ·
+[CLI](docs/CLI.md) ·
+[Desktop](docs/DESKTOP.md) ·
+[Development](docs/DEVELOPMENT.md) ·
+[Changelog](CHANGELOG.md)
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
