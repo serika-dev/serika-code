@@ -10,6 +10,15 @@ All notable changes to Serika Code are documented in this file.
   `.deb` for Debian and Ubuntu. Every release builds them.
 - **Replies type out** at an even pace instead of landing in bursts, and new paragraphs fade in.
 - **Long messages** fold to a preview with "Show all N lines".
+- **Stash conflicts you can work through**: popping or applying a stash that clashes opens a
+  card with each place side by side (keep yours, keep the stash, or both), whole-file choices,
+  "Ask Serika" to resolve it for you, Undo, and Finish. A popped stash is only removed once
+  you finish. Merges, rebases and cherry-picks that stop on conflicts use the same card.
+- **Your own changes never block a stash**: they are set aside, the stash goes in, and they
+  come back on top (conflicts, if any, go to the same card).
+
+### Changed
+- Stash rows have labelled **Apply** and **Pop** buttons instead of copy and download icons.
 
 ### Fixed
 - Pasted text with `<...>` (an email, a log) showed as an empty bubble.

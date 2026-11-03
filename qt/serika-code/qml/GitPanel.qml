@@ -45,6 +45,45 @@ Item {
     property string stashSig: ""
 
     function tr(key, fallback, values) { return Format.tr(dict, key, fallback, values) }
+
+    // A small labelled button on a stash row: Apply, or Pop (filled)
+    component StashAction: Rectangle {
+        id: action
+        property string text: ""
+        property string tip: ""
+        property bool primary: false
+        readonly property bool hovered: actionArea.containsMouse
+        signal clicked()
+        anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+        implicitWidth: actionLabel.implicitWidth + 20
+        implicitHeight: 26
+        radius: 7
+        enabled: !panel.isBusy
+        opacity: enabled ? 1 : 0.5
+        color: primary ? (hovered ? Theme.accentHover : Theme.accent) : (hovered ? Theme.active : Theme.hover)
+        border.width: primary ? 0 : 1
+        border.color: Theme.borderSubtle
+        Behavior on color { ColorAnimation { duration: Theme.motionFast } }
+        Text {
+            id: actionLabel
+            anchors.centerIn: parent
+            text: action.text
+            color: action.primary ? "white" : Theme.text
+            font.family: Theme.sans
+            font.pixelSize: 12
+            font.weight: Font.DemiBold
+        }
+        MouseArea {
+            id: actionArea
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: action.clicked()
+        }
+        ToolTip.visible: hovered && tip.length > 0
+        ToolTip.delay: 500
+        ToolTip.text: tip
+    }
     // A ticket reference in a stash message: PROJ-123, #123 or a bare number of 3+ digits.
     function ticketOf(text) {
         const m = (text || "").match(/[A-Z][A-Z0-9]+-\d+|#\d+|\b\d{3,7}\b/)
@@ -96,7 +135,12 @@ Item {
             panel.diffs = next
             if (panel.loadingKey === key) panel.loadingKey = ""
         }
-        function onGitMessage(text, error) { panel.loadingKey = ""; panel.say(text, error) }
+        function onGitMessage(text, error) {
+            panel.loadingKey = ""
+            // While conflicts are open their card says it all; errors still show.
+            if (!error && panel.g.conflicts) { panel.note = ""; return }
+            panel.say(text, error)
+        }
         function onGitChanged() {
             // Stash numbers shift after a pop, drop or new stash; only then do cached stash
             // diffs go stale. The open one is fetched again so it never sits on "Loading".
@@ -785,6 +829,19 @@ Item {
                     }
                 }
 
+                // ---- A stash, merge or rebase that stopped on conflicts ----
+                Loader {
+                    Layout.fillWidth: true
+                    Layout.bottomMargin: 8
+                    active: panel.repo && !!panel.g.conflicts
+                    visible: active
+                    sourceComponent: ConflictCard {
+                        info: panel.g.conflicts || ({})
+                        root: panel.g.root || ""
+                        busy: panel.isBusy
+                    }
+                }
+
                 // ---- Stashes ----
                 RowLayout {
                     visible: panel.repo && panel.view === "stashes"
@@ -913,25 +970,18 @@ Item {
                                 // Actions, on hover or when open
                                 Row {
                                     visible: !stashCard.working && !panel.isBusy && (stashArea.containsMouse || stashCard.open || applyBtn.hovered || popBtn.hovered || dropBtn.hovered)
-                                    spacing: 2
-                                    IconButton {
+                                    spacing: 6
+                                    StashAction {
                                         id: applyBtn
-                                        icon: "copy"
-                                        iconSize: 13
-                                        implicitWidth: 28
-                                        implicitHeight: 28
-                                        tip: panel.tr("GitApply", "Apply (keep the stash)")
-                                        enabled: !panel.isBusy
+                                        text: panel.tr("GitApplyShort", "Apply")
+                                        tip: panel.tr("GitApply", "Put these changes in your working tree and keep the stash")
                                         onClicked: ipc.gitAction("stash.apply", stashCard.modelData.index, "", panel.tr("GitApplying", "Applying {s}", { s: stashCard.title }))
                                     }
-                                    IconButton {
+                                    StashAction {
                                         id: popBtn
-                                        icon: "download"
-                                        iconSize: 13
-                                        implicitWidth: 28
-                                        implicitHeight: 28
-                                        tip: panel.tr("GitPop", "Pop (apply and remove)")
-                                        enabled: !panel.isBusy
+                                        primary: true
+                                        text: panel.tr("GitPopShort", "Pop")
+                                        tip: panel.tr("GitPop", "Put these changes in your working tree and remove the stash")
                                         onClicked: ipc.gitAction("stash.pop", stashCard.modelData.index, "", panel.tr("GitPopping", "Popping {s}", { s: stashCard.title }))
                                     }
                                     IconButton {

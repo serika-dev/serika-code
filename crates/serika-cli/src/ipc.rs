@@ -567,6 +567,11 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
             let diff = serika_runtime::git::file_diff(&project, &path, untracked).await.map_err(|err| err.to_string())?;
             Ok(json!({"path": path, "diff": diff}))
         }
+        "git.conflictFile" => {
+            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            let file = serika_runtime::git::conflict_file(&project, &text(&params, "path")).await.map_err(|err| err.to_string())?;
+            Ok(json!(file))
+        }
         "git.action" => {
             let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
             let index = params.get("index").and_then(Value::as_f64).map(|n| n.max(0.0) as usize);

@@ -205,7 +205,7 @@ void IpcClient::handleLine(const QByteArray &line) {
             gitRefresh();
         } else if (tag == QLatin1String("gitAccounts")) {
             emit gitMessage(error, true);
-        } else if (tag == QLatin1String("gitDiff")) {
+        } else if (tag == QLatin1String("gitDiff") || tag == QLatin1String("gitConflict")) {
             emit gitMessage(error, true);
         } else if (tag == QLatin1String("browser")) {
             m_browserBusy = false;
@@ -344,6 +344,8 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
     } else if (tag == QLatin1String("gitAccounts")) {
         m_gitAccounts = result.toVariantMap();
         emit gitAccountsChanged();
+    } else if (tag == QLatin1String("gitConflict")) {
+        emit gitConflictReady(result.value(QStringLiteral("path")).toString(), result.toVariantMap());
     } else if (tag == QLatin1String("gitDiff")) {
         const QString key = result.contains(QStringLiteral("hash")) ? result.value(QStringLiteral("hash")).toString()
                           : result.contains(QStringLiteral("index")) ? QStringLiteral("stash:%1").arg(result.value(QStringLiteral("index")).toInt())
@@ -1327,6 +1329,11 @@ void IpcClient::gitCommitDiff(const QString &hash) {
 void IpcClient::gitFileDiff(const QString &path, bool untracked) {
     request(QStringLiteral("git.fileDiff"), {{QStringLiteral("project"), m_projectPath}, {QStringLiteral("path"), path}, {QStringLiteral("untracked"), untracked}},
             QStringLiteral("gitDiff"));
+}
+
+void IpcClient::gitConflictFile(const QString &path) {
+    request(QStringLiteral("git.conflictFile"), {{QStringLiteral("project"), m_projectPath}, {QStringLiteral("path"), path}},
+            QStringLiteral("gitConflict"));
 }
 
 void IpcClient::addAttachments(const QList<QUrl> &urls) {

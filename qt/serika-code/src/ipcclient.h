@@ -211,6 +211,10 @@ public:
     Q_INVOKABLE void gitStashDiff(int index);
     Q_INVOKABLE void gitCommitDiff(const QString &hash);
     Q_INVOKABLE void gitFileDiff(const QString &path, bool untracked);
+    // A conflicted file split into the places that need a decision (gitConflictReady).
+    Q_INVOKABLE void gitConflictFile(const QString &path);
+    // Put text in the composer, ready to send or edit.
+    Q_INVOKABLE void fillComposer(const QString &text) { emit composerFill(text); }
     Q_INVOKABLE bool exportMarkdown(const QUrl &file);
     Q_INVOKABLE void copyText(const QString &text);
     Q_INVOKABLE void browserOpen(const QString &url);
@@ -315,6 +319,7 @@ signals:
     void gitRemoteAuthReady(const QString &project, const QVariantMap &info);
     void projectDetailsReady(const QString &project, const QVariantMap &details);
     void gitDiffReady(const QString &key, const QVariantList &files);
+    void gitConflictReady(const QString &path, const QVariantMap &file);
     void gitMessage(const QString &text, bool error);
 
 private:

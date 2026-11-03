@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
 use crate::{Error, Result};
@@ -32,6 +32,39 @@ pub struct Change {
     pub code: String,
     pub staged: bool,
     pub untracked: bool,
+    /// Both sides changed it and git could not combine them.
+    pub conflict: bool,
+}
+
+/// A stash, merge, rebase or cherry-pick that stopped on conflicts.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Conflicts {
+    /// "stash", "merge", "rebase" or "cherry-pick"
+    pub kind: String,
+    /// Files that still need a decision
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Every file that had conflicts when it stopped (when Serika knows), resolved ones too
+    #[serde(default)]
+    pub all: Vec<String>,
+    /// What the two sides are called: the one already in the working tree, and the one coming in
+    pub ours: String,
+    pub theirs: String,
+    /// What is coming in: the stash's message, or the branch being merged
+    pub source: String,
+    /// Stash to remove when it is finished (a pop keeps its stash until then)
+    #[serde(default)]
+    pub drop: Option<String>,
+}
+
+/// One stretch of a conflicted file: text both sides agree on, or a place they differ.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct Segment {
+    /// "same" or "conflict"
+    pub kind: String,
+    pub text: String,
+    pub ours: String,
+    pub theirs: String,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -62,6 +95,7 @@ pub struct Overview {
     pub outgoing: Vec<Commit>,
     pub history: Vec<Commit>,
     pub identity: Identity,
+    pub conflicts: Option<Conflicts>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -632,7 +666,7 @@ fn parse_status(text: &str, overview: &mut Overview) {
                 }
             }
         } else if let Some(rest) = line.strip_prefix("? ") {
-            overview.changes.push(Change { path: rest.to_string(), code: "??".into(), staged: false, untracked: true });
+            overview.changes.push(Change { path: rest.to_string(), code: "??".into(), staged: false, untracked: true, conflict: false });
         } else if line.starts_with("1 ") || line.starts_with("2 ") || line.starts_with("u ") {
             // "1 XY sub mH mI mW hH hI path" / "2 XY ... score path\torig" / "u XY ... path"
             let fields: usize = match line.as_bytes()[0] {
@@ -644,8 +678,9 @@ fn parse_status(text: &str, overview: &mut Overview) {
             let _kind = parts.next();
             let code = parts.next().unwrap_or("..").to_string();
             let path = parts.nth(fields - 2).unwrap_or("").split('\t').next().unwrap_or("").to_string();
-            let staged = code.chars().next().map(|c| c != '.').unwrap_or(false);
-            overview.changes.push(Change { path, code, staged, untracked: false });
+            let conflict = line.starts_with("u ");
+            let staged = !conflict && code.chars().next().map(|c| c != '.').unwrap_or(false);
+            overview.changes.push(Change { path, code, staged, untracked: false, conflict });
         }
     }
 }
@@ -688,7 +723,14 @@ fn parse_stashes(text: &str) -> Vec<Stash> {
 pub async fn overview(project: &Path) -> Result<Overview> {
     let mut overview = Overview::default();
     // The repository root and where FETCH_HEAD lives, in one call.
-    let paths = match git(project, &["rev-parse", "--show-toplevel", "--git-path", "FETCH_HEAD"], TIMEOUT).await {
+    let paths = match git(
+        project,
+        &["rev-parse", "--show-toplevel", "--git-path", "FETCH_HEAD", "--git-path", "MERGE_HEAD", "--git-path", "rebase-merge",
+          "--git-path", "rebase-apply", "--git-path", "CHERRY_PICK_HEAD", "--git-path", PENDING],
+        TIMEOUT,
+    )
+    .await
+    {
         Ok(text) => text,
         Err(_) => return Ok(overview),
     };
@@ -696,6 +738,17 @@ pub async fn overview(project: &Path) -> Result<Overview> {
     overview.repo = true;
     overview.root = lines.next().unwrap_or("").trim().to_string();
     let fetch_head = lines.next().unwrap_or("").trim().to_string();
+    let resolve = |line: Option<&str>| {
+        let path = Path::new(line.unwrap_or("").trim());
+        (!path.as_os_str().is_empty()).then(|| if path.is_absolute() { path.to_path_buf() } else { project.join(path) })
+    };
+    let exists = |line: Option<&str>| resolve(line).is_some_and(|p| p.exists());
+    let merging = exists(lines.next());
+    let rebasing = exists(lines.next()) | exists(lines.next());
+    let picking = exists(lines.next());
+    let pending = resolve(lines.next())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| serde_json::from_str::<Conflicts>(&text).ok());
     // Status (with branch and upstream counts), stashes, history and identity side by side;
     // incoming and outgoing come from one log over both sides of the upstream.
     let status = git(project, &["status", "--porcelain=v2", "--branch", "--untracked-files=all"], TIMEOUT);
@@ -706,6 +759,33 @@ pub async fn overview(project: &Path) -> Result<Overview> {
     let (status, stashes, history, sides, who) = tokio::join!(status, stashes, history, sides, who);
     overview.identity = who;
     parse_status(&status?, &mut overview);
+    let files: Vec<String> = overview.changes.iter().filter(|c| c.conflict).map(|c| c.path.clone()).collect();
+    overview.conflicts = if merging || rebasing || picking {
+        let (kind, ours) = if rebasing { ("rebase", "Upstream") } else if picking { ("cherry-pick", "Your branch") } else { ("merge", "Your branch") };
+        let source = if merging { merge_source(project).await } else { String::new() };
+        Some(Conflicts {
+            kind: kind.into(),
+            all: files.clone(),
+            files,
+            ours: ours.into(),
+            theirs: if source.is_empty() { "Incoming".into() } else { source.clone() },
+            source,
+            drop: None,
+        })
+    } else if let Some(mut state) = pending {
+        // Started here: keep the full list so finished files still show as done.
+        for file in &files {
+            if !state.all.contains(file) {
+                state.all.push(file.clone());
+            }
+        }
+        state.files = files;
+        Some(state)
+    } else if !files.is_empty() {
+        Some(Conflicts { kind: "stash".into(), all: files.clone(), files, ours: "Your branch".into(), theirs: "Incoming".into(), ..Default::default() })
+    } else {
+        None
+    };
     overview.stashes = parse_stashes(&stashes.unwrap_or_default());
     overview.history = parse_commits(&history.unwrap_or_default());
     if overview.upstream.is_some() {
@@ -731,6 +811,390 @@ pub async fn overview(project: &Path) -> Result<Overview> {
             .map(|d| d.as_secs() as i64);
     }
     Ok(overview)
+}
+
+/// Where Serika remembers a stash it is taking in that stopped on conflicts (inside .git).
+const PENDING: &str = "serika-conflicts.json";
+
+async fn pending_path(project: &Path) -> Result<std::path::PathBuf> {
+    let line = git(project, &["rev-parse", "--git-path", PENDING], TIMEOUT).await?;
+    let path = Path::new(line.trim());
+    Ok(if path.is_absolute() { path.to_path_buf() } else { project.join(path) })
+}
+
+
+async fn write_pending(project: &Path, state: &Conflicts) -> Result<()> {
+    let path = pending_path(project).await?;
+    std::fs::write(path, serde_json::to_vec_pretty(state).unwrap_or_default()).map_err(|e| Error::msg(e.to_string()))
+}
+
+async fn clear_pending(project: &Path) {
+    if let Ok(path) = pending_path(project).await {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// The branch a merge in progress brings in, from MERGE_MSG ("Merge branch 'x' into y").
+async fn merge_source(project: &Path) -> String {
+    let Ok(line) = git(project, &["rev-parse", "--git-path", "MERGE_MSG"], TIMEOUT).await else { return String::new() };
+    let path = Path::new(line.trim());
+    let path = if path.is_absolute() { path.to_path_buf() } else { project.join(path) };
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let first = text.lines().next().unwrap_or("");
+    first.split('\'').nth(1).unwrap_or("").to_string()
+}
+
+/// Files that still have conflicts, relative to the repository root.
+async fn unmerged(project: &Path) -> Vec<String> {
+    git(project, &["diff", "--name-only", "--diff-filter=U"], TIMEOUT)
+        .await
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// A conflicted file in stretches: what both sides agree on, and each place they differ.
+/// Works with and without the common-ancestor section (`merge.conflictStyle diff3`).
+pub fn parse_conflicts(text: &str) -> Vec<Segment> {
+    #[derive(PartialEq)]
+    enum At { Same, Ours, Base, Theirs }
+    fn marker(line: &str, mark: &str) -> bool {
+        let line = line.trim_end_matches(['\n', '\r']);
+        line.starts_with(mark) && (line.len() == mark.len() || line[mark.len()..].starts_with(' '))
+    }
+    let mut out: Vec<Segment> = Vec::new();
+    let mut at = At::Same;
+    let (mut same, mut ours, mut theirs, mut raw) = (String::new(), String::new(), String::new(), String::new());
+    for line in text.split_inclusive('\n') {
+        match at {
+            At::Same if marker(line, "<<<<<<<") => {
+                if !same.is_empty() {
+                    out.push(Segment { kind: "same".into(), text: std::mem::take(&mut same), ..Default::default() });
+                }
+                raw = line.to_string();
+                at = At::Ours;
+            }
+            At::Same => same.push_str(line),
+            At::Ours | At::Base if marker(line, "=======") => {
+                raw.push_str(line);
+                at = At::Theirs;
+            }
+            At::Ours if marker(line, "|||||||") => {
+                raw.push_str(line);
+                at = At::Base;
+            }
+            At::Ours => {
+                raw.push_str(line);
+                ours.push_str(line);
+            }
+            At::Base => raw.push_str(line),
+            At::Theirs if marker(line, ">>>>>>>") => {
+                out.push(Segment {
+                    kind: "conflict".into(),
+                    text: std::mem::take(&mut raw),
+                    ours: std::mem::take(&mut ours),
+                    theirs: std::mem::take(&mut theirs),
+                });
+                at = At::Same;
+            }
+            At::Theirs => {
+                raw.push_str(line);
+                theirs.push_str(line);
+            }
+        }
+    }
+    // A block that never closed is left as it is.
+    if at != At::Same {
+        same.push_str(&raw);
+    }
+    if !same.is_empty() {
+        out.push(Segment { kind: "same".into(), text: same, ..Default::default() });
+    }
+    out
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ConflictFile {
+    pub path: String,
+    pub segments: Vec<Segment>,
+    /// Not text, or one side deleted it: only a whole-file choice is possible.
+    pub whole: bool,
+}
+
+async fn repo_root(project: &Path) -> Result<std::path::PathBuf> {
+    Ok(std::path::PathBuf::from(git(project, &["rev-parse", "--show-toplevel"], TIMEOUT).await?.trim()))
+}
+
+/// A conflicted file, split into the places that need a decision.
+pub async fn conflict_file(project: &Path, path: &str) -> Result<ConflictFile> {
+    let full = repo_root(project).await?.join(path);
+    let segments = match std::fs::read(&full) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => parse_conflicts(&text),
+            Err(_) => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+    let whole = !segments.iter().any(|s| s.kind == "conflict");
+    Ok(ConflictFile { path: path.to_string(), segments, whole })
+}
+
+/// Settle one file: a choice per conflict ("ours", "theirs" or "both"), written back and staged.
+async fn resolve_file(project: &Path, path: &str, choices: &[String]) -> Result<String> {
+    let full = repo_root(project).await?.join(path);
+    let text = std::fs::read_to_string(&full).map_err(|e| Error::msg(format!("could not read {path}: {e}")))?;
+    let segments = parse_conflicts(&text);
+    let blocks = segments.iter().filter(|s| s.kind == "conflict").count();
+    if blocks != choices.len() {
+        return Err(Error::msg(format!("{path} changed on disk; open it again")));
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut picks = choices.iter();
+    for segment in &segments {
+        if segment.kind == "same" {
+            out.push_str(&segment.text);
+            continue;
+        }
+        match picks.next().map(String::as_str) {
+            Some("ours") => out.push_str(&segment.ours),
+            Some("theirs") => out.push_str(&segment.theirs),
+            Some("both") => {
+                out.push_str(&segment.ours);
+                if !segment.ours.is_empty() && !segment.ours.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&segment.theirs);
+            }
+            _ => return Err(Error::msg("pick a side for every conflict")),
+        }
+    }
+    std::fs::write(&full, out).map_err(|e| Error::msg(format!("could not write {path}: {e}")))?;
+    git(project, &["add", "--", path], TIMEOUT).await?;
+    Ok(format!("{path} resolved."))
+}
+
+/// Settle a whole file by taking one side as it is (also for binary files and deletions).
+async fn take_side(project: &Path, path: &str, side: &str) -> Result<String> {
+    let flag = if side == "ours" { "--ours" } else { "--theirs" };
+    let root = repo_root(project).await?;
+    match git(&root, &["checkout", flag, "--", path], TIMEOUT).await {
+        Ok(_) => {
+            git(&root, &["add", "--", path], TIMEOUT).await?;
+        }
+        // That side deleted the file: so does the result.
+        Err(_) => {
+            git(&root, &["rm", "-q", "--", path], TIMEOUT).await?;
+        }
+    }
+    Ok(format!("{path} resolved."))
+}
+
+/// A file you fixed by hand (or the agent did): staged once no conflict markers are left.
+async fn mark_resolved(project: &Path, path: &str) -> Result<String> {
+    let root = repo_root(project).await?;
+    if let Ok(text) = std::fs::read_to_string(root.join(path)) {
+        if parse_conflicts(&text).iter().any(|s| s.kind == "conflict") {
+            return Err(Error::msg(format!("{path} still has conflict markers (<<<<<<<)")));
+        }
+    }
+    git(&root, &["add", "--", path], TIMEOUT).await?;
+    Ok(format!("{path} resolved."))
+}
+
+fn files_phrase(n: usize) -> String {
+    if n == 1 { "1 file".into() } else { format!("{n} files") }
+}
+
+/// Your own changes are in the way of a stash (git refuses rather than merge them).
+fn blocked_by_changes(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("would be overwritten") || m.contains("already exists, no checkout") || m.contains("could not restore untracked")
+}
+
+/// Apply or pop a stash so it always lands: when your own changes are in the way they are set
+/// aside, the stash goes in, and they come back on top. Conflicts stop it with a list to work
+/// through (Conflicts) instead of an error; a popped stash stays until that is finished.
+async fn take_stash(project: &Path, index: usize, pop: bool) -> Result<String> {
+    let name = stash_ref(index);
+    let hash = git(project, &["rev-parse", &name], TIMEOUT).await?.trim().to_string();
+    let list = parse_stashes(&git(project, &["stash", "list", "--format=%gd%x1f%gs%x1f%ct%x1e"], TIMEOUT).await.unwrap_or_default());
+    let label = list
+        .iter()
+        .find(|s| s.index == index)
+        .map(|s| if s.message.trim().is_empty() { name.clone() } else { s.message.clone() })
+        .unwrap_or_else(|| name.clone());
+    let verb = if pop { "pop" } else { "apply" };
+    let done = if pop { "Popped" } else { "Applied" };
+
+    let error = match git(project, &["stash", verb, &name], TIMEOUT).await {
+        Ok(_) => {
+            return Ok(if pop { format!("Popped {label}.") } else { format!("Applied {label}. The stash is still there.") })
+        }
+        Err(err) => err,
+    };
+    let files = unmerged(project).await;
+    if !files.is_empty() {
+        let state = Conflicts {
+            kind: "stash".into(),
+            all: files.clone(),
+            files: files.clone(),
+            ours: "Your branch".into(),
+            theirs: label.clone(),
+            source: label.clone(),
+            drop: pop.then(|| hash.clone()),
+        };
+        write_pending(project, &state).await?;
+        return Ok(format!("{label} conflicts with your branch in {}. Choose what to keep.", files_phrase(files.len())));
+    }
+    if !blocked_by_changes(&error.to_string()) {
+        return Err(error);
+    }
+
+    // Set your changes aside, take the stash into a clean tree, then put yours back on top.
+    let aside = format!("Your changes before {label}");
+    git(project, &["stash", "push", "--include-untracked", "-m", &aside], TIMEOUT).await?;
+    if let Err(err) = git(project, &["stash", verb, &stash_ref(index + 1)], TIMEOUT).await {
+        let files = unmerged(project).await;
+        if files.is_empty() {
+            // Nothing went in: bring your changes straight back.
+            let _ = git(project, &["reset", "--merge"], TIMEOUT).await;
+            let _ = git(project, &["stash", "pop", "stash@{0}"], TIMEOUT).await;
+            return Err(err);
+        }
+        // The stash itself conflicts with your branch. Your changes wait, safe, as their own stash.
+        let state = Conflicts {
+            kind: "stash".into(),
+            all: files.clone(),
+            files: files.clone(),
+            ours: "Your branch".into(),
+            theirs: label.clone(),
+            source: label.clone(),
+            drop: pop.then(|| hash.clone()),
+        };
+        write_pending(project, &state).await?;
+        return Ok(format!(
+            "{label} conflicts with your branch in {}. Your own changes are kept as the stash \"{aside}\" until then.",
+            files_phrase(files.len())
+        ));
+    }
+    let mine = git(project, &["rev-parse", "stash@{0}"], TIMEOUT).await?.trim().to_string();
+    // Git only merges a stash into changes that are staged, so stage what the stash brought;
+    // everything is unstaged again at the end, as after a plain pop.
+    git(project, &["add", "-A"], TIMEOUT).await?;
+    match git(project, &["stash", "pop", "stash@{0}"], TIMEOUT).await {
+        Ok(_) => {
+            git(project, &["reset", "-q"], TIMEOUT).await?;
+            Ok(format!("{done} {label} and kept your own changes on top."))
+        }
+        Err(err) => {
+            let files = unmerged(project).await;
+            if files.is_empty() {
+                return Err(Error::msg(format!(
+                    "{done} {label}, but your own changes could not go back on top, so they are kept as the stash \"{aside}\". {err}"
+                )));
+            }
+            let state = Conflicts {
+                kind: "stash".into(),
+                all: files.clone(),
+                files: files.clone(),
+                ours: label.clone(),
+                theirs: "Your changes".into(),
+                source: label.clone(),
+                drop: Some(mine),
+            };
+            write_pending(project, &state).await?;
+            Ok(format!(
+                "{done} {label}. Your own changes conflict with it in {}. Choose what to keep.",
+                files_phrase(files.len())
+            ))
+        }
+    }
+}
+
+/// Remove the stash with this commit id, wherever it is in the list now.
+async fn drop_by_hash(project: &Path, hash: &str) -> bool {
+    let list = git(project, &["stash", "list", "--format=%gd %H"], TIMEOUT).await.unwrap_or_default();
+    for line in list.lines() {
+        if let Some((name, id)) = line.trim().split_once(' ') {
+            if id == hash {
+                return git(project, &["stash", "drop", name], TIMEOUT).await.is_ok();
+            }
+        }
+    }
+    false
+}
+
+async fn finish_conflicts(project: &Path) -> Result<String> {
+    let left = unmerged(project).await;
+    if !left.is_empty() {
+        return Err(Error::msg(format!("{} still {} conflicts.", files_phrase(left.len()), if left.len() == 1 { "has" } else { "have" })));
+    }
+    let state = overview(project).await?.conflicts;
+    let kind = state.as_ref().map(|s| s.kind.as_str()).unwrap_or("stash");
+    let message = match kind {
+        "merge" => {
+            git(project, &["-c", "core.editor=true", "commit", "--no-edit"], TIMEOUT).await?;
+            "Merge committed.".to_string()
+        }
+        "rebase" => {
+            git(project, &["-c", "core.editor=true", "rebase", "--continue"], TIMEOUT).await?;
+            "Rebase continued.".to_string()
+        }
+        "cherry-pick" => {
+            git(project, &["-c", "core.editor=true", "cherry-pick", "--continue"], TIMEOUT).await?;
+            "Cherry-pick finished.".to_string()
+        }
+        _ => {
+            // A stash leaves what it brought staged; a clean pop would not, so neither does this.
+            git(project, &["reset", "-q"], TIMEOUT).await?;
+            let state = state.unwrap_or_default();
+            let dropped = match &state.drop {
+                Some(hash) => drop_by_hash(project, hash).await,
+                None => false,
+            };
+            clear_pending(project).await;
+            let source = if state.source.is_empty() { "The stash".to_string() } else { state.source.clone() };
+            if dropped && state.theirs == "Your changes" {
+                format!("Done. {source} and your own changes are both in your working tree.")
+            } else if dropped {
+                format!("Done. {source} is in your working tree and gone from your stashes.")
+            } else {
+                format!("Done. {source} is in your working tree.")
+            }
+        }
+    };
+    Ok(message)
+}
+
+async fn abort_conflicts(project: &Path) -> Result<String> {
+    let state = overview(project).await?.conflicts.unwrap_or_default();
+    match state.kind.as_str() {
+        "merge" => {
+            git(project, &["merge", "--abort"], TIMEOUT).await?;
+            Ok("Merge undone.".into())
+        }
+        "rebase" => {
+            git(project, &["rebase", "--abort"], TIMEOUT).await?;
+            Ok("Rebase undone.".into())
+        }
+        "cherry-pick" => {
+            git(project, &["cherry-pick", "--abort"], TIMEOUT).await?;
+            Ok("Cherry-pick undone.".into())
+        }
+        _ => {
+            git(project, &["reset", "--merge"], TIMEOUT).await?;
+            clear_pending(project).await;
+            Ok(if state.theirs == "Your changes" {
+                format!("Undone. {} is in, and your own changes are kept as the stash \"Your changes before {}\".", state.source, state.source)
+            } else if state.drop.is_some() {
+                "Undone. The stash is still in your list.".into()
+            } else {
+                "Undone.".into()
+            })
+        }
+    }
 }
 
 /// Split a multi-file unified diff into one entry per file.
@@ -972,14 +1436,19 @@ pub async fn act(project: &Path, action: &str, index: Option<usize>, message: &s
     // Git's own output is kept for errors; success gets a short line (stash pop, for one,
     // prints a whole `git status`).
     let done = match (action, name.as_deref()) {
-        ("stash.apply", Some(name)) => {
-            git(project, &["stash", "apply", name], TIMEOUT).await?;
-            format!("Applied {name}. The stash is still there.")
+        ("stash.apply", Some(_)) => take_stash(project, index.unwrap_or(0), false).await?,
+        ("stash.pop", Some(_)) => take_stash(project, index.unwrap_or(0), true).await?,
+        // `message` carries the file for these, and for resolve a JSON list of choices after a tab.
+        ("conflict.ours", _) => take_side(project, message.trim(), "ours").await?,
+        ("conflict.theirs", _) => take_side(project, message.trim(), "theirs").await?,
+        ("conflict.mark", _) => mark_resolved(project, message.trim()).await?,
+        ("conflict.resolve", _) => {
+            let (path, choices) = message.split_once('\t').ok_or_else(|| Error::msg("nothing to resolve"))?;
+            let choices: Vec<String> = serde_json::from_str(choices).map_err(|e| Error::msg(e.to_string()))?;
+            resolve_file(project, path, &choices).await?
         }
-        ("stash.pop", Some(name)) => {
-            git(project, &["stash", "pop", name], TIMEOUT).await?;
-            format!("Popped {name} into your working tree.")
-        }
+        ("conflict.finish", _) => finish_conflicts(project).await?,
+        ("conflict.abort", _) => abort_conflicts(project).await?,
         ("stash.drop", Some(name)) => {
             git(project, &["stash", "drop", name], TIMEOUT).await?;
             format!("Dropped {name}.")
@@ -1082,6 +1551,98 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[1].path, "dir/b c.rs");
         assert!(files[0].diff.ends_with("+y\n"));
+    }
+
+    #[test]
+    fn splits_conflicted_files() {
+        let text = "top\n<<<<<<< Updated upstream\nmine\n=======\nyours\n>>>>>>> Stashed changes\nmid\n<<<<<<< HEAD\na\n||||||| base\nb\n=======\nc\nd\n>>>>>>> topic\n";
+        let parts = parse_conflicts(text);
+        let kinds: Vec<&str> = parts.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, ["same", "conflict", "same", "conflict"]);
+        assert_eq!((parts[1].ours.as_str(), parts[1].theirs.as_str()), ("mine\n", "yours\n"));
+        assert_eq!((parts[3].ours.as_str(), parts[3].theirs.as_str()), ("a\n", "c\nd\n"));
+        // Putting the raw blocks back gives the file it came from.
+        let back: String = parts.iter().map(|s| s.text.clone() + if s.kind == "conflict" { "" } else { "" }).collect();
+        assert!(back.starts_with("top\n<<<<<<< Updated upstream\n"));
+        assert!(parse_conflicts("<<<<<<< open\nno end\n").iter().all(|s| s.kind == "same"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stash_conflicts_can_be_worked_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        if git(p, &["init", "-q", "-b", "main"], TIMEOUT).await.is_err() {
+            return;
+        }
+        let _ = git(p, &["config", "user.email", "t@example.com"], TIMEOUT).await;
+        let _ = git(p, &["config", "user.name", "T"], TIMEOUT).await;
+        std::fs::write(p.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(p.join("b.txt"), "b\n").unwrap();
+        git(p, &["add", "."], TIMEOUT).await.unwrap();
+        git(p, &["commit", "-q", "-m", "first"], TIMEOUT).await.unwrap();
+        // The ticket's work, stashed; then the branch moves on in the same line.
+        std::fs::write(p.join("a.txt"), "one\nTWO from stash\nthree\n").unwrap();
+        act(p, "stash.push", None, "PROJ-7 ticket").await.unwrap();
+        std::fs::write(p.join("a.txt"), "one\ntwo on main\nthree\n").unwrap();
+        git(p, &["commit", "-qam", "main moved"], TIMEOUT).await.unwrap();
+
+        let note = act(p, "stash.pop", Some(0), "").await.unwrap();
+        assert!(note.contains("conflicts"), "{note}");
+        let o = overview(p).await.unwrap();
+        let c = o.conflicts.expect("conflicts");
+        assert_eq!((c.kind.as_str(), c.files.len(), c.theirs.as_str()), ("stash", 1, "PROJ-7 ticket"));
+        assert_eq!(o.stashes.len(), 1, "a pop keeps its stash until finished");
+        assert!(act(p, "conflict.finish", None, "").await.is_err(), "not resolved yet");
+
+        let file = conflict_file(p, "a.txt").await.unwrap();
+        assert!(!file.whole);
+        act(p, "conflict.resolve", None, "a.txt\t[\"theirs\"]").await.unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap().replace("\r\n", "\n"), "one\nTWO from stash\nthree\n");
+        let o = overview(p).await.unwrap();
+        let c = o.conflicts.expect("still listed until finished");
+        assert!(c.files.is_empty() && c.all == ["a.txt"]);
+        let note = act(p, "conflict.finish", None, "").await.unwrap();
+        assert!(note.contains("gone from your stashes"), "{note}");
+        let o = overview(p).await.unwrap();
+        assert!(o.conflicts.is_none() && o.stashes.is_empty());
+        assert!(o.changes.iter().all(|c| !c.staged), "{:?}", o.changes);
+
+        // Own changes in the way: set aside, stash in, changes back on top.
+        git(p, &["commit", "-qam", "ticket in"], TIMEOUT).await.unwrap();
+        std::fs::write(p.join("b.txt"), "b from stash\n").unwrap();
+        act(p, "stash.push", None, "PROJ-8").await.unwrap();
+        std::fs::write(p.join("b.txt"), "b mine\n").unwrap();
+        let note = act(p, "stash.pop", Some(0), "").await.unwrap();
+        assert!(note.contains("Your own changes conflict"), "{note}");
+        let c = overview(p).await.unwrap().conflicts.expect("conflicts");
+        assert_eq!((c.ours.as_str(), c.theirs.as_str()), ("PROJ-8", "Your changes"));
+        act(p, "conflict.resolve", None, "b.txt\t[\"both\"]").await.unwrap();
+        assert_eq!(std::fs::read_to_string(p.join("b.txt")).unwrap().replace("\r\n", "\n"), "b from stash\nb mine\n");
+        act(p, "conflict.finish", None, "").await.unwrap();
+        let o = overview(p).await.unwrap();
+        assert!(o.conflicts.is_none() && o.stashes.is_empty(), "{:?}", o.stashes);
+
+        // Own edits elsewhere in the same file: everything merges, nothing to decide.
+        git(p, &["commit", "-qam", "both in"], TIMEOUT).await.unwrap();
+        std::fs::write(p.join("a.txt"), "ONE\nTWO from stash\nthree\n").unwrap();
+        act(p, "stash.push", None, "PROJ-10").await.unwrap();
+        std::fs::write(p.join("a.txt"), "one\nTWO from stash\nTHREE\n").unwrap();
+        let note = act(p, "stash.pop", Some(0), "").await.unwrap();
+        assert!(note.contains("kept your own changes"), "{note}");
+        assert_eq!(std::fs::read_to_string(p.join("a.txt")).unwrap().replace("\r\n", "\n"), "ONE\nTWO from stash\nTHREE\n");
+        let o = overview(p).await.unwrap();
+        assert!(o.conflicts.is_none() && o.stashes.is_empty() && o.changes.iter().all(|c| !c.staged));
+        git(p, &["commit", "-qam", "merged"], TIMEOUT).await.unwrap();
+
+        // Undo puts a conflicted pop back as it was.
+        std::fs::write(p.join("b.txt"), "b one way\n").unwrap();
+        act(p, "stash.push", None, "PROJ-9").await.unwrap();
+        std::fs::write(p.join("b.txt"), "b other way\n").unwrap();
+        git(p, &["commit", "-qam", "moved"], TIMEOUT).await.unwrap();
+        act(p, "stash.pop", Some(0), "").await.unwrap();
+        act(p, "conflict.abort", None, "").await.unwrap();
+        let o = overview(p).await.unwrap();
+        assert!(o.conflicts.is_none() && o.changes.is_empty() && o.stashes.len() == 1, "{o:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
