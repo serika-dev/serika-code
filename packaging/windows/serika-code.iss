@@ -72,8 +72,9 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 LZMANumBlockThreads=4
 
-; A running copy is closed for the update and nothing asks for a reboot.
-CloseApplications=yes
+; A running copy is closed for the update and nothing asks for a reboot. "force": the runtime
+; (serika.exe) has no window to ask, so a polite close alone would stop the update.
+CloseApplications=force
 CloseApplicationsFilter=*.exe
 RestartApplications=no
 ChangesEnvironment=yes
@@ -164,7 +165,7 @@ begin
     AddToPath(ExpandConstant('{app}'));
 end;
 
-// The uninstaller cannot remove files of a copy that is still open: close the app and its
+// Files of a copy that is still open cannot be replaced or removed: close the app and its
 // runtime first, but only the ones started from this install folder.
 procedure CloseRunningCopies;
 var
@@ -174,6 +175,13 @@ begin
     '-NoProfile -NonInteractive -WindowStyle Hidden -Command "Get-Process serika-code,serika -ErrorAction SilentlyContinue | ' +
     'Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '\*'' } | Stop-Process -Force"',
     '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+// Close a running copy before files are replaced (the Restart Manager cannot always do it).
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  CloseRunningCopies;
+  Result := '';
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
