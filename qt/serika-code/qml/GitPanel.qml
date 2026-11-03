@@ -338,19 +338,10 @@ Item {
                         id: accountRow
                         anchors.centerIn: parent
                         spacing: 6
-                        Rectangle {
-                            implicitWidth: 22
-                            implicitHeight: 22
-                            radius: 11
-                            color: accountButton.account ? Theme.accent : Theme.active
-                            Text {
-                                anchors.centerIn: parent
-                                text: panel.initials(accountButton.who.name || "?")
-                                color: accountButton.account ? "white" : Theme.textSecondary
-                                font.family: Theme.sans
-                                font.pixelSize: 10
-                                font.weight: Font.DemiBold
-                            }
+                        Avatar {
+                            size: 22
+                            source: accountButton.account ? (accountButton.account.avatar || "") : ""
+                            name: accountButton.who.name || "?"
                         }
                         Text {
                             Layout.maximumWidth: 120
@@ -419,12 +410,10 @@ Item {
                                         anchors.leftMargin: 10
                                         anchors.rightMargin: 10
                                         spacing: 10
-                                        Rectangle {
-                                            implicitWidth: 26
-                                            implicitHeight: 26
-                                            radius: 13
-                                            color: accountItem.current ? Theme.accent : Theme.active
-                                            Text { anchors.centerIn: parent; text: panel.initials(accountItem.modelData.name); color: accountItem.current ? "white" : Theme.textSecondary; font.family: Theme.sans; font.pixelSize: 11; font.weight: Font.DemiBold }
+                                        Avatar {
+                                            size: 26
+                                            source: accountItem.modelData.avatar || ""
+                                            name: accountItem.modelData.name
                                         }
                                         ColumnLayout {
                                             Layout.fillWidth: true

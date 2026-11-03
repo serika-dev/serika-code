@@ -13,12 +13,15 @@ ColumnLayout {
             Layout.fillWidth: true
             Layout.margins: 18
             spacing: 16
-            Rectangle {
-                Layout.preferredWidth: 52
-                Layout.preferredHeight: 52
-                radius: 15
-                color: Theme.accent
-                Text { anchors.centerIn: parent; text: "s"; color: "white"; font.family: Theme.brand; font.pixelSize: 28; font.weight: Font.Bold }
+            // The same icon as the taskbar, Start menu and Linux launchers.
+            Image {
+                Layout.preferredWidth: 56
+                Layout.preferredHeight: 56
+                source: Qt.resolvedUrl("app/serika-code-256.png")
+                sourceSize: Qt.size(168, 168)
+                fillMode: Image.PreserveAspectFit
+                smooth: true
+                mipmap: true
             }
             ColumnLayout {
                 Layout.fillWidth: true

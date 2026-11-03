@@ -453,6 +453,19 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
                 .map_err(|err| err.to_string())?;
             Ok(git_accounts_json(&host, Some(project)))
         }
+        "git.remoteAuth" => {
+            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            let auth = serika_runtime::git::remote_auth(&project).await;
+            let identity = serika_runtime::git::identity(&project).await;
+            Ok(json!({"auth": auth, "identity": identity, "accounts": git_accounts_json(&host, Some(project.display().to_string()))}))
+        }
+        "git.setLogin" => {
+            let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
+            serika_runtime::git::set_login(&project, &text(&params, "login")).await.map_err(|err| err.to_string())?;
+            let auth = serika_runtime::git::remote_auth(&project).await;
+            let identity = serika_runtime::git::identity(&project).await;
+            Ok(json!({"auth": auth, "identity": identity, "accounts": git_accounts_json(&host, Some(project.display().to_string()))}))
+        }
         "git.branches" => {
             let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
             let list = serika_runtime::git::branches(&project).await.map_err(|err| err.to_string())?;

@@ -195,6 +195,10 @@ public:
     Q_INVOKABLE void gitAccountRemove(const QString &id);
     Q_INVOKABLE void gitAccountUse(const QString &id, bool makeDefault);
     Q_INVOKABLE void gitAccountDefault(const QString &project, const QString &id);
+    // Project settings: how a project commits and signs in to its remote
+    Q_INVOKABLE void gitRemoteAuth(const QString &project);
+    Q_INVOKABLE void gitSetLogin(const QString &project, const QString &login);
+    Q_INVOKABLE void gitApplyAccountIn(const QString &project, const QString &id);
     Q_INVOKABLE void gitStashDiff(int index);
     Q_INVOKABLE void gitCommitDiff(const QString &hash);
     Q_INVOKABLE void gitFileDiff(const QString &path, bool untracked);
@@ -298,6 +302,7 @@ signals:
     void gitChanged();
     void gitBranchesChanged();
     void gitAccountsChanged();
+    void gitRemoteAuthReady(const QString &project, const QVariantMap &info);
     void gitDiffReady(const QString &key, const QVariantList &files);
     void gitMessage(const QString &text, bool error);
 

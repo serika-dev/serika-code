@@ -622,6 +622,7 @@ Item {
 
     Shortcut { sequence: "Ctrl+N"; onActivated: shell.newChat() }
     Timer { id: paletteTimer; interval: 400; onTriggered: commandPalette.open() }
+    Timer { id: projectTimer; interval: 1500; onTriggered: sidebar.openProjectSettings() }
     Shortcut { sequences: ["Ctrl+K", "Ctrl+P"]; onActivated: commandPalette.opened ? commandPalette.close() : commandPalette.open() }
 
     CommandPalette {
@@ -658,6 +659,7 @@ Item {
         else if (startPopup === "account-settings") shell.openSettings("account")
         else if (startPopup === "shortcuts") shortcuts.open()
         else if (startPopup === "palette") paletteTimer.start()
+        else if (startPopup === "project") projectTimer.start()
         else if (startPopup === "inspector") shell.showPanel("changes")
         else if (startPopup === "hero") ipc.newChat()
         if (startPanel.length > 0) shell.showPanel(startPanel)

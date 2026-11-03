@@ -299,6 +299,22 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
         emit gitMessage(message.isEmpty() ? QStringLiteral("Done.") : message, false);
         if (action == QLatin1String("switch") || action == QLatin1String("branch.create") || action == QLatin1String("fetch"))
             gitBranchesRefresh();
+    } else if (tag.startsWith(QLatin1String("gitAccountIn:"))) {
+        const QString project = tag.mid(13);
+        m_gitAccounts = result.value(QStringLiteral("accounts")).toObject().toVariantMap();
+        emit gitAccountsChanged();
+        if (project == m_projectPath)
+            setGit(result.value(QStringLiteral("overview")).toObject().toVariantMap());
+        gitRemoteAuth(project);
+    } else if (tag.startsWith(QLatin1String("gitRemoteAuth:"))) {
+        const QString project = tag.mid(14);
+        if (result.contains(QStringLiteral("accounts"))) {
+            m_gitAccounts = result.value(QStringLiteral("accounts")).toObject().toVariantMap();
+            emit gitAccountsChanged();
+        }
+        emit gitRemoteAuthReady(project, result.toVariantMap());
+        if (project == m_projectPath)
+            gitRefresh();
     } else if (tag == QLatin1String("gitBranches")) {
         m_gitBranches = result.value(QStringLiteral("branches")).toArray().toVariantList();
         emit gitBranchesChanged();
@@ -1222,6 +1238,20 @@ void IpcClient::gitAccountUse(const QString &id, bool makeDefault) {
     setGit(m_git);
     request(QStringLiteral("git.accountUse"), {{QStringLiteral("project"), m_projectPath}, {QStringLiteral("id"), id}, {QStringLiteral("makeDefault"), makeDefault}},
             QStringLiteral("gitAction"));
+}
+
+void IpcClient::gitRemoteAuth(const QString &project) {
+    request(QStringLiteral("git.remoteAuth"), {{QStringLiteral("project"), project}}, QStringLiteral("gitRemoteAuth:") + project);
+}
+
+void IpcClient::gitSetLogin(const QString &project, const QString &login) {
+    request(QStringLiteral("git.setLogin"), {{QStringLiteral("project"), project}, {QStringLiteral("login"), login}}, QStringLiteral("gitRemoteAuth:") + project);
+}
+
+void IpcClient::gitApplyAccountIn(const QString &project, const QString &id) {
+    // Applies the account and makes it the project's default; the answer reloads the sheet.
+    request(QStringLiteral("git.accountUse"), {{QStringLiteral("project"), project}, {QStringLiteral("id"), id}, {QStringLiteral("makeDefault"), true}},
+            QStringLiteral("gitAccountIn:") + project);
 }
 
 void IpcClient::gitAccountDefault(const QString &project, const QString &id) {

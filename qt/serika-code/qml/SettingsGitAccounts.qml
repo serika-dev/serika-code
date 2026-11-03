@@ -53,12 +53,10 @@ ColumnLayout {
                     anchors.leftMargin: 12
                     anchors.rightMargin: 8
                     spacing: 12
-                    Rectangle {
-                        implicitWidth: 32
-                        implicitHeight: 32
-                        radius: 16
-                        color: Theme.accent
-                        Text { anchors.centerIn: parent; text: section.initials(card.modelData.name); color: "white"; font.family: Theme.sans; font.pixelSize: 12; font.weight: Font.DemiBold }
+                    Avatar {
+                        size: 32
+                        source: card.modelData.avatar || ""
+                        name: card.modelData.name
                     }
                     ColumnLayout {
                         Layout.fillWidth: true

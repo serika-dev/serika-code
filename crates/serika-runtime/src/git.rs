@@ -166,6 +166,9 @@ pub struct Account {
     /// Where it came from when Serika found it for you: "gh" or "gcm" (empty when you added it).
     #[serde(default)]
     pub source: String,
+    /// Profile picture URL (GitHub accounts).
+    #[serde(default)]
+    pub avatar: String,
 }
 
 /// Accounts plus the default account per project (keyed by project path).
@@ -216,7 +219,15 @@ pub fn save_account(data_dir: &Path, mut account: Account) -> Result<Account> {
         account.id = crate::sessions::new_id();
     }
     match book.accounts.iter_mut().find(|a| a.id == account.id) {
-        Some(existing) => *existing = account.clone(),
+        Some(existing) => {
+            if account.avatar.is_empty() {
+                account.avatar = existing.avatar.clone();
+            }
+            if account.source.is_empty() {
+                account.source = existing.source.clone();
+            }
+            *existing = account.clone()
+        }
         None => book.accounts.push(account.clone()),
     }
     save_book(data_dir, &book)?;
@@ -302,6 +313,7 @@ pub async fn detect_accounts() -> Vec<Account> {
         // Public profile: display name and numeric id (for the noreply address).
         let mut name = login.clone();
         let mut id: Option<u64> = None;
+        let mut avatar = String::new();
         if let Some(gh) = &gh {
             let mut cmd = quiet(gh);
             cmd.args(["api", &format!("users/{login}"), "--hostname", &host]);
@@ -311,6 +323,7 @@ pub async fn detect_accounts() -> Vec<Account> {
                     name = n.trim().to_string();
                 }
                 id = value.get("id").and_then(|i| i.as_u64());
+                avatar = value.get("avatar_url").and_then(|a| a.as_str()).unwrap_or("").to_string();
             }
         }
         let domain = if host == "github.com" { "users.noreply.github.com".to_string() } else { format!("users.noreply.{host}") };
@@ -319,7 +332,7 @@ pub async fn detect_accounts() -> Vec<Account> {
             None => format!("{login}@{domain}"),
         };
         let label = if host == "github.com" { format!("{login} (GitHub)") } else { format!("{login} ({host})") };
-        found.push(Account { id: String::new(), label, name, email, username: login, ssh_key: String::new(), source: source.into() });
+        found.push(Account { id: String::new(), label, name, email, username: login, ssh_key: String::new(), source: source.into(), avatar });
     }
     *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), found.clone()));
     found
@@ -331,20 +344,65 @@ pub async fn import_detected(data_dir: &Path) -> usize {
     let found = detect_accounts().await;
     let mut book = load_book(data_dir);
     let mut added = 0;
+    let mut changed = false;
     for mut account in found {
         let login = account.username.to_ascii_lowercase();
-        let known = book.accounts.iter().any(|a| a.username.eq_ignore_ascii_case(&login));
-        if known || book.dismissed.contains(&login) {
+        // A known login gets its profile picture if it has none yet.
+        if let Some(existing) = book.accounts.iter_mut().find(|a| a.username.eq_ignore_ascii_case(&login)) {
+            if existing.avatar.is_empty() && !account.avatar.is_empty() {
+                existing.avatar = account.avatar.clone();
+                changed = true;
+            }
+            continue;
+        }
+        if book.dismissed.contains(&login) {
             continue;
         }
         account.id = crate::sessions::new_id();
         book.accounts.push(account);
         added += 1;
     }
-    if added > 0 {
+    if added > 0 || changed {
         let _ = save_book(data_dir, &book);
     }
     added
+}
+
+/// How a project reaches its remote: the login it signs in with, and the GitHub CLI logins
+/// that could be used instead.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct RemoteAuth {
+    pub remote: String,
+    pub url: String,
+    pub host: String,
+    pub login: String,
+    pub logins: Vec<String>,
+}
+
+pub async fn remote_auth(project: &Path) -> RemoteAuth {
+    let mut out = RemoteAuth::default();
+    if let Some(remote) = active_remote(project).await {
+        out.url = git(project, &["remote", "get-url", &remote], TIMEOUT).await.map(|u| u.trim().to_string()).unwrap_or_default();
+        out.host = https_host(project, &remote).await.unwrap_or_default();
+        out.remote = remote;
+    }
+    out.login = config_get(project, "credential.username").await;
+    if !out.host.is_empty() {
+        out.logins = gh_logins(&out.host).await;
+    }
+    out
+}
+
+/// Sign in to the remote as `login` from now on ("" = whatever git picks by default).
+pub async fn set_login(project: &Path, login: &str) -> Result<()> {
+    let lock = lock_for(project);
+    let _guard = lock.lock().await;
+    if login.trim().is_empty() {
+        let _ = git(project, &["config", "--local", "--unset-all", "credential.username"], TIMEOUT).await;
+    } else {
+        git(project, &["config", "--local", "credential.username", login.trim()], TIMEOUT).await?;
+    }
+    Ok(())
 }
 
 /// Who commits in this repository, and which Serika account set it (if one did).
@@ -438,8 +496,23 @@ fn command(project: &Path) -> Command {
 
 /// Run git and return stdout; a non-zero exit is an error carrying git's own message.
 async fn git(project: &Path, args: &[&str], timeout: Duration) -> Result<String> {
+    git_as(project, args, None, timeout).await
+}
+
+/// Like `git`, but signed in to `host` as `(login, token)` for this one command: every other
+/// credential helper is switched off and one that hands git this login is used instead. The
+/// token travels in the environment, never on the command line.
+async fn git_as(project: &Path, args: &[&str], auth: Option<(&str, &str, &str)>, timeout: Duration) -> Result<String> {
     let mut cmd = command(project);
-    cmd.args(["-c", "core.quotepath=off", "-c", "color.ui=never"]).args(args);
+    cmd.args(["-c", "core.quotepath=off", "-c", "color.ui=never"]);
+    if let Some((host, login, token)) = auth {
+        let scoped = format!("credential.https://{host}.helper=");
+        cmd.args(["-c", "credential.helper=", "-c", &scoped])
+            .args(["-c", "credential.helper=!f() { echo username=\"$SERIKA_GIT_USER\"; echo password=\"$SERIKA_GIT_TOKEN\"; }; f"])
+            .env("SERIKA_GIT_USER", login)
+            .env("SERIKA_GIT_TOKEN", token);
+    }
+    cmd.args(args);
     let output = tokio::time::timeout(timeout, cmd.output())
         .await
         .map_err(|_| Error::msg(format!("git {} took too long", args.first().unwrap_or(&""))))?
@@ -683,6 +756,117 @@ pub async fn file_diff(project: &Path, path: &str, untracked: bool) -> Result<St
     Ok(cap(text))
 }
 
+/// The remote a network command talks to: the upstream's remote, else origin, else the first.
+async fn active_remote(project: &Path) -> Option<String> {
+    if let Ok(upstream) = git(project, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], TIMEOUT).await {
+        if let Some((remote, _)) = upstream.trim().split_once('/') {
+            return Some(remote.to_string());
+        }
+    }
+    let remotes = git(project, &["remote"], TIMEOUT).await.ok()?;
+    let list: Vec<&str> = remotes.lines().map(str::trim).filter(|r| !r.is_empty()).collect();
+    list.iter().find(|r| **r == "origin").or(list.first()).map(|r| r.to_string())
+}
+
+/// Host of an HTTPS remote (SSH remotes sign in with keys, not logins).
+async fn https_host(project: &Path, remote: &str) -> Option<String> {
+    let url = git(project, &["remote", "get-url", remote], TIMEOUT).await.ok()?;
+    let rest = url.trim().strip_prefix("https://")?;
+    let host = rest.split('/').next()?;
+    let host = host.rsplit('@').next()?; // drop "user@" if present
+    Some(host.to_string())
+}
+
+/// GitHub CLI logins for `host`, the active one first.
+pub async fn gh_logins(host: &str) -> Vec<String> {
+    let Some(gh) = crate::agents::find_cli("gh", None) else { return Vec::new() };
+    let mut cmd = Command::new(gh);
+    cmd.args(["auth", "status", "--json", "hosts"]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(10), cmd.output()).await else { return Vec::new() };
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    let mut list: Vec<(bool, String)> = value
+        .get("hosts")
+        .and_then(|h| h.get(host))
+        .and_then(|l| l.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|e| e.get("state").and_then(|s| s.as_str()).unwrap_or("success") == "success")
+        .filter_map(|e| Some((e.get("active").and_then(|a| a.as_bool()).unwrap_or(false), e.get("login")?.as_str()?.to_string())))
+        .collect();
+    list.sort_by_key(|(active, _)| !active);
+    list.into_iter().map(|(_, login)| login).collect()
+}
+
+async fn gh_token(host: &str, login: &str) -> Option<String> {
+    let gh = crate::agents::find_cli("gh", None)?;
+    let mut cmd = Command::new(gh);
+    cmd.args(["auth", "token", "--hostname", host, "--user", login]).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let out = tokio::time::timeout(Duration::from_secs(10), cmd.output()).await.ok()?.ok()?;
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !token.is_empty()).then_some(token)
+}
+
+fn auth_problem(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    ["repository not found", "authentication failed", "could not read username", "could not read password", "terminal prompts disabled",
+     "permission to", "403", "401", "access denied", "not authorized", "invalid username or password"]
+        .iter()
+        .any(|needle| m.contains(needle))
+}
+
+/// A command that talks to the remote, signed in as the project's login (`credential.username`)
+/// when the GitHub CLI holds it. If the remote refuses that login, the other GitHub CLI logins
+/// for the host are tried; one that works is remembered for this repository. Returns git's
+/// output and the login it switched to, if it had to.
+async fn network(project: &Path, args: &[&str]) -> Result<(String, Option<String>)> {
+    let host = match active_remote(project).await {
+        Some(remote) => https_host(project, &remote).await,
+        None => None,
+    };
+    let Some(host) = host else {
+        return git(project, args, NETWORK_TIMEOUT).await.map(|out| (out, None));
+    };
+    let chosen = config_get(project, "credential.username").await;
+    let first = if chosen.is_empty() {
+        git(project, args, NETWORK_TIMEOUT).await
+    } else {
+        match gh_token(&host, &chosen).await {
+            Some(token) => git_as(project, args, Some((&host, &chosen, &token)), NETWORK_TIMEOUT).await,
+            // Not a GitHub CLI login: the credential manager reads credential.username itself.
+            None => git(project, args, NETWORK_TIMEOUT).await,
+        }
+    };
+    let error = match first {
+        Ok(out) => return Ok((out, None)),
+        Err(err) => err,
+    };
+    if !auth_problem(&error.to_string()) {
+        return Err(error);
+    }
+    for login in gh_logins(&host).await {
+        if login.eq_ignore_ascii_case(&chosen) {
+            continue;
+        }
+        let Some(token) = gh_token(&host, &login).await else { continue };
+        if let Ok(out) = git_as(project, args, Some((&host, &login, &token)), NETWORK_TIMEOUT).await {
+            let _ = git(project, &["config", "--local", "credential.username", &login], TIMEOUT).await;
+            return Ok((out, Some(login)));
+        }
+    }
+    Err(error)
+}
+
+fn signed_in_note(text: String, switched: Option<String>) -> String {
+    match switched {
+        Some(login) => format!("{text} Signed in as {login}, which this project will use from now on."),
+        None => text,
+    }
+}
+
 /// Stash actions and network operations. Returns git's own message for the panel.
 pub async fn act(project: &Path, action: &str, index: Option<usize>, message: &str) -> Result<String> {
     let lock = lock_for(project);
@@ -713,16 +897,17 @@ pub async fn act(project: &Path, action: &str, index: Option<usize>, message: &s
             "Stashed your changes.".to_string()
         }
         ("fetch", _) => {
-            git(project, &["fetch", "--prune"], NETWORK_TIMEOUT).await?;
-            "Fetched.".to_string()
+            let (_, switched) = network(project, &["fetch", "--prune"]).await?;
+            signed_in_note("Fetched.".to_string(), switched)
         }
         ("pull", _) => {
-            let out = git(project, &["pull", "--ff-only"], NETWORK_TIMEOUT).await?;
-            out.lines().find(|l| l.contains("..") || l.contains("Already")).unwrap_or("Pulled.").trim().to_string()
+            let (out, switched) = network(project, &["pull", "--ff-only"]).await?;
+            let line = out.lines().find(|l| l.contains("..") || l.contains("Already")).unwrap_or("Pulled.").trim().to_string();
+            signed_in_note(line, switched)
         }
         ("push", _) => {
-            git(project, &["push"], NETWORK_TIMEOUT).await?;
-            "Pushed.".to_string()
+            let (_, switched) = network(project, &["push"]).await?;
+            signed_in_note("Pushed.".to_string(), switched)
         }
         // First push of a new branch: to the first remote, and track it from now on.
         ("publish", _) => {
@@ -731,8 +916,9 @@ pub async fn act(project: &Path, action: &str, index: Option<usize>, message: &s
             let Some(remote) = remote else {
                 return Err(Error::msg("this repository has no remote to publish to"));
             };
-            git(project, &["push", "-u", remote, "HEAD"], NETWORK_TIMEOUT).await?;
-            format!("Published to {remote}.")
+            let remote = remote.to_string();
+            let (_, switched) = network(project, &["push", "-u", &remote, "HEAD"]).await?;
+            signed_in_note(format!("Published to {remote}."), switched)
         }
         // `message` carries the branch name for these two.
         ("switch", _) => {

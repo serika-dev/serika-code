@@ -30,7 +30,7 @@ int main(int argc, char *argv[]) {
     parser.addOption({QStringLiteral("demo"), QStringLiteral("Use sample data instead of the signed-in account.")});
     parser.addOption({QStringLiteral("shot"), QStringLiteral("Save a screenshot to <png> and exit."), QStringLiteral("png")});
     parser.addOption({QStringLiteral("page"), QStringLiteral("Start on login, welcome, or app."), QStringLiteral("page")});
-    parser.addOption({QStringLiteral("popup"), QStringLiteral("Open models, account, chat, settings, account-settings, or shortcuts."), QStringLiteral("popup")});
+    parser.addOption({QStringLiteral("popup"), QStringLiteral("Open models, account, chat, settings, account-settings, shortcuts, palette, or project."), QStringLiteral("popup")});
     parser.addOption({QStringLiteral("theme"), QStringLiteral("Force dark or light."), QStringLiteral("theme")});
     parser.addOption({QStringLiteral("preset"), QStringLiteral("Theme preset id, for example nord."), QStringLiteral("preset")});
     parser.addOption({QStringLiteral("tab"), QStringLiteral("Settings section to open with --popup settings."), QStringLiteral("tab")});

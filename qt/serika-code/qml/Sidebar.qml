@@ -27,6 +27,12 @@ Rectangle {
     function t(key, values) { return Format.t(dict, key, values) }
     function openAccount() { accountMenu.open() }
     function focusSearch() { filter.forceActiveFocus() }
+    // Settings of the project you are in (the first project row otherwise).
+    function openProjectSettings() {
+        const heads = side.rows.filter(function (r) { return r.kind === "project" })
+        const row = heads.filter(function (r) { return r.current })[0] || heads[0]
+        if (row) projectSettings.show(row)
+    }
     function flip(map, path) {
         const next = Object.assign({}, map)
         next[path] = !(map[path] === true)
@@ -80,6 +86,8 @@ Rectangle {
             onClicked: nav.triggered()
         }
     }
+
+    ProjectSettingsSheet { id: projectSettings }
 
     // Rows of the group-and-sort menu: the chosen one shows a check instead of its icon.
     component Choice: MenuRow {
@@ -296,10 +304,11 @@ Rectangle {
                         implicitHeight: 34
                         radius: 8
                         // The project you are in stands out; the others light up on hover.
-                        color: head.r.current ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, headArea.containsMouse ? 0.16 : 0.10)
-                             : (headArea.containsMouse || headMenuButton.hovered || headMenu.opened) ? Theme.hover : "transparent"
+                        color: head.r.current ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, headHover.hovered ? 0.16 : 0.10)
+                             : (headHover.hovered || headMenu.opened) ? Theme.hover : "transparent"
                         Behavior on color { ColorAnimation { duration: Theme.motionFast } }
                         opacity: r.exists ? 1 : 0.6
+                        HoverHandler { id: headHover }
                         Rectangle {
                             visible: head.r.current
                             anchors.left: parent.left
@@ -369,7 +378,7 @@ Rectangle {
                             }
                             // Chats of this project working right now (amber when one waits for you)
                             Rectangle {
-                                visible: head.r.running > 0 && !(headArea.containsMouse || headMenuButton.hovered || headMenu.opened)
+                                visible: head.r.running > 0 && !(headHover.hovered || headMenu.opened)
                                 implicitWidth: liveRow.implicitWidth + 12
                                 implicitHeight: 18
                                 radius: 9
@@ -397,14 +406,14 @@ Rectangle {
                                 }
                             }
                             Text {
-                                visible: !(headArea.containsMouse || headMenuButton.hovered || headMenu.opened) && head.r.count > 0 && head.r.running === 0
+                                visible: !(headHover.hovered || headMenu.opened) && head.r.count > 0 && head.r.running === 0
                                 text: head.r.count
                                 color: Theme.textDim
                                 font.family: Theme.sans
                                 font.pixelSize: 12
                             }
                             IconButton {
-                                visible: head.r.exists && (headArea.containsMouse || headMenuButton.hovered || headMenu.opened)
+                                visible: head.r.exists && (headHover.hovered || headMenu.opened)
                                 icon: "edit-2"
                                 iconSize: 15
                                 implicitWidth: 26
@@ -414,7 +423,7 @@ Rectangle {
                             }
                             IconButton {
                                 id: headMenuButton
-                                visible: headArea.containsMouse || hovered || headMenu.opened
+                                visible: headHover.hovered || headMenu.opened
                                 icon: "more-horizontal"
                                 iconSize: 16
                                 implicitWidth: 26
@@ -439,6 +448,12 @@ Rectangle {
                                             label: Format.tr(side.dict, "RevealFolder", "Show in file explorer")
                                             enabledRow: head.r.exists
                                             onTriggered: { headMenu.close(); Qt.openUrlExternally("file:///" + head.r.path.replace(/\\/g, "/")) }
+                                        }
+                                        MenuRow {
+                                            icon: "sliders"
+                                            label: Format.tr(side.dict, "ProjectSettings", "Project settings")
+                                            enabledRow: head.r.exists
+                                            onTriggered: { headMenu.close(); projectSettings.show(head.r) }
                                         }
                                         MenuRow {
                                             icon: "copy"
