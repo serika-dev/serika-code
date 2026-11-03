@@ -14,6 +14,8 @@ All notable changes to Serika Code are documented in this file.
   card with each place side by side (keep yours, keep the stash, or both), whole-file choices,
   "Ask Serika" to resolve it for you, Undo, and Finish. A popped stash is only removed once
   you finish. Merges, rebases and cherry-picks that stop on conflicts use the same card.
+- **Pick the files for a stash**: tick what goes in; the rest stays in your working tree, and
+  the form stays open so you can stash it separately (split work into one stash per ticket).
 - **Your own changes never block a stash**: they are set aside, the stash goes in, and they
   come back on top (conflicts, if any, go to the same card).
 
@@ -24,6 +26,8 @@ All notable changes to Serika Code are documented in this file.
 - Pasted text with `<...>` (an email, a log) showed as an empty bubble.
 - Opening a long message or clicking in a chat no longer jumps to the bottom.
 - The Windows desktop package includes the C++ runtime, so it starts without Qt installed.
+- The installer no longer puts its folder first for every `serika-code.exe` started from
+  Explorer, which made development builds load the installed Qt.
 
 ## [0.2.0] - 2026-11-03
 

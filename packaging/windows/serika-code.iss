@@ -105,7 +105,9 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{use
 [Registry]
 ; "serika-code" from Run (Win+R) and the start of a command line
 Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\serika-code.exe"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe}"; Flags: uninsdeletekey
-Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\serika-code.exe"; ValueType: string; ValueName: "Path"; ValueData: "{app}"
+; No "Path" value: Windows would put this folder first for every serika-code.exe it starts,
+; development builds included, which then load this install's Qt.
+Root: HKA; Subkey: "Software\Microsoft\Windows\CurrentVersion\App Paths\serika-code.exe"; ValueType: none; ValueName: "Path"; Flags: deletevalue
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "Open {#AppName}"; WorkingDir: "{userdocs}"; Flags: nowait postinstall skipifsilent

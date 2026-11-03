@@ -192,7 +192,9 @@ public:
     Q_INVOKABLE void stopChat(const QString &sessionId);
     // Git panel
     Q_INVOKABLE void gitRefresh();
-    Q_INVOKABLE void gitAction(const QString &action, int index = -1, const QString &message = QString(), const QString &label = QString());
+    // paths: for stash.push, stash only these files (relative to the repository root).
+    Q_INVOKABLE void gitAction(const QString &action, int index = -1, const QString &message = QString(), const QString &label = QString(),
+                               const QStringList &paths = QStringList());
     Q_INVOKABLE void gitBranchesRefresh();
     Q_INVOKABLE void gitAccountsRefresh();
     Q_INVOKABLE void gitAccountSave(const QVariantMap &account);

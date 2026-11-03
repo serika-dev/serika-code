@@ -575,9 +575,19 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
         "git.action" => {
             let project = optional_text(&params, "project").map(PathBuf::from).unwrap_or_else(|| host.project());
             let index = params.get("index").and_then(Value::as_f64).map(|n| n.max(0.0) as usize);
-            let message = serika_runtime::git::act(&project, &text(&params, "action"), index, &text(&params, "message"))
-                .await
-                .map_err(|err| err.to_string())?;
+            let action = text(&params, "action");
+            // A stash of only some files carries them in "paths".
+            let paths: Vec<String> = params
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|list| list.iter().filter_map(|p| p.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            let message = if action == "stash.push" && !paths.is_empty() {
+                serika_runtime::git::stash_files(&project, &text(&params, "message"), &paths).await
+            } else {
+                serika_runtime::git::act(&project, &action, index, &text(&params, "message")).await
+            }
+            .map_err(|err| err.to_string())?;
             let overview = serika_runtime::git::overview(&project).await.map_err(|err| err.to_string())?;
             Ok(json!({"message": message, "overview": overview}))
         }

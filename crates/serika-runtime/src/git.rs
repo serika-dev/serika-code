@@ -34,6 +34,9 @@ pub struct Change {
     pub untracked: bool,
     /// Both sides changed it and git could not combine them.
     pub conflict: bool,
+    /// A renamed file's old path (empty otherwise)
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub from: String,
 }
 
 /// A stash, merge, rebase or cherry-pick that stopped on conflicts.
@@ -666,7 +669,7 @@ fn parse_status(text: &str, overview: &mut Overview) {
                 }
             }
         } else if let Some(rest) = line.strip_prefix("? ") {
-            overview.changes.push(Change { path: rest.to_string(), code: "??".into(), staged: false, untracked: true, conflict: false });
+            overview.changes.push(Change { path: rest.to_string(), code: "??".into(), untracked: true, ..Default::default() });
         } else if line.starts_with("1 ") || line.starts_with("2 ") || line.starts_with("u ") {
             // "1 XY sub mH mI mW hH hI path" / "2 XY ... score path\torig" / "u XY ... path"
             let fields: usize = match line.as_bytes()[0] {
@@ -677,10 +680,12 @@ fn parse_status(text: &str, overview: &mut Overview) {
             let mut parts = line.splitn(fields + 1, ' ');
             let _kind = parts.next();
             let code = parts.next().unwrap_or("..").to_string();
-            let path = parts.nth(fields - 2).unwrap_or("").split('\t').next().unwrap_or("").to_string();
+            let mut names = parts.nth(fields - 2).unwrap_or("").split('\t');
+            let path = names.next().unwrap_or("").to_string();
+            let from = names.next().unwrap_or("").to_string();
             let conflict = line.starts_with("u ");
             let staged = !conflict && code.chars().next().map(|c| c != '.').unwrap_or(false);
-            overview.changes.push(Change { path, code, staged, untracked: false, conflict });
+            overview.changes.push(Change { path, code, staged, untracked: false, conflict, from });
         }
     }
 }
@@ -1111,6 +1116,31 @@ async fn take_stash(project: &Path, index: usize, pop: bool) -> Result<String> {
             ))
         }
     }
+}
+
+/// Stash only some of your changes (paths relative to the repository root); the rest stay in
+/// the working tree, ready for another stash or to keep working on.
+pub async fn stash_files(project: &Path, message: &str, paths: &[String]) -> Result<String> {
+    let lock = lock_for(project);
+    let _guard = lock.lock().await;
+    let paths: Vec<&str> = paths.iter().map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+    if paths.is_empty() {
+        return Err(Error::msg("pick at least one file to stash"));
+    }
+    let root = repo_root(project).await?;
+    let mut args = vec!["stash", "push", "--include-untracked"];
+    let message = message.trim();
+    if !message.is_empty() {
+        args.extend(["-m", message]);
+    }
+    args.push("--");
+    args.extend(paths.iter().copied());
+    git(&root, &args, TIMEOUT).await?;
+    let left = git(&root, &["status", "--porcelain"], TIMEOUT).await.map(|s| s.lines().count()).unwrap_or(0);
+    Ok(match left {
+        0 => format!("Stashed {}.", files_phrase(paths.len())),
+        n => format!("Stashed {}. {} still in your working tree.", files_phrase(paths.len()), files_phrase(n)),
+    })
 }
 
 /// Remove the stash with this commit id, wherever it is in the list now.
@@ -1633,6 +1663,27 @@ mod tests {
         let o = overview(p).await.unwrap();
         assert!(o.conflicts.is_none() && o.stashes.is_empty() && o.changes.iter().all(|c| !c.staged));
         git(p, &["commit", "-qam", "merged"], TIMEOUT).await.unwrap();
+
+        // Split work into two stashes, file by file.
+        std::fs::write(p.join("a.txt"), "ticket A\n").unwrap();
+        std::fs::write(p.join("b.txt"), "webhook tweak\n").unwrap();
+        std::fs::write(p.join("c.txt"), "new for ticket A\n").unwrap();
+        let note = stash_files(p, "PROJ-11 ticket A", &["a.txt".into(), "c.txt".into()]).await.unwrap();
+        assert!(note.contains("1 file still"), "{note}");
+        let o = overview(p).await.unwrap();
+        assert_eq!(o.changes.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), ["b.txt"]);
+        let files = stash_diff(p, 0).await.unwrap();
+        let mut paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, ["a.txt", "c.txt"]);
+        assert!(stash_files(p, "nothing", &[]).await.is_err());
+        stash_files(p, "webhook", &["b.txt".into()]).await.unwrap();
+        let o = overview(p).await.unwrap();
+        assert!(o.changes.is_empty() && o.stashes.len() == 2 && o.stashes[0].message == "webhook");
+        act(p, "stash.pop", Some(1), "").await.unwrap();
+        act(p, "stash.pop", Some(0), "").await.unwrap();
+        git(p, &["add", "-A"], TIMEOUT).await.unwrap();
+        git(p, &["commit", "-qm", "split done"], TIMEOUT).await.unwrap();
 
         // Undo puts a conflicted pop back as it was.
         std::fs::write(p.join("b.txt"), "b one way\n").unwrap();

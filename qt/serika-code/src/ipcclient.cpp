@@ -1246,7 +1246,7 @@ void IpcClient::setGit(const QVariantMap &overview) {
     emit gitChanged();
 }
 
-void IpcClient::gitAction(const QString &action, int index, const QString &message, const QString &label) {
+void IpcClient::gitAction(const QString &action, int index, const QString &message, const QString &label, const QStringList &paths) {
     // One git operation at a time: a second click while one runs would race it.
     if (!m_gitBusy.isEmpty()) {
         emit gitMessage(QStringLiteral("Wait for \"%1\" to finish.").arg(m_gitBusy.value(QStringLiteral("label")).toString()), true);
@@ -1255,6 +1255,8 @@ void IpcClient::gitAction(const QString &action, int index, const QString &messa
     QJsonObject params{{QStringLiteral("project"), m_projectPath}, {QStringLiteral("action"), action}, {QStringLiteral("message"), message}};
     if (index >= 0)
         params.insert(QStringLiteral("index"), index);
+    if (!paths.isEmpty())
+        params.insert(QStringLiteral("paths"), QJsonArray::fromStringList(paths));
     m_gitBusy = {{QStringLiteral("action"), action}, {QStringLiteral("index"), index},
                  {QStringLiteral("label"), label.isEmpty() ? action : label},
                  {QStringLiteral("startedAt"), QDateTime::currentMSecsSinceEpoch()}};

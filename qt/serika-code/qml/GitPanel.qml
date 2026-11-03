@@ -42,6 +42,8 @@ Item {
     property bool noteError: false
     property int dropArmed: -1
     property bool stashing: false
+    // Files left out of the stash being made (path -> true); everything else goes in.
+    property var unpicked: ({})
     property string stashSig: ""
 
     function tr(key, fallback, values) { return Format.tr(dict, key, fallback, values) }
@@ -858,25 +860,176 @@ Item {
                         text: panel.tr("GitStashNow", "Stash")
                         iconName: "archive"
                         enabled: (panel.g.changes || []).length > 0 && !panel.isBusy
-                        onClicked: { panel.stashing = !panel.stashing; if (panel.stashing) Qt.callLater(stashName.focusInput) }
+                        onClicked: {
+                            panel.stashing = !panel.stashing
+                            panel.unpicked = ({})
+                            if (panel.stashing) Qt.callLater(stashName.focusInput)
+                        }
                     }
                 }
-                // New stash, named after the ticket
-                RowLayout {
+                // New stash, named after the ticket, of the files you tick
+                Rectangle {
+                    id: stashForm
                     visible: panel.repo && panel.view === "stashes" && panel.stashing
-                    Layout.fillWidth: true
-                    spacing: 6
-                    Field {
-                        id: stashName
-                        Layout.fillWidth: true
-                        icon: "edit-2"
-                        placeholder: panel.tr("GitStashName", "Ticket number and a note, e.g. 4821 login timeout")
-                        onAccepted: { ipc.gitAction("stash.push", -1, text, panel.tr("GitStashing", "Stashing your changes")); text = ""; panel.stashing = false }
+                    // Files in the middle of a conflict cannot be stashed.
+                    readonly property var files: (panel.g.changes || []).filter(function (c) { return !c.conflict })
+                    readonly property var chosen: files.filter(function (c) { return !panel.unpicked[c.path] })
+                    readonly property bool everything: chosen.length === files.length && files.length === (panel.g.changes || []).length
+                    onFilesChanged: if (files.length === 0) panel.stashing = false
+                    function save() {
+                        if (chosen.length === 0 || panel.isBusy) return
+                        const all = everything
+                        const paths = []
+                        if (!all) chosen.forEach(function (c) { paths.push(c.path); if (c.from) paths.push(c.from) })
+                        const label = all ? panel.tr("GitStashing", "Stashing your changes")
+                                                 : panel.tr("GitStashingN", "Stashing {n}", { n: chosen.length === 1 ? panel.tr("GitOneFile", "1 file") : panel.tr("GitNFiles", "{n} files", { n: chosen.length }) })
+                        ipc.gitAction("stash.push", -1, stashName.text, label, paths)
+                        stashName.text = ""
+                        panel.unpicked = ({})
+                        // Some files left: stay open for the next stash.
+                        panel.stashing = !all
+                        if (panel.stashing) Qt.callLater(stashName.focusInput)
                     }
-                    AccentButton {
-                        text: panel.tr("GitStashSave", "Save stash")
-                        enabled: !panel.isBusy
-                        onClicked: { ipc.gitAction("stash.push", -1, stashName.text, panel.tr("GitStashing", "Stashing your changes")); stashName.text = ""; panel.stashing = false }
+                    Layout.fillWidth: true
+                    Layout.bottomMargin: 6
+                    implicitHeight: formCol.implicitHeight + 24
+                    radius: 10
+                    color: Theme.card
+                    border.width: 1
+                    border.color: Theme.border
+                    ColumnLayout {
+                        id: formCol
+                        x: 12
+                        y: 12
+                        width: parent.width - 24
+                        spacing: 8
+                        Field {
+                            id: stashName
+                            Layout.fillWidth: true
+                            icon: "edit-2"
+                            placeholder: panel.tr("GitStashName", "Ticket number and a note, e.g. 4821 login timeout")
+                            onAccepted: stashForm.save()
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.topMargin: 2
+                            spacing: 8
+                            Text {
+                                text: panel.tr("GitFilesToStash", "Files to stash")
+                                color: Theme.text
+                                font.family: Theme.sans
+                                font.pixelSize: 12
+                                font.weight: Font.DemiBold
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: panel.tr("GitNofM", "{n} of {m}", { n: stashForm.chosen.length, m: stashForm.files.length })
+                                color: Theme.textDim
+                                font.family: Theme.sans
+                                font.pixelSize: 12
+                            }
+                            Text {
+                                text: stashForm.chosen.length === stashForm.files.length ? panel.tr("GitPickNone", "None") : panel.tr("GitPickAll", "All")
+                                color: Theme.accentSecondary
+                                font.family: Theme.sans
+                                font.pixelSize: 12
+                                font.weight: Font.Medium
+                                MouseArea {
+                                    anchors.fill: parent
+                                    anchors.margins: -4
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        const none = {}
+                                        if (stashForm.chosen.length === stashForm.files.length)
+                                            stashForm.files.forEach(function (c) { none[c.path] = true })
+                                        panel.unpicked = none
+                                    }
+                                }
+                            }
+                        }
+                        Repeater {
+                            model: stashForm.files
+                            delegate: Rectangle {
+                                id: pickRow
+                                required property var modelData
+                                readonly property bool picked: !panel.unpicked[modelData.path]
+                                readonly property string letter: modelData.untracked ? "U" : (modelData.code.replace(/\./g, "").charAt(0) || "M")
+                                Layout.fillWidth: true
+                                implicitHeight: 30
+                                radius: 6
+                                color: pickArea.containsMouse ? Theme.hover : "transparent"
+                                MouseArea {
+                                    id: pickArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        const next = Object.assign({}, panel.unpicked)
+                                        if (pickRow.picked) next[pickRow.modelData.path] = true
+                                        else delete next[pickRow.modelData.path]
+                                        panel.unpicked = next
+                                    }
+                                }
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 6
+                                    anchors.rightMargin: 6
+                                    spacing: 9
+                                    Rectangle {
+                                        implicitWidth: 16
+                                        implicitHeight: 16
+                                        radius: 4
+                                        color: pickRow.picked ? Theme.accent : "transparent"
+                                        border.width: pickRow.picked ? 0 : 1.5
+                                        border.color: Theme.textDim
+                                        Behavior on color { ColorAnimation { duration: Theme.motionFast } }
+                                        Icon { anchors.centerIn: parent; visible: pickRow.picked; name: "check"; size: 11; color: "white" }
+                                    }
+                                    Text {
+                                        text: pickRow.letter
+                                        color: pickRow.letter === "D" ? Theme.danger : (pickRow.letter === "A" || pickRow.letter === "U" ? Theme.success : Theme.accentSecondary)
+                                        font.family: Theme.mono
+                                        font.pixelSize: 11
+                                        font.weight: Font.DemiBold
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: pickRow.modelData.path
+                                        elide: Text.ElideMiddle
+                                        color: pickRow.picked ? Theme.text : Theme.textDim
+                                        font.family: Theme.mono
+                                        font.pixelSize: 12
+                                    }
+                                }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.topMargin: 2
+                            spacing: 6
+                            Text {
+                                Layout.fillWidth: true
+                                wrapMode: Text.Wrap
+                                text: stashForm.everything ? panel.tr("GitStashAllHint", "Everything goes into this stash.")
+                                    : panel.tr("GitStashSomeHint", "Unticked files stay in your working tree, ready for another stash.")
+                                color: Theme.textDim
+                                font.family: Theme.sans
+                                font.pixelSize: 11
+                            }
+                            ChipButton {
+                                text: panel.tr("Cancel", "Cancel")
+                                onClicked: { panel.stashing = false; stashName.text = ""; panel.unpicked = ({}) }
+                            }
+                            AccentButton {
+                                implicitHeight: 30
+                                enabled: !panel.isBusy && stashForm.chosen.length > 0
+                                opacity: enabled ? 1 : 0.5
+                                text: stashForm.everything ? panel.tr("GitStashSave", "Save stash")
+                                    : stashForm.chosen.length === 1 ? panel.tr("GitStashOne", "Stash 1 file")
+                                    : panel.tr("GitStashN", "Stash {n} files", { n: stashForm.chosen.length })
+                                onClicked: stashForm.save()
+                            }
+                        }
                     }
                 }
                 Repeater {
