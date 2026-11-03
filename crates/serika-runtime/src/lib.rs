@@ -20,6 +20,7 @@ pub mod error;
 pub mod events;
 pub mod gitinfo;
 pub mod handoff;
+pub mod subagents;
 pub mod i18n;
 pub mod logsetup;
 pub mod model;

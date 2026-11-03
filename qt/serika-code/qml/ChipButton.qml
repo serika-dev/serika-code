@@ -19,6 +19,7 @@ Button {
         border.width: btn.primary ? 0 : 1
         border.color: btn.danger ? Qt.rgba(0.96, 0.25, 0.37, 0.25) : Theme.borderSubtle
         opacity: btn.enabled ? 1 : 0.5
+        Behavior on color { ColorAnimation { duration: Theme.motionFast } }
     }
     contentItem: Row {
         spacing: 6
@@ -39,4 +40,7 @@ Button {
         }
     }
     HoverHandler { cursorShape: Qt.PointingHandCursor }
+
+    scale: btn.pressed ? 0.97 : 1
+    Behavior on scale { NumberAnimation { duration: Theme.motionFast; easing.type: Theme.easeOut } }
 }

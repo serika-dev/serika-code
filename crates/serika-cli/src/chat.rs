@@ -595,6 +595,7 @@ impl<'a> Chat<'a> {
             AgentEvent::FileChanged(diff) => renderer.file_changed(&diff.path, &diff.diff),
             AgentEvent::UsageUpdated(usage) => renderer.usage(tui::usage_brief(&usage)),
             AgentEvent::Browser { frame } => renderer.set_status(&format!("Browsing {}", frame.url)),
+            AgentEvent::Subagent { name, status, activity, .. } => renderer.subagent(&name, &status, &activity),
             AgentEvent::Handoff { from, to, messages } => {
                 let (from, to) = (self.model_name(&from), self.model_name(&to));
                 renderer.handoff(&from, &to, messages);

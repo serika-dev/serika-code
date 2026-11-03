@@ -228,6 +228,7 @@ QtObject {
     function toolMeta(name) {
         var n = (name || "")
         var lower = n.toLowerCase()
+        if (lower === "delegate_task" || lower === "task" || lower === "agent") return { label: "Delegated", icon: "users", tint: "accent" }
         if (lower === "read_file" || lower === "read" || lower === "notebookread") return { label: "Read", icon: "file-text", tint: "info" }
         if (lower === "list_dir" || lower === "list_files" || lower === "ls") return { label: "Listed", icon: "folder", tint: "info" }
         if (lower === "search_text" || lower === "grep" || lower === "ripgrep") return { label: "Searched", icon: "search", tint: "accent" }

@@ -1978,7 +1978,7 @@ impl SerikaApp {
                 AgentEvent::Completed { .. } => self.status = "Ready".into(),
                 AgentEvent::Failed { message } => self.status = message,
                 AgentEvent::Cancelled => self.status = "Cancelled".into(),
-                AgentEvent::Browser { .. } | AgentEvent::ProviderUsage { .. } | AgentEvent::Handoff { .. } => {}
+                AgentEvent::Browser { .. } | AgentEvent::ProviderUsage { .. } | AgentEvent::Handoff { .. } | AgentEvent::Subagent { .. } => {}
             }
         }
     }

@@ -140,4 +140,6 @@ Rectangle {
             onClicked: row.confirming = false
         }
     }
+
+    Behavior on color { ColorAnimation { duration: Theme.motionFast } }
 }

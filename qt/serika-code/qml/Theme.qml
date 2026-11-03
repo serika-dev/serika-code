@@ -86,6 +86,15 @@ QtObject {
     // Interface preferences
     readonly property int chatPx: chatSize === "small" ? 14 : (chatSize === "large" ? 17 : 15)
     readonly property real laneMax: chatWidth === "narrow" ? 640 : (chatWidth === "wide" ? 980 : (chatWidth === "full" ? 100000 : 768))
+
+    // Motion: one set of timings and curves so everything moves the same way.
+    property bool reduceMotion: false
+    readonly property int motionFast: reduceMotion ? 0 : 120
+    readonly property int motionBase: reduceMotion ? 0 : 220
+    readonly property int motionSlow: reduceMotion ? 0 : 360
+    readonly property int easeOut: Easing.OutCubic
+    readonly property int easeEmphasis: Easing.OutQuint
+    readonly property int easeSpring: Easing.OutBack
     readonly property int codePx: chatPx - 2
     readonly property real gap: density === "compact" ? 0.7 : 1
 

@@ -32,7 +32,7 @@ Rectangle {
     width: open ? expandedWidth : 56
     color: Theme.card
     clip: true
-    Behavior on width { enabled: !side.resizing; NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+    Behavior on width { enabled: !side.resizing; NumberAnimation { duration: Theme.motionBase; easing.type: Theme.easeEmphasis } }
 
     Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: Theme.borderSubtle }
 
@@ -115,7 +115,7 @@ Rectangle {
         NavRow {
             icon: "edit"
             label: side.t("NewChat")
-            keys: ["Ctrl", "K"]
+            keys: ["Ctrl", "N"]
             onTriggered: side.newChatRequested()
         }
 

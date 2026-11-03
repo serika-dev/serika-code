@@ -521,6 +521,8 @@ pub struct TurnRenderer {
     spinner_drawn: bool,
     line_buf: String,
     fence: Option<String>,
+    /// Inside a tool-call block the model wrote; those lines are not shown.
+    hidden_fence: bool,
     highlight: highlight::State,
     msg_started: bool,
     tools: HashMap<String, (String, String, Instant)>,
@@ -549,6 +551,7 @@ impl TurnRenderer {
             spinner_drawn: false,
             line_buf: String::new(),
             fence: None,
+            hidden_fence: false,
             highlight: highlight::State::default(),
             msg_started: false,
             tools: HashMap::new(),
@@ -613,6 +616,18 @@ impl TurnRenderer {
             let room = width.saturating_sub(visible_width(&line) + 6).max(8);
             line.push_str(&format!("  {VIOLET}›{RESET} {}{DIM}▏{RESET}", ellipsize_start(&self.draft.replace('\n', " ⏎ "), room)));
         }
+        // The line must never wrap: a wrapped spinner cannot be cleared and smears down the screen.
+        if visible_width(&line) >= width {
+            let room = width.saturating_sub(elapsed.len() + 6).max(4);
+            line = format!(
+                "{}{frame}{RESET} {BOLD}{}{RESET} {DIM}{elapsed}{RESET}",
+                fg(shimmer),
+                ellipsize_end(&self.status, room)
+            );
+            if visible_width(&line) >= width {
+                line = format!("{}{frame}{RESET} {DIM}{elapsed}{RESET}", fg(shimmer));
+            }
+        }
         write_err(&format!("{CLEAR_LINE}{line}"));
         self.spinner_drawn = true;
     }
@@ -666,6 +681,7 @@ impl TurnRenderer {
             self.emit_message_line(line.trim_end_matches('\r'));
         }
         self.close_fence();
+        self.hidden_fence = false;
         if self.msg_started {
             outln!();
         }
@@ -681,7 +697,18 @@ impl TurnRenderer {
     fn emit_message_line(&mut self, line: &str) {
         self.clear_spinner();
         let trimmed = line.trim_start();
+        // Tool calls written as fenced blocks run as tool cells; their JSON is noise here.
+        if self.hidden_fence {
+            if trimmed.starts_with("```") {
+                self.hidden_fence = false;
+            }
+            return;
+        }
         if let Some(rest) = trimmed.strip_prefix("```") {
+            if self.fence.is_none() && matches!(rest.trim(), "serika-tool" | "serika_tool" | "tool_call" | "tool") {
+                self.hidden_fence = true;
+                return;
+            }
             if !self.msg_started {
                 outln!("{VIOLET_LIGHT}●{RESET}");
                 self.msg_started = true;
@@ -846,6 +873,27 @@ impl TurnRenderer {
         outln!("{GREEN}╭{RESET} {GREEN}✓{RESET} ✎ {BOLD}Edited{RESET} {path} {GREEN}+{adds}{RESET} {RED}-{dels}{RESET}");
         print_diff_body(&self.term, diff, 40, &format!("{GREEN}│{RESET}"));
         outln!("{GREEN}╰{RESET}");
+    }
+
+    /// A sub-agent started, made progress, or finished.
+    pub fn subagent(&mut self, name: &str, status: &str, activity: &str) {
+        if !self.term.fancy {
+            errln!("sub-agent {name}: {status} {activity}");
+            return;
+        }
+        match status {
+            "running" => self.set_status(&format!("Sub-agent {name}: {activity}")),
+            _ => {
+                self.flush_partial_message();
+                self.clear_spinner();
+                let (mark, colour) = match status {
+                    "done" => ("✓", GREEN),
+                    "cancelled" => ("■", AMBER),
+                    _ => ("✗", RED),
+                };
+                outln!("{colour}{mark}{RESET} {VIOLET_LIGHT}◆{RESET} {BOLD}Sub-agent{RESET} {name} {DIM}· {status}{RESET}");
+            }
+        }
     }
 
     /// A divider where the chat moved to another model.

@@ -6,7 +6,9 @@ Item {
     id: header
     property bool browserShown: false
     property bool changesShown: false
-    readonly property bool inspectorOpen: browserShown || changesShown
+    property bool agentsShown: false
+    signal agentsRequested()
+    readonly property bool inspectorOpen: browserShown || changesShown || agentsShown
     property real rightInset: 12
     signal exportRequested()
     signal inspectorRequested()
@@ -110,6 +112,24 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         spacing: 4
 
+        // Sub-agents, once this chat has any
+        IconButton {
+            visible: ipc.agents.length > 0
+            icon: "users"
+            tip: Format.tr(header.dict, "Subagents", "Sub-agents") + "  (Ctrl Shift A)"
+            active: header.agentsShown
+            onClicked: header.agentsRequested()
+            Rectangle {
+                visible: ipc.agents.some(function (a) { return a.status === "running" })
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 5
+                width: 7
+                height: 7
+                radius: 3.5
+                color: Theme.accent
+            }
+        }
         IconButton {
             icon: "globe"
             tip: Format.tr(header.dict, "Browser", "Browser") + "  (Ctrl Shift B)"

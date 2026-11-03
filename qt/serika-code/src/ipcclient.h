@@ -60,6 +60,7 @@ class IpcClient : public QObject {
     Q_PROPERTY(QString activeSession READ activeSession NOTIFY activeSessionChanged)
     Q_PROPERTY(QObject *turns READ turns CONSTANT)
     Q_PROPERTY(QVariantList diffs READ diffs NOTIFY diffsChanged)
+    Q_PROPERTY(QVariantList agents READ agents NOTIFY agentsChanged)
     Q_PROPERTY(QVariantList attachments READ attachments NOTIFY attachmentsChanged)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
     Q_PROPERTY(QVariantList queue READ queue NOTIFY queueChanged)
@@ -122,6 +123,7 @@ public:
     QVariantList diffs() const { return m_diffs; }
     QVariantList attachments() const { return m_attachments; }
     QVariantList queue() const { return m_queue; }
+    QVariantList agents() const { return m_agents; }
     bool queuePaused() const { return m_queuePaused; }
     qint64 queueResumeAt() const { return m_queueResumeAt; }
     bool running() const { return m_running; }
@@ -224,6 +226,7 @@ signals:
     void browserChanged();
     void browserActivity();
     void queueChanged();
+    void agentsChanged();
     // Put text back in the message box (edit a sent or queued message).
     void composerFill(const QString &text);
     void diffFocus(const QString &path);
@@ -285,6 +288,7 @@ private:
     QVariantList m_diffs;
     QVariantList m_attachments;
     QVariantList m_queue;
+    QVariantList m_agents;   // sub-agents of the open chat, oldest first
     bool m_queuePaused = false;
     qint64 m_queueResumeAt = 0;
     QTimer m_queueTimer;

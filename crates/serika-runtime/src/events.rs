@@ -32,6 +32,17 @@ pub enum AgentEvent {
     Browser { frame: crate::browser::Frame },
     /// The chat moved to another model; `messages` earlier messages went along as context.
     Handoff { from: String, to: String, messages: usize },
+    /// Progress of a sub-agent this chat delegated to. `status` is running, done, failed, or cancelled.
+    Subagent {
+        id: String,
+        name: String,
+        task: String,
+        model: String,
+        status: String,
+        activity: String,
+        tools: usize,
+        summary: String,
+    },
     /// Subscription usage windows reported by Claude Code or Codex.
     ProviderUsage {
         provider: String,

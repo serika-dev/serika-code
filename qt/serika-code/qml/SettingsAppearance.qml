@@ -212,6 +212,14 @@ ColumnLayout {
             }
         }
         SettingRow {
+            heading: section.t("ReduceMotion", "Reduce motion")
+            help: section.t("ReduceMotionHelp", "Turn off animations and transitions.")
+            Toggle {
+                checked: ipc.ui.reduceMotion === true
+                onToggled: (v) => ipc.setUi("reduceMotion", v)
+            }
+        }
+        SettingRow {
             heading: section.t("ToolsExpanded", "Expand tool output")
             help: section.t("ToolsExpandedHelp", "Show what each command printed without clicking.")
             Toggle {

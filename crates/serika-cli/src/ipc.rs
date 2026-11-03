@@ -222,6 +222,36 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
         }
         "sessions.list" => sessions(&host),
         "sessions.open" => open_session(&host, &text(&params, "id")),
+        "sessions.children" => {
+            let children = runtime
+                .sessions
+                .children(&text(&params, "id"))
+                .map_err(|err| err.to_string())?;
+            let list: Vec<Value> = children
+                .iter()
+                .map(|child| {
+                    let messages = runtime.sessions.messages(&child.id).unwrap_or_default();
+                    let task = messages
+                        .iter()
+                        .find(|m| m.role == "user")
+                        .map(|m| m.content.split("\n\nYou are a sub-agent").next().unwrap_or("").to_string())
+                        .unwrap_or_default();
+                    let summary = messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == "assistant")
+                        .map(|m| serika_runtime::protocol::extract_tool_calls(&m.content).0.trim().to_string())
+                        .unwrap_or_default();
+                    let tools = runtime.sessions.tool_runs(&child.id).map(|t| t.len()).unwrap_or(0);
+                    json!({
+                        "id": child.id, "name": child.title, "model": child.model_id, "task": task,
+                        "summary": summary, "tools": tools, "status": if summary.is_empty() { "failed" } else { "done" },
+                        "updatedAt": child.updated_at,
+                    })
+                })
+                .collect();
+            Ok(json!({"agents": list}))
+        }
         "sessions.rename" => {
             runtime
                 .sessions
@@ -678,6 +708,10 @@ fn event_json(event: AgentEvent) -> Option<Value> {
         }
         AgentEvent::Handoff { from, to, messages } => json!({
             "event": "handoff", "from": from, "to": to, "messages": messages
+        }),
+        AgentEvent::Subagent { id, name, task, model, status, activity, tools, summary } => json!({
+            "event": "subagent", "id": id, "name": name, "task": task, "model": model,
+            "status": status, "activity": activity, "tools": tools, "summary": summary
         }),
         AgentEvent::ProviderUsage { provider, usage } => json!({
             "event": "providerUsage", "provider": provider,

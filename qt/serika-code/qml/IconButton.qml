@@ -32,4 +32,9 @@ Rectangle {
     ToolTip.visible: btn.tip.length > 0 && area.containsMouse
     ToolTip.delay: 500
     ToolTip.text: btn.tip
+
+    // Hover fades in; a press dips slightly.
+    Behavior on color { ColorAnimation { duration: Theme.motionFast } }
+    scale: area.containsPress ? 0.92 : 1
+    Behavior on scale { NumberAnimation { duration: Theme.motionFast; easing.type: Theme.easeOut } }
 }

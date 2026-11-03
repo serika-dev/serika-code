@@ -247,6 +247,12 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
         emit turnsReloaded();
         request(QStringLiteral("projects.list"), {}, QStringLiteral("projects"));
         request(QStringLiteral("sessions.list"), {}, QStringLiteral("sessions"));
+        m_agents.clear();
+        emit agentsChanged();
+        request(QStringLiteral("sessions.children"), {{QStringLiteral("id"), m_activeSession}}, QStringLiteral("agents"));
+    } else if (tag == QLatin1String("agents")) {
+        m_agents = result.value(QStringLiteral("agents")).toArray().toVariantList();
+        emit agentsChanged();
     } else if (tag == QLatin1String("turnAction")) {
         const QString action = m_turnAction;
         m_turnAction.clear();
@@ -409,6 +415,29 @@ void IpcClient::handleEvent(const QJsonObject &obj) {
     } else if (event == QLatin1String("browser")) {
         applyFrame(obj);
         emit browserActivity();
+    } else if (event == QLatin1String("subagent")) {
+        // Keep one row per sub-agent and update it in place; open the Agents tab when one starts.
+        QVariantMap row = obj.toVariantMap();
+        row.remove(QStringLiteral("event"));
+        const QString id = row.value(QStringLiteral("id")).toString();
+        if (row.value(QStringLiteral("status")).toString() != QLatin1String("running"))
+            row.insert(QStringLiteral("endedAt"), QDateTime::currentMSecsSinceEpoch());
+        bool found = false;
+        for (QVariant &item : m_agents) {
+            QVariantMap map = item.toMap();
+            if (map.value(QStringLiteral("id")).toString() == id) {
+                row.insert(QStringLiteral("startedAt"), map.value(QStringLiteral("startedAt")));
+                item = row;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            row.insert(QStringLiteral("startedAt"), QDateTime::currentMSecsSinceEpoch());
+            m_agents.append(row);
+            emit panelRequested(QStringLiteral("agents"));
+        }
+        emit agentsChanged();
     } else if (event == QLatin1String("handoff")) {
         // Show where the chat moved to another model, just above the reply it is writing.
         Turn marker;
@@ -1019,9 +1048,11 @@ void IpcClient::newChat() {
     m_activeSession.clear();
     m_turns.clear();
     m_diffs.clear();
+    m_agents.clear();
     setStatus(QString());
     emit activeSessionChanged();
     emit diffsChanged();
+    emit agentsChanged();
 }
 
 void IpcClient::newChatIn(const QString &folder) {
@@ -1195,6 +1226,22 @@ void IpcClient::loadDemo() {
     if (demoUi.isObject()) {
         m_ui = demoUi.object().toVariantMap();
         emit uiChanged();
+    }
+    // Two sub-agents: one still working, one finished.
+    {
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        m_agents = {
+            QVariantMap{{QStringLiteral("id"), QStringLiteral("a1")}, {QStringLiteral("name"), QStringLiteral("Audit provider timeouts")},
+                        {QStringLiteral("task"), QStringLiteral("Check every fetch_* function in providers.rs for a missing timeout and list them with line numbers.")},
+                        {QStringLiteral("model"), QStringLiteral("claude-code/sonnet")}, {QStringLiteral("status"), QStringLiteral("running")},
+                        {QStringLiteral("activity"), QStringLiteral("search_text fetch_.*timeout")}, {QStringLiteral("tools"), 4},
+                        {QStringLiteral("startedAt"), nowMs - 41000}},
+            QVariantMap{{QStringLiteral("id"), QStringLiteral("a2")}, {QStringLiteral("name"), QStringLiteral("Find duplicate model ids")},
+                        {QStringLiteral("task"), QStringLiteral("Look for model ids that two providers both report and say how the picker shows them.")},
+                        {QStringLiteral("model"), QStringLiteral("z-ai/glm-5.3-flash")}, {QStringLiteral("status"), QStringLiteral("done")},
+                        {QStringLiteral("activity"), QStringLiteral("Finished")}, {QStringLiteral("tools"), 7},
+                        {QStringLiteral("summary"), QStringLiteral("Two ids collide: `openai/gpt-4o` (OpenAI API and Serika) and `anthropic/claude-haiku-5.5`. The picker shows both rows with the same name; prefixing the provider fixes it.")},
+                        {QStringLiteral("startedAt"), nowMs - 95000}, {QStringLiteral("endedAt"), nowMs - 62000}}};
     }
     // SERIKA_DEMO_QUEUE=1 shows two queued messages, paused by a limit.
     if (qEnvironmentVariableIntValue("SERIKA_DEMO_QUEUE") == 1) {

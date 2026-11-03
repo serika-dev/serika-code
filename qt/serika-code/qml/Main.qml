@@ -27,6 +27,7 @@ ApplicationWindow {
     Binding { target: Theme; property: "chatSize"; value: win.prefs.chatSize ? win.prefs.chatSize : "medium" }
     Binding { target: Theme; property: "density"; value: win.prefs.density ? win.prefs.density : "comfortable" }
     Binding { target: Theme; property: "chatWidth"; value: win.prefs.chatWidth ? win.prefs.chatWidth : "default" }
+    Binding { target: Theme; property: "reduceMotion"; value: win.prefs.reduceMotion === true }
     Binding { target: Theme; property: "systemDark"; value: Qt.styleHints.colorScheme !== Qt.ColorScheme.Light }
 
     readonly property string page: {

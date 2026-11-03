@@ -91,7 +91,8 @@ ColumnLayout {
                     readonly property string key: (modelData.id || modelData.name) + ":" + (list.hiddenCount + index)
                     readonly property bool isCommand: meta.icon === "terminal"
                     readonly property bool isBrowser: (modelData.name || "").indexOf("browser_") === 0
-                    readonly property bool expandable: output.length > 0 || result.length > 0 || (modelData.diffPath || "").length > 0 || isBrowser
+                    readonly property bool isAgent: (modelData.name || "") === "delegate_task"
+                    readonly property bool expandable: output.length > 0 || result.length > 0 || (modelData.diffPath || "").length > 0 || isBrowser || isAgent
                     readonly property bool open: expandable && (list.openMap[key] === true || (list.expandAll && output.length > 0))
 
                     Layout.fillWidth: true
@@ -251,6 +252,12 @@ ColumnLayout {
                                 visible: tool.isBrowser
                                 text: Format.tr(ipc.strings, "OpenBrowser", "Open browser")
                                 onClicked: ipc.requestPanel("browser")
+                            }
+                            ChipButton {
+                                visible: tool.isAgent
+                                text: Format.tr(ipc.strings, "ViewAgents", "View sub-agents")
+                                iconName: "users"
+                                onClicked: ipc.requestPanel("agents")
                             }
                             ChipButton {
                                 visible: tool.output.length > 0

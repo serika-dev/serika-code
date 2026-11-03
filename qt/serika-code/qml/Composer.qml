@@ -81,7 +81,26 @@ Rectangle {
     color: Theme.composer
     border.width: 1
     border.color: ipc.running ? Theme.accent : (input.activeFocus ? Theme.border : Theme.borderSubtle)
-    Behavior on border.color { ColorAnimation { duration: 140 } }
+    Behavior on border.color { ColorAnimation { duration: Theme.motionBase } }
+
+    // A soft accent halo while you type, and a slow pulse while a reply runs.
+    Rectangle {
+        z: -1
+        anchors.fill: parent
+        anchors.margins: -4
+        radius: parent.radius + 4
+        color: "transparent"
+        border.width: 4
+        border.color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, ipc.running ? 0.22 : 0.14)
+        opacity: input.activeFocus || ipc.running ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: Theme.motionBase; easing.type: Theme.easeOut } }
+        SequentialAnimation on border.width {
+            running: ipc.running
+            loops: Animation.Infinite
+            NumberAnimation { to: 6; duration: 900; easing.type: Easing.InOutSine }
+            NumberAnimation { to: 3; duration: 900; easing.type: Easing.InOutSine }
+        }
+    }
 
     ColumnLayout {
         id: column

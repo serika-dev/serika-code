@@ -87,10 +87,13 @@ impl Runtime {
             }
         }
 
+        // Top-level chats may delegate to sub-agents; sub-agents may not delegate further.
+        let is_child = self.sessions.parent(&session_id).ok().flatten().is_some();
         let mut changed = Vec::new();
         let files = context::snapshot(&project, &exclusions).unwrap_or_default();
         let max_rounds = self.config.max_tool_rounds;
         let mut accumulated_reasoning = String::new();
+        let mut retried_empty = false;
 
         for round in 1..=max_rounds {
             if request.cancel.is_cancelled() {
@@ -101,8 +104,9 @@ impl Runtime {
             let stored = self.sessions.messages(&session_id)?;
             let brief = clip_chars(&context::brief(&project, &files, &changed), 12_000);
             let instructions = format!(
-                "{}\n\nPermission mode: {permission}.\n{brief}",
-                protocol::tool_instructions()
+                "{}{}\n\nPermission mode: {permission}.\n{brief}",
+                protocol::tool_instructions(),
+                if is_child { String::new() } else { format!("\n\n{}", crate::subagents::instructions()) }
             );
             let (history, message, message_images) =
                 pack_history(&stored, &instructions, self.config.max_context_chars);
@@ -118,6 +122,12 @@ impl Runtime {
                 )
                 .await?;
             let (visible, inline_reasoning, calls) = extract_reasoning_and_tool_calls(&reply);
+            // A model that answers with nothing at all gets one more try before the turn ends.
+            if reply.trim().is_empty() && calls.is_empty() && !retried_empty {
+                retried_empty = true;
+                emit(&request.events, AgentEvent::Status("Empty reply, asking again".into()));
+                continue;
+            }
 
             let mut round_reasoning = streamed_reasoning.trim().to_string();
             if !inline_reasoning.is_empty() && !round_reasoning.contains(&inline_reasoning) {
@@ -243,6 +253,15 @@ impl Runtime {
                 browser_enabled: self.config.browser_enabled,
             };
             let mut packed = String::from("Tool results:\n");
+            // Sub-agents of this reply start together, then their reports join the results in order.
+            let delegated: Vec<protocol::ToolCall> = calls.iter().filter(|c| c.name == "delegate_task").cloned().collect();
+            let mut reports = if delegated.is_empty() || is_child {
+                Vec::new()
+            } else {
+                let refs: Vec<&protocol::ToolCall> = delegated.iter().collect();
+                self.run_subagents(&session_id, &project, &refs, &request, permission, &model).await
+            };
+            reports.reverse();
             for call in calls {
                 if request.cancel.is_cancelled() {
                     emit(&request.events, AgentEvent::Cancelled);
@@ -261,7 +280,19 @@ impl Runtime {
                         self.sessions
                             .save_snapshot(&session_id, turn_id, &path, existed, &bytes);
                 }
-                let outcome = tools::execute(&call, &ctx).await;
+                let outcome = if call.name == "delegate_task" {
+                    if is_child {
+                        ToolOutcome {
+                            output: "sub-agents cannot start more sub-agents; do this part yourself".into(),
+                            ok: false,
+                            diff: None,
+                        }
+                    } else {
+                        reports.pop().unwrap_or(ToolOutcome { output: "the sub-agent did not run".into(), ok: false, diff: None })
+                    }
+                } else {
+                    tools::execute(&call, &ctx).await
+                };
                 if outcome.output == "cancelled" {
                     emit(&request.events, AgentEvent::Cancelled);
                     return Err(Error::Cancelled);

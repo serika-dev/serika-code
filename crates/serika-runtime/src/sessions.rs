@@ -134,6 +134,7 @@ impl SessionStore {
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN attachments TEXT", []);
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN model TEXT", []);
         let _ = conn.execute("ALTER TABLE provider_sessions ADD COLUMN synced_through INTEGER", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN parent_id TEXT", []);
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -225,6 +226,8 @@ impl SessionStore {
         if count == 0 {
             return Err(Error::msg("session not found"));
         }
+        // Sub-agent chats go with their parent.
+        conn.execute("DELETE FROM sessions WHERE parent_id = ?1", params![id])?;
         Ok(())
     }
 
@@ -232,7 +235,7 @@ impl SessionStore {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT id, project_path, title, model_id, permission, updated_at
-             FROM sessions ORDER BY updated_at DESC LIMIT 200",
+             FROM sessions WHERE parent_id IS NULL ORDER BY updated_at DESC LIMIT 200",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(SessionSummary {
@@ -268,6 +271,41 @@ impl SessionStore {
             sessions.push(row);
         }
         Ok(sessions)
+    }
+
+    /// Mark a chat as a sub-agent of another. Sub-agent chats stay out of the chat list.
+    pub fn set_parent(&self, id: &str, parent: &str) -> Result<()> {
+        let conn = self.lock();
+        conn.execute("UPDATE sessions SET parent_id = ?2 WHERE id = ?1", params![id, parent])?;
+        Ok(())
+    }
+
+    pub fn parent(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        let value: Option<Option<String>> = conn
+            .query_row("SELECT parent_id FROM sessions WHERE id = ?1", params![id], |row| row.get(0))
+            .ok();
+        Ok(value.flatten())
+    }
+
+    /// Sub-agent chats a chat started, oldest first.
+    pub fn children(&self, parent: &str) -> Result<Vec<SessionSummary>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, project_path, title, model_id, permission, updated_at
+             FROM sessions WHERE parent_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![parent], |row| {
+            Ok(SessionSummary {
+                id: row.get(0)?,
+                project_path: row.get(1)?,
+                title: row.get(2)?,
+                model_id: row.get(3)?,
+                permission: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Error::from)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<SessionSummary>> {

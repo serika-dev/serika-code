@@ -40,4 +40,9 @@ Rectangle {
         cursorShape: Qt.PointingHandCursor
         onClicked: pill.clicked()
     }
+
+    Behavior on color { ColorAnimation { duration: Theme.motionFast } }
+    Behavior on border.color { ColorAnimation { duration: Theme.motionFast } }
+    scale: area.containsPress ? 0.96 : 1
+    Behavior on scale { NumberAnimation { duration: Theme.motionFast; easing.type: Theme.easeOut } }
 }

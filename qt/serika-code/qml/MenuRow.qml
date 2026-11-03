@@ -46,4 +46,6 @@ Rectangle {
         cursorShape: row.enabledRow ? Qt.PointingHandCursor : Qt.ArrowCursor
         onClicked: if (row.enabledRow) row.triggered()
     }
+
+    Behavior on color { ColorAnimation { duration: Theme.motionFast } }
 }

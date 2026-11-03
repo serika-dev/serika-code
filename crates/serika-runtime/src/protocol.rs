@@ -44,6 +44,7 @@ const KNOWN_TOOLS: &[&str] = &[
     "browser_back",
     "browser_new_tab",
     "browser_switch_tab",
+    "delegate_task",
 ];
 
 /// Split assistant text into `(visible_prose, extracted_reasoning, tool_calls)`.

@@ -13,7 +13,11 @@ Item {
     // Dock layout, kept in ui.json: tabs or split, right or bottom, and its size.
     readonly property string dockMode: ipc.ui.dockMode === "split" ? "split" : "tabs"
     readonly property string dockSide: ipc.ui.dockSide === "bottom" ? "bottom" : "right"
-    property var splitPanes: ["browser", "changes"]
+    // Panes open as tabs in the panel, remembered between runs.
+    property var openTabs: {
+        const saved = (ipc.ui.dockTabs || "").split(",").filter(function (t) { return ["changes", "browser", "agents"].indexOf(t) >= 0 })
+        return saved.length > 0 ? saved : ["changes", "browser"]
+    }
     property bool dockMaximized: false
     property real dockSizeLive: -1
     readonly property real dockSize: {
@@ -32,25 +36,32 @@ Item {
         settingsPage.tab = tab
         shell.settingsOpen = true
     }
+    function saveTabs(list) {
+        openTabs = list
+        ipc.setUi("dockTabs", list.join(","))
+    }
     function showPanel(tab) {
+        if (openTabs.indexOf(tab) < 0) saveTabs(openTabs.concat([tab]))
         inspectorTab = tab
-        if (splitPanes.indexOf(tab) < 0) splitPanes = splitPanes.concat([tab])
         inspectorOpen = true
     }
     function togglePanel(tab) {
-        if (!inspectorOpen) { showPanel(tab); return }
-        if (dockMode === "split") {
-            if (splitPanes.indexOf(tab) < 0) { showPanel(tab); return }
-            const rest = splitPanes.filter(function (p) { return p !== tab })
-            if (rest.length === 0) inspectorOpen = false
-            else splitPanes = rest
+        if (!inspectorOpen || openTabs.indexOf(tab) < 0) { showPanel(tab); return }
+        if (dockMode === "tabs" && inspectorTab !== tab) { inspectorTab = tab; return }
+        inspectorOpen = false
+    }
+    function closeTab(tab) {
+        const rest = openTabs.filter(function (t) { return t !== tab })
+        if (rest.length === 0) {
+            inspectorOpen = false
+            dockMaximized = false
             return
         }
-        if (inspectorTab === tab) inspectorOpen = false
-        else showPanel(tab)
+        saveTabs(rest)
+        if (inspectorTab === tab) inspectorTab = rest[rest.length - 1]
     }
     function panelShown(tab) {
-        return inspectorOpen && (dockMode === "split" ? splitPanes.indexOf(tab) >= 0 : inspectorTab === tab)
+        return inspectorOpen && openTabs.indexOf(tab) >= 0 && (dockMode === "split" || inspectorTab === tab)
     }
     function clampDock(size) {
         const limit = dockSide === "bottom" ? shell.height - 220 : shell.width - sidebar.width - 360
@@ -113,6 +124,8 @@ Item {
             rightInset: shell.inspectorOpen && shell.dockSide === "right" ? 12 : 146
             browserShown: shell.panelShown("browser")
             changesShown: shell.panelShown("changes")
+            agentsShown: shell.panelShown("agents")
+            onAgentsRequested: shell.togglePanel("agents")
             onInspectorRequested: shell.togglePanel("changes")
             onBrowserRequested: shell.togglePanel("browser")
             onProviderSetupRequested: shell.openSettings("providers")
@@ -273,20 +286,15 @@ Item {
         height: full || shell.dockSide === "right" ? shell.height - titleRow - gap : shell.clampDock(shell.dockSize)
         open: shell.inspectorOpen
         tab: shell.inspectorTab
+        tabs: shell.openTabs
         mode: shell.dockMode
         side: shell.dockSide
-        panes: shell.splitPanes
         maximized: shell.dockMaximized
-        onTabRequested: (id) => {
-            if (shell.dockMode === "split") shell.togglePanel(id)
-            else shell.inspectorTab = id
-        }
+        onTabRequested: (id) => shell.showPanel(id)
+        onTabClosed: (id) => shell.closeTab(id)
         onCloseRequested: { shell.inspectorOpen = false; shell.dockMaximized = false }
         onMaximizeRequested: shell.dockMaximized = !shell.dockMaximized
-        onModeRequested: (mode) => {
-            ipc.setUi("dockMode", mode)
-            if (mode === "split") shell.splitPanes = ["browser", "changes"]
-        }
+        onModeRequested: (mode) => ipc.setUi("dockMode", mode)
         onSideRequested: (side) => { shell.dockSizeLive = -1; ipc.setUi("dockSide", side) }
 
         // Drag the inner edge to resize the dock
@@ -299,6 +307,17 @@ Item {
             height: shell.dockSide === "bottom" ? 8 : parent.height
             cursorShape: shell.dockSide === "right" ? Qt.SizeHorCursor : Qt.SizeVerCursor
             hoverEnabled: true
+            // A grip shows where to drag, as in T3.
+            Rectangle {
+                anchors.centerIn: parent
+                width: shell.dockSide === "right" ? 4 : 44
+                height: shell.dockSide === "right" ? 44 : 4
+                radius: 2
+                color: parent.pressed ? Theme.accent : Theme.textDim
+                opacity: parent.pressed ? 1 : (parent.containsMouse ? 0.8 : 0)
+                Behavior on opacity { NumberAnimation { duration: Theme.motionFast } }
+                Behavior on color { ColorAnimation { duration: Theme.motionFast } }
+            }
             property point start
             property real startSize: 0
             onPressed: (mouse) => { start = mapToItem(shell, mouse.x, mouse.y); startSize = shell.clampDock(shell.dockSize) }
@@ -321,7 +340,9 @@ Item {
         z: 50
         visible: opacity > 0
         opacity: shell.settingsOpen ? 1 : 0
-        Behavior on opacity { NumberAnimation { duration: 140 } }
+        scale: shell.settingsOpen ? 1 : 0.985
+        Behavior on opacity { NumberAnimation { duration: Theme.motionBase; easing.type: Theme.easeOut } }
+        Behavior on scale { NumberAnimation { duration: Theme.motionBase; easing.type: Theme.easeEmphasis } }
         onCloseRequested: shell.settingsOpen = false
 
         // The window has no title bar, so the top edge doubles as a drag handle.
@@ -424,12 +445,30 @@ Item {
         onAccepted: ipc.exportMarkdown(selectedFile)
     }
 
-    Shortcut { sequences: ["Ctrl+K", "Ctrl+N"]; onActivated: shell.newChat() }
+    Shortcut { sequence: "Ctrl+N"; onActivated: shell.newChat() }
+    Timer { id: paletteTimer; interval: 400; onTriggered: commandPalette.open() }
+    Shortcut { sequences: ["Ctrl+K", "Ctrl+P"]; onActivated: commandPalette.opened ? commandPalette.close() : commandPalette.open() }
+
+    CommandPalette {
+        id: commandPalette
+        onActionTriggered: (id) => {
+            if (id === "new") shell.newChat()
+            else if (id === "model") header.openModels()
+            else if (id === "changes" || id === "browser" || id === "agents") shell.showPanel(id)
+            else if (id === "sidebar") shell.sidebarOpen = !shell.sidebarOpen
+            else if (id === "project") folderDialog.open()
+            else if (id === "export") exportDialog.open()
+            else if (id === "settings") shell.openSettings("general")
+            else if (id === "appearance") shell.openSettings("appearance")
+            else if (id === "shortcuts") shortcuts.open()
+        }
+    }
     Shortcut { sequence: "Ctrl+Shift+S"; onActivated: shell.sidebarOpen = !shell.sidebarOpen }
     Shortcut { sequence: "Ctrl+B"; onActivated: shell.togglePanel("changes") }
     Shortcut { sequence: "Ctrl+Shift+B"; onActivated: shell.togglePanel("browser") }
     Shortcut { sequence: "Ctrl+,"; onActivated: shell.openSettings("general") }
     Shortcut { sequence: "Ctrl+Shift+M"; onActivated: header.openModels() }
+    Shortcut { sequence: "Ctrl+Shift+A"; onActivated: shell.togglePanel("agents") }
     Shortcut { sequence: "Ctrl+/"; onActivated: shortcuts.open() }
 
     Component.onCompleted: Qt.callLater(function () {
@@ -439,6 +478,7 @@ Item {
         else if (startPopup === "settings") shell.openSettings(startTab.length > 0 ? startTab : "general")
         else if (startPopup === "account-settings") shell.openSettings("account")
         else if (startPopup === "shortcuts") shortcuts.open()
+        else if (startPopup === "palette") paletteTimer.start()
         else if (startPopup === "inspector") shell.showPanel("changes")
         else if (startPopup === "hero") ipc.newChat()
         if (startPanel.length > 0) shell.showPanel(startPanel)

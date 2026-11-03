@@ -15,11 +15,14 @@ Popup {
         border.width: 1
         border.color: Theme.border
     }
+    // Grows out of the corner it opens from, then settles.
+    transformOrigin: Popup.Top
     enter: Transition {
-        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 110; easing.type: Easing.OutCubic }
-        NumberAnimation { property: "scale"; from: 0.97; to: 1; duration: 110; easing.type: Easing.OutCubic }
+        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.motionBase; easing.type: Theme.easeOut }
+        NumberAnimation { property: "scale"; from: 0.94; to: 1; duration: Theme.motionBase; easing.type: Theme.easeEmphasis }
     }
     exit: Transition {
-        NumberAnimation { property: "opacity"; to: 0; duration: 80 }
+        NumberAnimation { property: "opacity"; to: 0; duration: Theme.motionFast; easing.type: Easing.InCubic }
+        NumberAnimation { property: "scale"; to: 0.97; duration: Theme.motionFast; easing.type: Easing.InCubic }
     }
 }

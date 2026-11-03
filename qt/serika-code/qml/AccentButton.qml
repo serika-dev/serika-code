@@ -13,6 +13,7 @@ Button {
         radius: 12
         color: btn.hovered ? btn.fillHover : btn.fill
         opacity: btn.enabled ? 1 : 0.5
+        Behavior on color { ColorAnimation { duration: Theme.motionFast } }
     }
     contentItem: Text {
         text: btn.text
@@ -25,4 +26,7 @@ Button {
         elide: Text.ElideRight
     }
     HoverHandler { cursorShape: Qt.PointingHandCursor }
+
+    scale: btn.pressed ? 0.97 : 1
+    Behavior on scale { NumberAnimation { duration: Theme.motionFast; easing.type: Theme.easeOut } }
 }
