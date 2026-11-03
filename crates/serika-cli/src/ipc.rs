@@ -1360,6 +1360,7 @@ fn sessions(host: &Host) -> Result<Value, String> {
                 "title": item.title,
                 "model": item.model_id,
                 "updatedAt": item.updated_at,
+                "createdAt": item.created_at,
                 "project": plain(&item.project_path),
                 "key": canon_key(&item.project_path),
             })

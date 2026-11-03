@@ -1432,6 +1432,7 @@ impl SerikaApp {
                 model_id: "openrouter/free".into(),
                 permission: "standard".into(),
                 updated_at: now - 3600 * 2,
+                created_at: now - 3600 * 2,
             },
             SessionSummary {
                 id: "sess_02".into(),
@@ -1440,6 +1441,7 @@ impl SerikaApp {
                 model_id: "openrouter/free".into(),
                 permission: "standard".into(),
                 updated_at: now - 3600 * 24,
+                created_at: now - 3600 * 24,
             },
             SessionSummary {
                 id: "sess_03".into(),
@@ -1448,6 +1450,7 @@ impl SerikaApp {
                 model_id: "openrouter/free".into(),
                 permission: "standard".into(),
                 updated_at: now - 86400 * 8,
+                created_at: now - 86400 * 8,
             },
             SessionSummary {
                 id: "sess_04".into(),
@@ -1456,6 +1459,7 @@ impl SerikaApp {
                 model_id: "openrouter/free".into(),
                 permission: "standard".into(),
                 updated_at: now - 86400 * 10,
+                created_at: now - 86400 * 10,
             },
             SessionSummary {
                 id: "sess_05".into(),
@@ -1464,6 +1468,7 @@ impl SerikaApp {
                 model_id: "openrouter/free".into(),
                 permission: "standard".into(),
                 updated_at: now - 86400 * 12,
+                created_at: now - 86400 * 12,
             },
             SessionSummary {
                 id: "sess_06".into(),
@@ -1472,6 +1477,7 @@ impl SerikaApp {
                 model_id: "openrouter/free".into(),
                 permission: "standard".into(),
                 updated_at: now - 86400 * 15,
+                created_at: now - 86400 * 15,
             },
             SessionSummary {
                 id: "sess_07".into(),
@@ -1480,6 +1486,7 @@ impl SerikaApp {
                 model_id: "openrouter/free".into(),
                 permission: "standard".into(),
                 updated_at: now - 86400 * 18,
+                created_at: now - 86400 * 18,
             },
         ];
 

@@ -14,6 +14,7 @@ pub struct SessionSummary {
     pub model_id: String,
     pub permission: String,
     pub updated_at: i64,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -235,7 +236,7 @@ impl SessionStore {
     pub fn list(&self, project: Option<&Path>) -> Result<Vec<SessionSummary>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, project_path, title, model_id, permission, updated_at
+            "SELECT id, project_path, title, model_id, permission, updated_at, created_at
              FROM sessions WHERE parent_id IS NULL ORDER BY updated_at DESC LIMIT 200",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -246,6 +247,7 @@ impl SessionStore {
                 model_id: row.get(3)?,
                 permission: row.get(4)?,
                 updated_at: row.get(5)?,
+                created_at: row.get(6)?,
             })
         })?;
         let mut sessions = Vec::new();
@@ -293,7 +295,7 @@ impl SessionStore {
     pub fn children(&self, parent: &str) -> Result<Vec<SessionSummary>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, project_path, title, model_id, permission, updated_at
+            "SELECT id, project_path, title, model_id, permission, updated_at, created_at
              FROM sessions WHERE parent_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![parent], |row| {
@@ -304,6 +306,7 @@ impl SessionStore {
                 model_id: row.get(3)?,
                 permission: row.get(4)?,
                 updated_at: row.get(5)?,
+                created_at: row.get(6)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Error::from)
@@ -312,7 +315,7 @@ impl SessionStore {
     pub fn get(&self, id: &str) -> Result<Option<SessionSummary>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, project_path, title, model_id, permission, updated_at
+            "SELECT id, project_path, title, model_id, permission, updated_at, created_at
              FROM sessions WHERE id = ?1",
         )?;
         let mut rows = stmt.query_map(params![id], |row| {
@@ -323,6 +326,7 @@ impl SessionStore {
                 model_id: row.get(3)?,
                 permission: row.get(4)?,
                 updated_at: row.get(5)?,
+                created_at: row.get(6)?,
             })
         })?;
         match rows.next() {

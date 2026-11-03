@@ -41,7 +41,8 @@ Rectangle {
         anchors.left: parent.left
         anchors.leftMargin: 10 + row.indent
         anchors.right: parent.right
-        anchors.rightMargin: (area.containsMouse || menuButton.hovered || menu.opened) ? (row.working ? 64 : 36) : (row.live.length > 0 ? 34 : (row.time.length > 0 ? 40 : 10))
+        anchors.rightMargin: (area.containsMouse || menuButton.hovered || menu.opened) ? (row.working ? 64 : 36)
+                           : (row.live.length > 0 ? 34 : (row.time.length > 0 ? timeLabel.implicitWidth + 18 : 10))
         anchors.verticalCenter: parent.verticalCenter
         text: row.title.length > 0 ? row.title : Format.t(row.dict, "NewChat")
         elide: Text.ElideRight
@@ -50,6 +51,7 @@ Rectangle {
         font.pixelSize: 14
     }
     Text {
+        id: timeLabel
         visible: !row.editing && !row.confirming && row.time.length > 0 && row.live.length === 0 && !(area.containsMouse || menuButton.hovered || menu.opened)
         anchors.right: parent.right
         anchors.rightMargin: 10

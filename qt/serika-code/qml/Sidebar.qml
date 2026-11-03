@@ -16,7 +16,14 @@ Rectangle {
     signal newChatInRequested(string path)
 
     readonly property var dict: ipc.strings
-    readonly property var rows: Format.projectRows(ipc.projects, ipc.sessions, filter.text, collapsed, expanded, chatLimit, ipc.liveChats)
+    // How the chat list is arranged, kept in ui.json: grouped by project, by day, or one list;
+    // sorted by last activity, newest first, or name; running chats optionally on top.
+    readonly property string groupBy: ["projects", "date", "none"].indexOf(ipc.ui.sidebarGroup) >= 0 ? ipc.ui.sidebarGroup : "projects"
+    readonly property string sortBy: ["recent", "created", "title"].indexOf(ipc.ui.sidebarSort) >= 0 ? ipc.ui.sidebarSort : "recent"
+    readonly property bool runningFirst: ipc.ui.sidebarRunningFirst !== false
+    readonly property var rows: groupBy === "projects"
+        ? Format.projectRows(ipc.projects, ipc.sessions, filter.text, collapsed, expanded, chatLimit, ipc.liveChats, sortBy, runningFirst)
+        : Format.chatRows(ipc.sessions, filter.text, collapsed, ipc.liveChats, groupBy, sortBy, runningFirst)
     function t(key, values) { return Format.t(dict, key, values) }
     function openAccount() { accountMenu.open() }
     function focusSearch() { filter.forceActiveFocus() }
@@ -72,6 +79,24 @@ Rectangle {
             cursorShape: Qt.PointingHandCursor
             onClicked: nav.triggered()
         }
+    }
+
+    // Rows of the group-and-sort menu: the chosen one shows a check instead of its icon.
+    component Choice: MenuRow {
+        property bool chosen: false
+        property string glyph: ""
+        icon: chosen ? "check" : glyph
+    }
+    component Heading: Text {
+        Layout.leftMargin: 10
+        Layout.topMargin: 6
+        Layout.bottomMargin: 2
+        color: Theme.textDim
+        font.family: Theme.sans
+        font.pixelSize: 11
+        font.weight: Font.Medium
+        font.capitalization: Font.AllUppercase
+        font.letterSpacing: 0.6
     }
 
     // Expanded sidebar
@@ -160,7 +185,11 @@ Rectangle {
             Layout.rightMargin: 2
             spacing: 6
             Text {
-                text: Format.tr(side.dict, "Projects", "Projects")
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+                text: side.groupBy === "date" ? Format.tr(side.dict, "ChatsByDate", "Chats by date")
+                    : side.groupBy === "none" ? Format.tr(side.dict, "AllChats", "All chats")
+                    : Format.tr(side.dict, "Projects", "Projects")
                 color: Theme.textDim
                 font.family: Theme.sans
                 font.pixelSize: 12
@@ -168,7 +197,60 @@ Rectangle {
                 font.capitalization: Font.AllUppercase
                 font.letterSpacing: 0.6
             }
-            Item { Layout.fillWidth: true }
+            IconButton {
+                id: sortButton
+                icon: "sort"
+                iconSize: 15
+                implicitWidth: 28
+                implicitHeight: 28
+                active: sortMenu.opened
+                tip: Format.tr(side.dict, "SortChats", "Group and sort chats")
+                onClicked: sortMenu.opened ? sortMenu.close() : sortMenu.open()
+                Popover {
+                    id: sortMenu
+                    x: 0
+                    y: sortButton.height + 4
+                    width: 236
+
+                    contentItem: ColumnLayout {
+                        spacing: 0
+                        Heading { text: Format.tr(side.dict, "GroupBy", "Group by") }
+                        Choice { glyph: "folder"; label: Format.tr(side.dict, "GroupProjects", "Projects"); chosen: side.groupBy === "projects"; onTriggered: ipc.setUi("sidebarGroup", "projects") }
+                        Choice { glyph: "calendar"; label: Format.tr(side.dict, "GroupDate", "Date"); chosen: side.groupBy === "date"; onTriggered: ipc.setUi("sidebarGroup", "date") }
+                        Choice { glyph: "list"; label: Format.tr(side.dict, "GroupNone", "One list"); chosen: side.groupBy === "none"; onTriggered: ipc.setUi("sidebarGroup", "none") }
+                        MenuDivider {}
+                        Heading { text: Format.tr(side.dict, "SortBy", "Sort by") }
+                        Choice { glyph: "clock"; label: Format.tr(side.dict, "SortRecent", "Last activity"); chosen: side.sortBy === "recent"; onTriggered: ipc.setUi("sidebarSort", "recent") }
+                        Choice { glyph: "plus"; label: Format.tr(side.dict, "SortCreated", "Newest first"); chosen: side.sortBy === "created"; onTriggered: ipc.setUi("sidebarSort", "created") }
+                        Choice { glyph: "type"; label: Format.tr(side.dict, "SortTitle", "Name, A to Z"); chosen: side.sortBy === "title"; onTriggered: ipc.setUi("sidebarSort", "title") }
+                        MenuDivider {}
+                        Choice {
+                            glyph: "loader"
+                            label: Format.tr(side.dict, "RunningFirst", "Running chats on top")
+                            chosen: side.runningFirst
+                            onTriggered: ipc.setUi("sidebarRunningFirst", !side.runningFirst)
+                        }
+                        Choice {
+                            glyph: "minimize-2"
+                            label: Format.tr(side.dict, "CollapseAll", "Collapse all")
+                            onTriggered: {
+                                sortMenu.close()
+                                const next = {}
+                                side.rows.forEach(function (r) {
+                                    if (r.kind === "project") next[r.path] = true
+                                    if (r.kind === "group") next["group:" + r.key] = true
+                                })
+                                side.collapsed = next
+                            }
+                        }
+                        Choice {
+                            glyph: "maximize-2"
+                            label: Format.tr(side.dict, "ExpandAll", "Expand all")
+                            onTriggered: { sortMenu.close(); side.collapsed = ({}) }
+                        }
+                    }
+                }
+            }
             IconButton {
                 icon: "folder-plus"
                 iconSize: 16
@@ -201,6 +283,7 @@ Rectangle {
                     id: loader
                     width: parent.width
                     sourceComponent: cell.modelData.kind === "project" ? projectHead
+                                   : cell.modelData.kind === "group" ? groupHead
                                    : cell.modelData.kind === "session" ? sessionRow
                                    : cell.modelData.kind === "more" ? moreRow : emptyRow
                 }
@@ -212,20 +295,56 @@ Rectangle {
                         readonly property var r: cell.modelData
                         implicitHeight: 34
                         radius: 8
-                        color: (headArea.containsMouse || headMenuButton.hovered || headMenu.opened) ? Theme.hover : "transparent"
+                        // The project you are in stands out; the others light up on hover.
+                        color: head.r.current ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, headArea.containsMouse ? 0.16 : 0.10)
+                             : (headArea.containsMouse || headMenuButton.hovered || headMenu.opened) ? Theme.hover : "transparent"
+                        Behavior on color { ColorAnimation { duration: Theme.motionFast } }
                         opacity: r.exists ? 1 : 0.6
+                        Rectangle {
+                            visible: head.r.current
+                            anchors.left: parent.left
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 3
+                            height: 16
+                            radius: 1.5
+                            color: Theme.accent
+                        }
 
                         RowLayout {
                             anchors.fill: parent
                             anchors.leftMargin: 6
                             anchors.rightMargin: 4
                             spacing: 6
-                            Icon {
-                                name: "chevron-right"
-                                size: 13
-                                color: Theme.textDim
-                                rotation: head.r.collapsed ? 0 : 90
-                                Behavior on rotation { NumberAnimation { duration: 130 } }
+                            // The arrow folds the project; the rest of the row switches to it.
+                            Item {
+                                Layout.preferredWidth: 18
+                                Layout.preferredHeight: 26
+                                Rectangle {
+                                    anchors.centerIn: parent
+                                    width: 18
+                                    height: 18
+                                    radius: 5
+                                    color: foldArea.containsMouse ? Theme.active : "transparent"
+                                }
+                                Icon {
+                                    anchors.centerIn: parent
+                                    name: "chevron-right"
+                                    size: 13
+                                    color: foldArea.containsMouse ? Theme.text : Theme.textDim
+                                    rotation: head.r.collapsed ? 0 : 90
+                                    Behavior on rotation { NumberAnimation { duration: 130 } }
+                                }
+                                MouseArea {
+                                    id: foldArea
+                                    anchors.fill: parent
+                                    anchors.margins: -2
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: side.collapsed = side.flip(side.collapsed, head.r.path)
+                                    ToolTip.visible: containsMouse
+                                    ToolTip.delay: 500
+                                    ToolTip.text: head.r.collapsed ? Format.tr(side.dict, "ExpandProject", "Show chats") : Format.tr(side.dict, "CollapseProject", "Hide chats")
+                                }
                             }
                             Icon {
                                 name: head.r.exists ? "folder" : "alert-triangle"
@@ -367,10 +486,17 @@ Rectangle {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             z: -1
-                            onClicked: side.collapsed = side.flip(side.collapsed, head.r.path)
+                            // Switch to this project: a fresh chat there, with its chats shown.
+                            onClicked: {
+                                if (head.r.collapsed) side.collapsed = side.flip(side.collapsed, head.r.path)
+                                if (head.r.exists && !head.r.current) side.newChatInRequested(head.r.path)
+                            }
                             ToolTip.visible: containsMouse
-                            ToolTip.delay: 700
-                            ToolTip.text: head.r.path.replace(/^\\\\\?\\/, "") + (head.r.exists ? "" : "  (folder not found)")
+                            ToolTip.delay: 600
+                            ToolTip.text: head.r.path.replace(/^\\\\\?\\/, "")
+                                          + (!head.r.exists ? "  (folder not found)"
+                                             : head.r.current ? "\n" + Format.tr(side.dict, "CurrentProject", "You are working in this project")
+                                             : "\n" + Format.tr(side.dict, "SwitchProject", "Click to switch to this project"))
                         }
                     }
                 }
@@ -380,9 +506,66 @@ Rectangle {
                     SessionRow {
                         sessionId: cell.modelData.id
                         title: cell.modelData.title
-                        indent: 22
-                        time: Format.relTime(cell.modelData.updatedAt)
+                        indent: cell.modelData.flat ? 8 : 22
+                        // Without project groups, say which folder the chat belongs to.
+                        time: cell.modelData.flat ? Format.ellipsize(cell.modelData.folder, 12) + " · " + Format.relTime(cell.modelData.updatedAt)
+                                                  : Format.relTime(cell.modelData.updatedAt)
                         active: cell.modelData.id === ipc.activeSession
+                    }
+                }
+
+                // Day (or "Running now") heading when chats are grouped by date
+                Component {
+                    id: groupHead
+                    Rectangle {
+                        id: group
+                        readonly property var r: cell.modelData
+                        implicitHeight: 30
+                        radius: 8
+                        color: groupArea.containsMouse ? Theme.hover : "transparent"
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 6
+                            anchors.rightMargin: 8
+                            spacing: 6
+                            Icon {
+                                name: "chevron-right"
+                                size: 13
+                                color: Theme.textDim
+                                rotation: group.r.collapsed ? 0 : 90
+                                Behavior on rotation { NumberAnimation { duration: 130 } }
+                            }
+                            Icon {
+                                id: groupSpin
+                                visible: group.r.key === "running"
+                                name: group.r.waiting ? "alert-circle" : "loader"
+                                size: 13
+                                color: group.r.waiting ? Theme.warning : Theme.accentSecondary
+                                RotationAnimator on rotation { running: groupSpin.visible && !group.r.waiting; from: 0; to: 360; duration: 1000; loops: Animation.Infinite }
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: group.r.label
+                                elide: Text.ElideRight
+                                color: group.r.key === "running" ? Theme.accentSecondary : Theme.textSecondary
+                                font.family: Theme.sans
+                                font.pixelSize: 13
+                                font.weight: Font.DemiBold
+                            }
+                            Text {
+                                text: group.r.count
+                                color: Theme.textDim
+                                font.family: Theme.sans
+                                font.pixelSize: 12
+                            }
+                        }
+                        MouseArea {
+                            id: groupArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: side.collapsed = side.flip(side.collapsed, "group:" + group.r.key)
+                        }
                     }
                 }
 

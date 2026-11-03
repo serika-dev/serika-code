@@ -172,12 +172,26 @@ QtObject {
     // Flat rows for the sidebar: a header per project, then its chats (newest first).
     // `collapsed` and `expanded` are maps keyed by project path; `live` maps session id to
     // "running", "waiting" or "done", so running chats always show and their project says so.
-    function projectRows(projects, sessions, query, collapsed, expanded, limit, live) {
+    // `sort`: "recent" (last activity, default), "created" (newest first) or "title" (A to Z).
+    function chatOrder(sort, live, runningFirst) {
+        return function (a, b) {
+            if (runningFirst) {
+                var ra = live[a.id] === "running" || live[a.id] === "waiting"
+                var rb = live[b.id] === "running" || live[b.id] === "waiting"
+                if (ra !== rb) return ra ? -1 : 1
+            }
+            if (sort === "title") return (a.title || "").localeCompare(b.title || "", undefined, { sensitivity: "base" })
+            if (sort === "created") return (b.createdAt || b.updatedAt) - (a.createdAt || a.updatedAt)
+            return b.updatedAt - a.updatedAt
+        }
+    }
+
+    function projectRows(projects, sessions, query, collapsed, expanded, limit, live, sort, runningFirst) {
         live = live || {}
         var q = (query || "").trim().toLowerCase()
         var byProject = {}
         var list = (sessions || []).slice()
-        list.sort(function (a, b) { return b.updatedAt - a.updatedAt })
+        list.sort(chatOrder(sort, live, runningFirst))
         for (var i = 0; i < list.length; ++i) {
             var s = list[i]
             if (q && (s.title || "").toLowerCase().indexOf(q) < 0) continue
@@ -201,8 +215,14 @@ QtObject {
                               sessionCount: byProject[key2].length, current: false },
                          key: key2, chats: byProject[key2], latest: first.updatedAt })
         }
+        heads.forEach(function (h) {
+            h.created = h.chats.reduce(function (m, s) { return Math.max(m, s.createdAt || s.updatedAt || 0) }, 0)
+            h.latest = h.chats.reduce(function (m, s) { return Math.max(m, s.updatedAt || 0) }, h.latest)
+        })
         heads.sort(function (a, b) {
             if (a.p.current !== b.p.current) return a.p.current ? -1 : 1
+            if (sort === "title") return (a.p.name || "").localeCompare(b.p.name || "", undefined, { sensitivity: "base" })
+            if (sort === "created") return b.created - a.created
             return b.latest - a.latest
         })
         var rows = []
@@ -228,6 +248,70 @@ QtObject {
             if (h.chats.length === 0)
                 rows.push({ kind: "empty", path: path })
         })
+        return rows
+    }
+
+    function ellipsize(text, max) {
+        text = text || ""
+        return text.length > max ? text.substring(0, max - 1) + "…" : text
+    }
+
+    // Which day bucket a time (unix seconds) falls in: today, yesterday, the last 7 or 30 days,
+    // then one bucket per month.
+    function dayBucket(seconds) {
+        var now = new Date()
+        var startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000
+        var day = 86400
+        if (seconds >= startToday) return { key: "0today", label: "Today" }
+        if (seconds >= startToday - day) return { key: "1yesterday", label: "Yesterday" }
+        if (seconds >= startToday - 7 * day) return { key: "2week", label: "Previous 7 days" }
+        if (seconds >= startToday - 30 * day) return { key: "3month", label: "Previous 30 days" }
+        var d = new Date(seconds * 1000)
+        var months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        return { key: "4" + (9999 - d.getFullYear()) + String(99 - d.getMonth()).padStart(2, "0"), label: months[d.getMonth()] + " " + d.getFullYear() }
+    }
+
+    // Sidebar rows when chats are not grouped by project: by day ("date") or one list ("none").
+    // Chats that are running can sit in their own group on top. Each chat carries its folder
+    // name so you can tell projects apart.
+    function chatRows(sessions, query, collapsed, live, group, sort, runningFirst) {
+        live = live || {}
+        var q = (query || "").trim().toLowerCase()
+        var list = (sessions || []).filter(function (s) { return !q || (s.title || "").toLowerCase().indexOf(q) >= 0 })
+        list.sort(chatOrder(sort, live, false))
+        var rows = []
+        function folder(s) { return (s.project || "").replace(/\\/g, "/").replace(/\/$/, "").split("/").pop() }
+        function push(key, label, chats) {
+            if (chats.length === 0) return
+            var isCollapsed = !q && collapsed && collapsed["group:" + key] === true
+            var running = chats.filter(function (s) { return live[s.id] === "running" || live[s.id] === "waiting" })
+            rows.push({ kind: "group", key: key, label: label, count: chats.length, collapsed: isCollapsed, running: running.length,
+                        waiting: running.some(function (s) { return live[s.id] === "waiting" }) })
+            if (isCollapsed) return
+            chats.forEach(function (s) {
+                rows.push({ kind: "session", id: s.id, title: s.title || "", updatedAt: s.updatedAt, project: s.project, folder: folder(s), flat: true })
+            })
+        }
+        if (runningFirst) {
+            var busy = list.filter(function (s) { return live[s.id] === "running" || live[s.id] === "waiting" })
+            push("running", "Running now", busy)
+            list = list.filter(function (s) { return busy.indexOf(s) < 0 })
+        }
+        if (group === "date") {
+            var buckets = {}
+            var order = []
+            list.forEach(function (s) {
+                var b = dayBucket(sort === "created" ? (s.createdAt || s.updatedAt) : s.updatedAt)
+                if (!buckets[b.key]) { buckets[b.key] = { label: b.label, chats: [] }; order.push(b.key) }
+                buckets[b.key].chats.push(s)
+            })
+            order.sort()
+            order.forEach(function (k) { push(k, buckets[k].label, buckets[k].chats) })
+        } else {
+            push("all", sort === "title" ? "All chats, A to Z" : "All chats", list)
+        }
+        if (rows.length === 0)
+            rows.push({ kind: "empty", path: "" })
         return rows
     }
 
