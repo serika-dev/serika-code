@@ -98,6 +98,8 @@ class IpcClient : public QObject {
     Q_PROPERTY(QVariantList skills READ skills NOTIFY skillsChanged)
     Q_PROPERTY(QString browserImage READ browserImage NOTIFY browserImageChanged)
     Q_PROPERTY(bool folderMissing READ folderMissing NOTIFY activeSessionChanged)
+    Q_PROPERTY(QString folderMissingPath READ folderMissingPath NOTIFY activeSessionChanged)
+    Q_PROPERTY(bool projectsChecking READ projectsChecking NOTIFY projectsChanged)
     Q_PROPERTY(QVariantList attachments READ attachments NOTIFY attachmentsChanged)
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
     Q_PROPERTY(QVariantList queue READ queue NOTIFY queueChanged)
@@ -174,6 +176,8 @@ public:
     QVariantList skills() const { return m_skills; }
     QString browserImage() const { return m_browserImage; }
     bool folderMissing() const { return m_folderMissing; }
+    QString folderMissingPath() const { return m_folderMissingPath; }
+    bool projectsChecking() const { return m_projectsChecking; }
     bool queuePaused() const { return m_queuePaused; }
     qint64 queueResumeAt() const { return m_queueResumeAt; }
     bool running() const { return m_running; }
@@ -212,6 +216,12 @@ public:
     Q_INVOKABLE void setUi(const QString &key, const QVariant &value);
     Q_INVOKABLE void addProject(const QUrl &folder);
     Q_INVOKABLE void removeProject(const QString &path);
+    // See again which project folders are there. manual: say what was found.
+    Q_INVOKABLE void checkProjects(bool manual = false);
+    // A project's folder moved: point it at the new place. Its chats follow.
+    Q_INVOKABLE void relocateProject(const QString &from, const QUrl &to);
+    // Where to start looking for a moved folder: the closest parent that still exists.
+    Q_INVOKABLE QUrl nearestFolder(const QString &path) const;
     Q_INVOKABLE void refreshProviders(bool force = false);
     Q_INVOKABLE void probeClaudeUsage();
     Q_INVOKABLE void checkUpdates();
@@ -459,6 +469,9 @@ private:
     void browserAction(const QString &method, const QJsonObject &params);
     void browserNext();
     bool m_folderMissing = false;
+    QString m_folderMissingPath;
+    bool m_projectsChecking = false;
+    void applyProjects(const QJsonObject &result, bool manualCheck);
     void updateTerminal(const QString &id, const QVariantMap &changes);
     bool m_queuePaused = false;
     qint64 m_queueResumeAt = 0;

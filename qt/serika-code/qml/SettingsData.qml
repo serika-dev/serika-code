@@ -37,6 +37,17 @@ ColumnLayout {
                         onClicked: section.open(modelData.path)
                     }
                     ChipButton {
+                        visible: !modelData.exists
+                        text: section.t("CheckAgain", "Check again")
+                        enabled: !ipc.projectsChecking
+                        onClicked: ipc.checkProjects(true)
+                    }
+                    ChipButton {
+                        visible: !modelData.exists
+                        text: section.t("LocateFolder", "Locate folder…")
+                        onClicked: ipc.requestPanel("locate:" + modelData.path)
+                    }
+                    ChipButton {
                         text: section.t("RemoveProject", "Remove")
                         danger: true
                         enabled: !modelData.current

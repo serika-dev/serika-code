@@ -218,7 +218,11 @@ void IpcClient::handleLine(const QByteArray &line) {
         } else if (tag != QLatin1String("background") && tag != QLatin1String("account") && tag != QLatin1String("models") &&
                    tag != QLatin1String("browserPoll") && tag != QLatin1String("browserMouse") &&
                    tag != QLatin1String("browserStream") && tag != QLatin1String("git") &&
-                   tag != QLatin1String("sessionSettings")) {
+                   tag != QLatin1String("sessionSettings") && tag != QLatin1String("projectsCheck")) {
+            if (tag == QLatin1String("projectsRecheck")) {
+                m_projectsChecking = false;
+                emit projectsChanged();
+            }
             setNotice(error);
         }
         return;
@@ -274,16 +278,9 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
         }
     } else if (tag == QLatin1String("i18n")) {
         applyDictionary(result);
-    } else if (tag == QLatin1String("projects")) {
-        if (!m_demo) {
-            m_projects = result.value(QStringLiteral("projects")).toArray().toVariantList();
-            emit projectsChanged();
-            // Removing the folder you were in moved you to another one.
-            if (result.contains(QStringLiteral("settings"))) {
-                applySettings(result.value(QStringLiteral("settings")).toObject());
-                request(QStringLiteral("sessions.list"), {}, QStringLiteral("sessions"));
-            }
-        }
+    } else if (tag == QLatin1String("projects") || tag == QLatin1String("projectsCheck") || tag == QLatin1String("projectsRecheck")) {
+        if (!m_demo)
+            applyProjects(result, tag == QLatin1String("projectsRecheck"));
     } else if (tag == QLatin1String("sessions")) {
         if (!m_demo) {
             m_sessions = result.value(QStringLiteral("sessions")).toArray().toVariantList();
@@ -292,6 +289,8 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
     } else if (tag == QLatin1String("sessionSettings")) {
         applySettings(result.value(QStringLiteral("settings")).toObject());
         m_folderMissing = result.value(QStringLiteral("folderMissing")).toBool();
+        m_folderMissingPath = m_folderMissing ? result.value(QStringLiteral("project")).toString() : QString();
+        emit activeSessionChanged();
         request(QStringLiteral("projects.list"), {}, QStringLiteral("projects"));
         if (!m_running && !m_queue.isEmpty())
             QTimer::singleShot(200, this, &IpcClient::dispatchQueue);
@@ -370,6 +369,7 @@ void IpcClient::handleResponse(const QString &tag, const QJsonObject &result) {
         m_diffs = result.value(QStringLiteral("diffs")).toArray().toVariantList();
         m_activeSession = result.value(QStringLiteral("id")).toString();
         m_folderMissing = result.value(QStringLiteral("folderMissing")).toBool();
+        m_folderMissingPath = m_folderMissing ? result.value(QStringLiteral("project")).toString() : QString();
         emit activeSessionChanged();
         emit diffsChanged();
         emit turnsReloaded();
@@ -1664,6 +1664,8 @@ void IpcClient::newChat() {
     detachView();
     leaveDraft();
     m_activeSession.clear();
+    m_folderMissing = false;
+    m_folderMissingPath.clear();
     // The new chat shows in the sidebar right away, as a draft, until its first message.
     if (!m_demo) {
         m_draftKey = QStringLiteral("draft:") + QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -1762,6 +1764,107 @@ void IpcClient::addProject(const QUrl &folder) {
 
 void IpcClient::removeProject(const QString &path) {
     request(QStringLiteral("projects.remove"), {{QStringLiteral("path"), path}}, QStringLiteral("projects"));
+}
+
+void IpcClient::checkProjects(bool manual) {
+    if (manual) {
+        m_projectsChecking = true;
+        emit projectsChanged();
+    }
+    request(QStringLiteral("projects.list"), {}, manual ? QStringLiteral("projectsRecheck") : QStringLiteral("projectsCheck"));
+}
+
+void IpcClient::relocateProject(const QString &from, const QUrl &to) {
+    const QString path = to.isLocalFile() ? to.toLocalFile() : to.toString();
+    if (!path.isEmpty())
+        request(QStringLiteral("projects.relocate"), {{QStringLiteral("from"), from}, {QStringLiteral("to"), path}}, QStringLiteral("projects"));
+}
+
+QUrl IpcClient::nearestFolder(const QString &path) const {
+    // A share that is down could hold up the window, so those start from the default place.
+    if (path.startsWith(QLatin1String("\\\\")) || path.startsWith(QLatin1String("//")))
+        return {};
+    QDir dir(path);
+    while (!dir.exists()) {
+        if (!dir.cdUp())
+            return {};
+    }
+    return QUrl::fromLocalFile(dir.absolutePath());
+}
+
+static QString folderKey(const QString &path) {
+    return QDir::cleanPath(QString(path).replace(QLatin1Char('\\'), QLatin1Char('/'))).toLower();
+}
+
+void IpcClient::applyProjects(const QJsonObject &result, bool manualCheck) {
+    const auto missing = [](const QVariantList &list) {
+        QVariantMap out; // key -> name
+        for (const QVariant &item : list) {
+            const QVariantMap row = item.toMap();
+            if (!row.value(QStringLiteral("exists")).toBool())
+                out.insert(folderKey(row.value(QStringLiteral("path")).toString()), row.value(QStringLiteral("name")));
+        }
+        return out;
+    };
+    const QVariantMap before = missing(m_projects);
+    m_projects = result.value(QStringLiteral("projects")).toArray().toVariantList();
+    const QVariantMap after = missing(m_projects);
+    m_projectsChecking = m_projectsChecking && !manualCheck;
+    emit projectsChanged();
+
+    // Removing or moving the folder you were in moved you to another one.
+    if (result.contains(QStringLiteral("settings"))) {
+        applySettings(result.value(QStringLiteral("settings")).toObject());
+        request(QStringLiteral("sessions.list"), {}, QStringLiteral("sessions"));
+    }
+
+    if (result.contains(QStringLiteral("relocated"))) {
+        const QJsonObject moved = result.value(QStringLiteral("relocated")).toObject();
+        const QString from = folderKey(moved.value(QStringLiteral("from")).toString());
+        const QString to = moved.value(QStringLiteral("to")).toString();
+        // Unsent drafts belong to the project too.
+        for (auto it = m_drafts.begin(); it != m_drafts.end(); ++it) {
+            QVariantMap draft = it.value().toMap();
+            if (folderKey(draft.value(QStringLiteral("project")).toString()) == from) {
+                draft.insert(QStringLiteral("project"), to);
+                it.value() = draft;
+            }
+        }
+        saveDrafts();
+        emit draftsChanged();
+        const int chats = moved.value(QStringLiteral("chats")).toInt();
+        const QString name = QFileInfo(to).fileName();
+        setNotice(chats == 1 ? QStringLiteral("Moved 1 chat to %1.").arg(name)
+                             : chats > 1 ? QStringLiteral("Moved %1 chats to %2.").arg(chats).arg(name)
+                                         : QStringLiteral("Now using %1.").arg(name));
+    } else if (manualCheck) {
+        QStringList back;
+        for (auto it = before.begin(); it != before.end(); ++it) {
+            if (!after.contains(it.key()))
+                back << it.value().toString();
+        }
+        if (back.size() == 1)
+            setNotice(QStringLiteral("%1 is back.").arg(back.first()));
+        else if (!back.isEmpty())
+            setNotice(QStringLiteral("%1 folders are back.").arg(back.size()));
+        else if (!after.isEmpty())
+            setNotice(after.size() == 1 ? QStringLiteral("%1 is still not found.").arg(after.first().toString())
+                                        : QStringLiteral("%1 folders are still not found.").arg(after.size()));
+    }
+
+    // The folder of the chat on screen is there again, or moved: it can take messages now.
+    if (m_folderMissing && !after.contains(folderKey(m_folderMissingPath))) {
+        QString path = m_folderMissingPath;
+        if (result.contains(QStringLiteral("relocated"))) {
+            const QJsonObject moved = result.value(QStringLiteral("relocated")).toObject();
+            if (folderKey(moved.value(QStringLiteral("from")).toString()) == folderKey(path))
+                path = moved.value(QStringLiteral("to")).toString();
+        }
+        m_folderMissing = false;
+        m_folderMissingPath.clear();
+        emit activeSessionChanged();
+        request(QStringLiteral("project.set"), {{QStringLiteral("path"), path}}, QStringLiteral("settings"));
+    }
 }
 
 void IpcClient::resolveApproval(bool allow) {

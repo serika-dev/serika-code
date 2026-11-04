@@ -7,6 +7,20 @@ Rectangle {
     id: side
     property bool open: true
     property var collapsed: ({})
+
+    // Folders come and go (a network share, an unplugged drive): look again while one is
+    // missing, and whenever you come back to the app.
+    readonly property bool anyMissing: ipc.projects.some(function (p) { return !p.exists })
+    Timer {
+        interval: 20000
+        repeat: true
+        running: side.anyMissing && Qt.application.state === Qt.ApplicationActive
+        onTriggered: ipc.checkProjects(false)
+    }
+    Connections {
+        target: Qt.application
+        function onStateChanged() { if (Qt.application.state === Qt.ApplicationActive) ipc.checkProjects(false) }
+    }
     property var expanded: ({})
     readonly property int chatLimit: 6
     signal toggleRequested()
@@ -489,6 +503,15 @@ Rectangle {
                                 font.pixelSize: 12
                             }
                             IconButton {
+                                visible: !head.r.exists && (headHover.hovered || headMenu.opened)
+                                icon: "refresh-cw"
+                                iconSize: 14
+                                implicitWidth: 26
+                                implicitHeight: 26
+                                tip: Format.tr(side.dict, "CheckAgain", "Check again")
+                                onClicked: ipc.checkProjects(true)
+                            }
+                            IconButton {
                                 visible: head.r.exists && (headHover.hovered || headMenu.opened)
                                 icon: "edit-2"
                                 iconSize: 15
@@ -510,25 +533,63 @@ Rectangle {
                                     id: headMenu
                                     x: headMenuButton.width - width
                                     y: headMenuButton.height + 4
-                                    width: 220
+                                    width: head.r.exists ? 220 : 270
                                     contentItem: ColumnLayout {
                                         spacing: 0
+                                        // The folder is gone: say which, and how to get it back.
+                                        ColumnLayout {
+                                            visible: !head.r.exists
+                                            Layout.fillWidth: true
+                                            Layout.margins: 8
+                                            Layout.bottomMargin: 6
+                                            spacing: 3
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: Format.tr(side.dict, "FolderNotFound", "Folder not found")
+                                                color: Theme.warning
+                                                font.family: Theme.sans
+                                                font.pixelSize: 13
+                                                font.weight: Font.DemiBold
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: head.r.path.replace(/^\\\\\?\\/, "")
+                                                wrapMode: Text.WrapAnywhere
+                                                maximumLineCount: 3
+                                                elide: Text.ElideMiddle
+                                                color: Theme.textDim
+                                                font.family: Theme.mono
+                                                font.pixelSize: 11
+                                            }
+                                        }
                                         MenuRow {
+                                            visible: !head.r.exists
+                                            icon: "folder"
+                                            label: Format.tr(side.dict, "LocateFolder", "Locate folder…")
+                                            onTriggered: { headMenu.close(); ipc.requestPanel("locate:" + head.r.path) }
+                                        }
+                                        MenuRow {
+                                            visible: !head.r.exists
+                                            icon: "refresh-cw"
+                                            label: Format.tr(side.dict, "CheckAgain", "Check again")
+                                            onTriggered: { headMenu.close(); ipc.checkProjects(true) }
+                                        }
+                                        MenuRow {
+                                            visible: head.r.exists
                                             icon: "edit-2"
                                             label: Format.tr(side.dict, "NewChatHere", "New chat in this project")
-                                            enabledRow: head.r.exists
                                             onTriggered: { headMenu.close(); side.newChatInRequested(head.r.path) }
                                         }
                                         MenuRow {
+                                            visible: head.r.exists
                                             icon: "folder"
                                             label: Format.tr(side.dict, "RevealFolder", "Show in file explorer")
-                                            enabledRow: head.r.exists
                                             onTriggered: { headMenu.close(); Qt.openUrlExternally("file:///" + head.r.path.replace(/\\/g, "/")) }
                                         }
                                         MenuRow {
+                                            visible: head.r.exists
                                             icon: "sliders"
                                             label: Format.tr(side.dict, "ProjectSettings", "Project settings")
-                                            enabledRow: head.r.exists
                                             onTriggered: { headMenu.close(); projectSettings.show(head.r) }
                                         }
                                         MenuRow {
@@ -580,12 +641,18 @@ Rectangle {
                             // Switch to this project: a fresh chat there, with its chats shown.
                             onClicked: {
                                 if (head.r.collapsed) side.collapsed = side.flip(side.collapsed, head.r.path)
-                                if (head.r.exists && !head.r.current) side.newChatInRequested(head.r.path)
+                                if (!head.r.exists) {
+                                    // Maybe it is back (a share that reconnected); either way, show the options.
+                                    ipc.checkProjects(false)
+                                    headMenu.open()
+                                } else if (!head.r.current) {
+                                    side.newChatInRequested(head.r.path)
+                                }
                             }
                             ToolTip.visible: containsMouse
                             ToolTip.delay: 600
                             ToolTip.text: head.r.path.replace(/^\\\\\?\\/, "")
-                                          + (!head.r.exists ? "  (folder not found)"
+                                          + (!head.r.exists ? "\n" + Format.tr(side.dict, "FolderNotFoundTip", "Folder not found. Click to locate it or check again.")
                                              : head.r.current ? "\n" + Format.tr(side.dict, "CurrentProject", "You are working in this project")
                                              : "\n" + Format.tr(side.dict, "SwitchProject", "Click to switch to this project"))
                         }

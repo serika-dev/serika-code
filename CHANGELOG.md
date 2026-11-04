@@ -14,6 +14,10 @@ All notable changes to Serika Code are documented in this file.
   card with each place side by side (keep yours, keep the stash, or both), whole-file choices,
   "Ask Serika" to resolve it for you, Undo, and Finish. A popped stash is only removed once
   you finish. Merges, rebases and cherry-picks that stop on conflicts use the same card.
+- **Folder not found** can be fixed in place: **Locate folder** points a moved or renamed
+  project at its new home, and its chats, drafts and default git account follow. **Check
+  again** looks right away, and the app also rechecks on its own while a folder is missing
+  (handy for network shares and external drives). A chat whose folder is gone says so.
 - **Pick the files for a stash**: tick what goes in; the rest stays in your working tree, and
   the form stays open so you can stash it separately (split work into one stash per ticket).
 - **Your own changes never block a stash**: they are set aside, the stash goes in, and they

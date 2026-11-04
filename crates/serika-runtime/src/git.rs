@@ -292,6 +292,18 @@ pub fn set_default(data_dir: &Path, project_key: &str, id: &str) -> Result<()> {
     save_book(data_dir, &book)
 }
 
+/// A project moved to another folder: its default account goes with it.
+pub fn move_default(data_dir: &Path, from_key: &str, to_key: &str) -> Result<()> {
+    let mut book = load_book(data_dir);
+    match book.defaults.remove(from_key) {
+        Some(id) => {
+            book.defaults.insert(to_key.to_string(), id);
+            save_book(data_dir, &book)
+        }
+        None => Ok(()),
+    }
+}
+
 /// GitHub logins on this computer: from the GitHub CLI (`gh auth status`, every account it
 /// holds) and from Git Credential Manager. Each becomes an account that commits under the
 /// profile's display name and GitHub's private noreply address, and signs in as that login.

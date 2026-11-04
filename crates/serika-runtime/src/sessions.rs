@@ -453,6 +453,40 @@ impl SessionStore {
         Ok(conn.execute("DELETE FROM sessions WHERE project_path = ?1", params![path])?)
     }
 
+    /// A project's folder moved: its chats and sub-agents follow, and rewind writes to the new
+    /// place. Claude Code and Codex tie a conversation to its folder, so their links are dropped
+    /// and the next message hands the conversation over instead. Returns the chats moved.
+    pub fn move_project(&self, from: &Path, to: &Path) -> Result<usize> {
+        let mut conn = self.lock();
+        let from = from.to_string_lossy().to_string();
+        let to = to.to_string_lossy().to_string();
+        let tx = conn.transaction()?;
+        let chats: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM sessions WHERE project_path = ?1 AND parent_id IS NULL",
+            params![from],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "DELETE FROM provider_sessions WHERE session_id IN (SELECT id FROM sessions WHERE project_path = ?1)",
+            params![from],
+        )?;
+        tx.execute(
+            "UPDATE snapshots SET path = ?2 || substr(path, length(?1) + 1)
+             WHERE substr(path, 1, length(?1)) = ?1 COLLATE NOCASE
+               AND session_id IN (SELECT id FROM sessions WHERE project_path = ?1)",
+            params![from, to],
+        )?;
+        tx.execute("UPDATE sessions SET project_path = ?2 WHERE project_path = ?1", params![from, to])?;
+        tx.execute("DELETE FROM projects WHERE path = ?1", params![from])?;
+        tx.execute(
+            "INSERT INTO projects (path, last_opened, hidden) VALUES (?1, ?2, 0)
+             ON CONFLICT(path) DO UPDATE SET hidden = 0, last_opened = ?2",
+            params![to, now_secs()],
+        )?;
+        tx.commit()?;
+        Ok(chats as usize)
+    }
+
     /// Every project the app knows, newest first: remembered folders plus folders that have chats.
     pub fn projects(&self) -> Result<Vec<(String, i64)>> {
         let conn = self.lock();
@@ -824,6 +858,26 @@ fn now_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_moved_project_keeps_its_chats() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&dir.path().join("sessions.db")).unwrap();
+        let (old, new) = (Path::new("C:/work/old-name"), Path::new("C:/work/new-name"));
+        store.remember_project(old).unwrap();
+        store.create("s1", old, "chat", "model", PermissionMode::Standard).unwrap();
+        store.set_provider_session("s1", "claude", "abc").unwrap();
+        store.create("s2", Path::new("C:/work/other"), "other", "model", PermissionMode::Standard).unwrap();
+
+        assert_eq!(store.move_project(old, new).unwrap(), 1);
+        assert_eq!(store.get("s1").unwrap().unwrap().project_path, "C:/work/new-name");
+        assert_eq!(store.get("s2").unwrap().unwrap().project_path, "C:/work/other");
+        // The old conversation with the CLI belongs to the old folder.
+        assert!(store.provider_session("s1", "claude").unwrap().is_none());
+        let known: Vec<String> = store.projects().unwrap().into_iter().map(|(p, _)| p).collect();
+        assert!(known.contains(&"C:/work/new-name".to_string()), "{known:?}");
+        assert!(!known.contains(&"C:/work/old-name".to_string()), "{known:?}");
+    }
 
     #[test]
     fn persists_and_resumes_a_session() {

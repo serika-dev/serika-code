@@ -275,24 +275,35 @@ async fn handle(host: Arc<Host>, method: &str, params: Value) -> Result<Value, S
             Ok(serde_json::to_value(usage).unwrap_or(Value::Null))
         }
         "projects.list" => Ok(projects(&host)),
+        // A project's folder moved or was renamed: its chats and settings follow it.
+        "projects.relocate" => {
+            let from = text(&params, "from");
+            let to = PathBuf::from(resolve_folder(&text(&params, "to")));
+            if !to.is_dir() {
+                return Err(format!("{} is not a folder", to.display()));
+            }
+            let from_key = canon_key(&from);
+            let to_key = canon_key(&to.display().to_string());
+            let mut moved = 0;
+            if from_key != to_key {
+                for known in spellings_of(&runtime, &from) {
+                    moved += runtime.sessions.move_project(Path::new(&known), &to).map_err(|err| err.to_string())?;
+                }
+                serika_runtime::git::move_default(&runtime.paths.data_dir, &from_key, &to_key).map_err(|err| err.to_string())?;
+            }
+            if canon_key(&host.project().display().to_string()) == from_key {
+                host.set_project(to.clone());
+            }
+            let mut out = projects(&host);
+            out["settings"] = settings(&host);
+            out["relocated"] = json!({"from": from, "to": to.display().to_string(), "chats": moved});
+            Ok(out)
+        }
         "projects.remove" | "projects.delete" => {
             let wanted = text(&params, "path");
             let delete_chats = method == "projects.delete";
-            // The list may hold the same folder under more than one spelling.
             let wanted_key = canon_key(&wanted);
-            let mut spellings: Vec<String> = runtime
-                .sessions
-                .projects()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(p, _)| p)
-                .chain(runtime.sessions.list(None).unwrap_or_default().into_iter().map(|s| s.project_path))
-                .filter(|p| canon_key(p) == wanted_key)
-                .collect();
-            spellings.push(wanted.clone());
-            spellings.sort();
-            spellings.dedup();
-            for known in &spellings {
+            for known in &spellings_of(&runtime, &wanted) {
                 let path = PathBuf::from(known);
                 if delete_chats {
                     runtime.sessions.delete_project_chats(&path).map_err(|err| err.to_string())?;
@@ -1458,6 +1469,7 @@ fn projects(host: &Host) -> Value {
     }
     let mut list: Vec<(&String, &Row)> = order.iter().filter_map(|k| rows.get(k).map(|r| (k, r))).collect();
     list.sort_by(|a, b| b.1.last.cmp(&a.1.last));
+    let present = folders_present(list.iter().map(|(_, row)| row.path.clone()).collect());
     let out: Vec<Value> = list
         .into_iter()
         .map(|(key, row)| {
@@ -1466,7 +1478,7 @@ fn projects(host: &Host) -> Value {
                 "key": key,
                 "path": row.path,
                 "name": project_name(runtime, &buf),
-                "exists": buf.is_dir(),
+                "exists": present.contains(&row.path),
                 "lastUsed": row.last,
                 "sessionCount": row.count,
                 "current": *key == current_key,
@@ -1477,6 +1489,51 @@ fn projects(host: &Host) -> Value {
         .collect();
     json!({"projects": out})
 }
+/// Which of these folders are there. Each is looked at on its own thread with a shared deadline,
+/// so a network share or mapped drive that does not answer (which can take half a minute to
+/// fail) counts as not found instead of holding up the list.
+fn folders_present(paths: Vec<String>) -> std::collections::HashSet<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiting = paths.len();
+    for path in paths {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let found = Path::new(&path).is_dir();
+            let _ = tx.send((path, found));
+        });
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    let mut out = std::collections::HashSet::new();
+    for _ in 0..waiting {
+        match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+            Ok((path, true)) => {
+                out.insert(path);
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// Every way this folder is written down in the list and in chats (it may be more than one).
+fn spellings_of(runtime: &Runtime, wanted: &str) -> Vec<String> {
+    let key = canon_key(wanted);
+    let mut spellings: Vec<String> = runtime
+        .sessions
+        .projects()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(p, _)| p)
+        .chain(runtime.sessions.list(None).unwrap_or_default().into_iter().map(|s| s.project_path))
+        .filter(|p| canon_key(p) == key)
+        .collect();
+    spellings.push(wanted.to_string());
+    spellings.sort();
+    spellings.dedup();
+    spellings
+}
+
 /// Windows can hand back `\\?\C:\...` or `\\?\UNC\server\share`. Show and compare the plain form.
 fn plain(path: &str) -> String {
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {

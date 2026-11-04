@@ -332,6 +332,63 @@ Item {
             }
         }
 
+        // The chat on screen belongs to a folder that is not there.
+        Rectangle {
+            visible: ipc.folderMissing && !shell.hero
+            anchors.bottom: composer.top
+            anchors.bottomMargin: 8
+            x: composer.x
+            width: composer.width
+            z: 2
+            implicitHeight: missingRow.implicitHeight + 16
+            radius: 10
+            color: Theme.card
+            border.width: 1
+            border.color: Qt.rgba(Theme.warning.r, Theme.warning.g, Theme.warning.b, 0.45)
+            RowLayout {
+                id: missingRow
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: 12
+                anchors.rightMargin: 8
+                spacing: 10
+                Icon { name: "alert-triangle"; size: 16; color: Theme.warning }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 1
+                    Text {
+                        Layout.fillWidth: true
+                        text: Format.tr(ipc.strings, "ChatFolderMissing", "This chat's folder is not there, so it cannot run anything")
+                        elide: Text.ElideRight
+                        color: Theme.text
+                        font.family: Theme.sans
+                        font.pixelSize: 13
+                        font.weight: Font.Medium
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: ipc.folderMissingPath.replace(/^\\\\\?\\/, "")
+                        elide: Text.ElideMiddle
+                        color: Theme.textDim
+                        font.family: Theme.mono
+                        font.pixelSize: 11
+                    }
+                }
+                ChipButton {
+                    text: Format.tr(ipc.strings, "CheckAgain", "Check again")
+                    iconName: "refresh-cw"
+                    enabled: !ipc.projectsChecking
+                    onClicked: ipc.checkProjects(true)
+                }
+                ChipButton {
+                    primary: true
+                    text: Format.tr(ipc.strings, "LocateFolder", "Locate folder…")
+                    onClicked: shell.locateFolder(ipc.folderMissingPath)
+                }
+            }
+        }
+
         Composer {
             id: composer
             width: Math.min(parent.width - 48, Theme.laneMax)
@@ -544,6 +601,7 @@ Item {
         function onBrowserActivity() { if (ipc.ui.autoBrowser !== false) shell.showPanel("browser") }
         function onPanelRequested(which) {
             if (which.indexOf("settings:") === 0) { shell.openSettings(which.substring(9)); return }
+            if (which.indexOf("locate:") === 0) { shell.locateFolder(which.substring(7)); return }
             if (which === "addProject") folderDialog.open()
             else shell.showPanel(which)
             shell.settingsOpen = false
@@ -606,6 +664,19 @@ Item {
     ShortcutsSheet { id: shortcuts }
     ApprovalSheet { id: approval }
 
+    // A project's folder moved: point it at the new place.
+    function locateFolder(path) {
+        locateDialog.from = path
+        const start = ipc.nearestFolder(path)
+        if (start.toString().length > 0) locateDialog.currentFolder = start
+        locateDialog.open()
+    }
+    FolderDialog {
+        id: locateDialog
+        property string from: ""
+        title: Format.tr(ipc.strings, "LocateFolderTitle", "Where is this project now?")
+        onAccepted: ipc.relocateProject(from, selectedFolder)
+    }
     FolderDialog {
         id: folderDialog
         title: shell.t("PaletteFolder")
