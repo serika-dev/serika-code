@@ -4,6 +4,8 @@ All notable changes to Serika Code are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-16
+
 ### Added
 - **Installers**: a Windows setup (per-user, no admin needed; Start menu, optional desktop
   shortcut and `serika` on PATH; clean uninstall), a Linux AppImage with delta updates and a
