@@ -138,22 +138,45 @@ Item {
         if (was >= 0 && index > was) index -= 1
         movePane(id, target, index)
     }
+    // Below this, an open sidebar would eat the chat, so it folds to the rail and
+    // opens over the chat instead. A snapped half-window lands in this range.
+    readonly property bool sidebarFloats: sidebarOpen && width < sidebar.expandedWidth + 420
+    property bool sidebarPeek: false
+    onSidebarFloatsChanged: if (!sidebarFloats) sidebarPeek = false
+    function sideWidth() { return (sidebarOpen && !sidebarFloats) ? sidebar.expandedWidth : 56 }
+    function toggleSidebar() {
+        if (width < sidebar.expandedWidth + 420) {
+            if (sidebarPeek) { sidebarPeek = false; sidebarOpen = false }
+            else { sidebarOpen = true; sidebarPeek = true }
+        } else {
+            sidebarPeek = false
+            sidebarOpen = !sidebarOpen
+        }
+    }
     function clampRight(size) {
-        return Math.max(300, Math.min(size, Math.max(300, shell.width - sidebar.width - 380)))
+        const side = sideWidth()
+        const reserve = Math.min(280, Math.max(160, (shell.width - side) * 0.46))
+        const room = Math.max(120, shell.width - side - reserve)
+        const floor = Math.min(200, room)
+        return Math.max(floor, Math.min(size, room))
     }
     function clampBottom(size) {
-        return Math.max(140, Math.min(size, Math.max(140, shell.height - 260)))
+        const reserve = Math.min(260, Math.max(150, shell.height * 0.48))
+        const room = Math.max(100, shell.height - reserve)
+        const floor = Math.min(120, room)
+        return Math.max(floor, Math.min(size, room))
     }
     Rectangle { anchors.fill: parent; color: Theme.bg }
 
     Sidebar {
         id: sidebar
+        z: shell.sidebarPeek ? 40 : 0
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        open: shell.sidebarOpen
+        open: (shell.sidebarOpen && !shell.sidebarFloats) || shell.sidebarPeek
         expandedWidth: Number(ipc.ui.sidebarWidth) >= 220 ? Math.min(Number(ipc.ui.sidebarWidth), 440) : 272
-        onToggleRequested: shell.sidebarOpen = !shell.sidebarOpen
+        onToggleRequested: shell.toggleSidebar()
         onSettingsRequested: (tab) => shell.openSettings(tab)
         onAddProjectRequested: folderDialog.open()
         onNewChatRequested: shell.newChat()
@@ -162,8 +185,8 @@ Item {
 
     // Drag the sidebar edge to resize it
     MouseArea {
-        z: 20
-        visible: shell.sidebarOpen
+        z: shell.sidebarPeek ? 46 : 20
+        visible: sidebar.width > 120
         x: sidebar.width - 3
         width: 6
         anchors.top: parent.top
@@ -182,9 +205,23 @@ Item {
         onDoubleClicked: { sidebar.resizing = false; ipc.setUi("sidebarWidth", 272) }
     }
 
+    // Dim the chat while the sidebar is open over it, and click there to put it away.
+    Rectangle {
+        z: 35
+        visible: shell.sidebarPeek
+        anchors.left: sidebar.right
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        color: Qt.rgba(0, 0, 0, Theme.light ? 0.12 : 0.4)
+        MouseArea { anchors.fill: parent; onClicked: shell.sidebarPeek = false }
+    }
+
     Item {
         id: main
         anchors.left: sidebar.right
+        // While the sidebar floats over the chat, keep the column parked on the rail.
+        anchors.leftMargin: (shell.sidebarPeek && shell.sidebarFloats) ? (56 - sidebar.width) : 0
         anchors.right: shell.rightOpen ? rightDock.left : parent.right
         anchors.rightMargin: shell.rightOpen ? 4 : 0
         anchors.top: parent.top
@@ -236,11 +273,14 @@ Item {
             Text {
                 id: greeting
                 anchors.horizontalCenter: parent.horizontalCenter
+                width: Math.min(parent.width - 32, 720)
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
                 y: composer.y - height - 28
                 text: shell.t(Format.greetingKey(new Date().getHours()), { name: ipc.username })
                 color: Theme.text
                 font.family: Theme.sans
-                font.pixelSize: 30
+                font.pixelSize: parent.width < 640 ? 22 : 30
                 font.weight: Font.DemiBold
                 font.letterSpacing: -0.5
             }
@@ -273,9 +313,12 @@ Item {
                         Row {
                             anchors.verticalCenter: parent.verticalCenter
                             anchors.left: parent.left
+                            anchors.right: parent.right
                             anchors.leftMargin: 8
+                            anchors.rightMargin: 8
                             spacing: 8
                             Text {
+                                id: starterTitle
                                 text: shell.t(parent.parent.modelData.title)
                                 color: starterArea.containsMouse ? Theme.text : Theme.textSecondary
                                 font.family: Theme.sans
@@ -283,7 +326,9 @@ Item {
                                 font.weight: Font.Medium
                             }
                             Text {
+                                width: Math.max(0, parent.width - starterTitle.implicitWidth - 8)
                                 text: shell.t(parent.parent.modelData.sub)
+                                elide: Text.ElideRight
                                 color: Theme.textDim
                                 font.family: Theme.sans
                                 font.pixelSize: 14
@@ -589,7 +634,7 @@ Item {
             z: 5
             anchors.top: parent.top
             anchors.left: parent.left
-            anchors.leftMargin: 264
+            anchors.leftMargin: settingsPage.navWidth
             anchors.right: parent.right
             height: 36
             DragHandler { target: null; onActiveChanged: if (active) settingsPage.Window.window.startSystemMove() }
@@ -607,6 +652,7 @@ Item {
             shell.settingsOpen = false
         }
         function onDiffsChanged() { if (ipc.ui.autoDiff === true && ipc.running && ipc.diffs.length > 0) shell.showPanel("changes") }
+        function onActiveSessionChanged() { if (shell.sidebarPeek) shell.sidebarPeek = false }
     }
 
     // Drop files or images anywhere in the window to attach them to the next message.
@@ -704,7 +750,7 @@ Item {
             else if (id === "changes" || id === "browser" || id === "agents" || id === "terminal" || id === "git") shell.showPanel(id)
             else if (id === "mcp") shell.openSettings("mcp")
             else if (id === "skills") shell.openSettings("skills")
-            else if (id === "sidebar") shell.sidebarOpen = !shell.sidebarOpen
+            else if (id === "sidebar") shell.toggleSidebar()
             else if (id === "project") folderDialog.open()
             else if (id === "export") exportDialog.open()
             else if (id === "settings") shell.openSettings("general")
@@ -712,7 +758,7 @@ Item {
             else if (id === "shortcuts") shortcuts.open()
         }
     }
-    Shortcut { sequence: "Ctrl+Shift+S"; onActivated: shell.sidebarOpen = !shell.sidebarOpen }
+    Shortcut { sequence: "Ctrl+Shift+S"; onActivated: shell.toggleSidebar() }
     Shortcut { sequence: "Ctrl+B"; onActivated: shell.togglePanel("changes") }
     Shortcut { sequence: "Ctrl+Shift+B"; onActivated: shell.togglePanel("browser") }
     Shortcut { sequence: "Ctrl+,"; onActivated: shell.openSettings("general") }

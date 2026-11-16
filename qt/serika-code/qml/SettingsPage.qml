@@ -6,6 +6,9 @@ import QtQuick.Layouts
 Rectangle {
     id: page
     property string tab: "general"
+    // A snapped window cannot spare a 264px section list, so the nav becomes an icon rail.
+    readonly property bool compactNav: width < 860
+    readonly property int navWidth: compactNav ? 68 : 248
     signal closeRequested()
     readonly property var dict: ipc.strings
     function t(key, fallback) { return Format.tr(dict, key, fallback) }
@@ -48,7 +51,7 @@ Rectangle {
 
         // Section list
         Rectangle {
-            Layout.preferredWidth: 264
+            Layout.preferredWidth: page.navWidth
             Layout.fillHeight: true
             color: Theme.card
             Rectangle { anchors.right: parent.right; width: 1; height: parent.height; color: Theme.borderSubtle }
@@ -66,23 +69,25 @@ Rectangle {
                     color: backArea.containsMouse ? Theme.hover : "transparent"
                     RowLayout {
                         anchors.fill: parent
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 10
+                        anchors.leftMargin: page.compactNav ? 0 : 10
+                        anchors.rightMargin: page.compactNav ? 0 : 10
                         spacing: 10
-                        Icon { name: "arrow-left"; size: 17; color: Theme.textSecondary }
+                        Icon { Layout.alignment: Qt.AlignHCenter; name: "arrow-left"; size: 17; color: Theme.textSecondary }
                         Text {
+                            visible: !page.compactNav
                             Layout.fillWidth: true
                             text: page.t("BackToApp", "Back to app")
                             color: Theme.text
                             font.family: Theme.sans
                             font.pixelSize: 14
                         }
-                        Kbd { label: "Esc" }
+                        Kbd { visible: !page.compactNav; label: "Esc" }
                     }
                     MouseArea { id: backArea; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: page.closeRequested() }
                 }
 
                 Text {
+                    visible: !page.compactNav
                     Layout.topMargin: 14
                     Layout.leftMargin: 10
                     text: page.t("Settings", "Settings")
@@ -113,6 +118,7 @@ Rectangle {
                                 Layout.fillWidth: true
                                 spacing: 2
                                 Text {
+                                    visible: !page.compactNav
                                     Layout.topMargin: 14
                                     Layout.leftMargin: 10
                                     Layout.bottomMargin: 4
@@ -135,11 +141,17 @@ Rectangle {
                                         color: current ? Theme.active : (navArea.containsMouse ? Theme.hover : "transparent")
                                         RowLayout {
                                             anchors.fill: parent
-                                            anchors.leftMargin: 10
-                                            anchors.rightMargin: 10
-                                            spacing: 12
-                                            Icon { name: modelData.icon; size: 17; color: current ? Theme.accentSecondary : Theme.textSecondary }
+                                            anchors.leftMargin: page.compactNav ? 0 : 10
+                                            anchors.rightMargin: page.compactNav ? 0 : 10
+                                            spacing: page.compactNav ? 0 : 12
+                                            Icon {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                name: modelData.icon
+                                                size: 17
+                                                color: current ? Theme.accentSecondary : Theme.textSecondary
+                                            }
                                             Text {
+                                                visible: !page.compactNav
                                                 Layout.fillWidth: true
                                                 text: modelData.label
                                                 elide: Text.ElideRight
@@ -158,6 +170,7 @@ Rectangle {
                 }
 
                 Text {
+                    visible: !page.compactNav
                     Layout.leftMargin: 10
                     Layout.bottomMargin: 6
                     text: "Serika Code " + ipc.version
@@ -185,16 +198,16 @@ Rectangle {
 
                 ColumnLayout {
                     id: content
-                    x: Math.max(32, (flick.width - width) / 2)
-                    y: 52
-                    width: Math.min(780, flick.width - 64)
+                    x: Math.max(page.compactNav ? 16 : 32, (flick.width - width) / 2)
+                    y: page.compactNav ? 28 : 52
+                    width: Math.min(780, flick.width - (page.compactNav ? 32 : 64))
                     spacing: 6
 
                     Text {
                         text: page.current.label
                         color: Theme.text
                         font.family: Theme.brand
-                        font.pixelSize: 28
+                        font.pixelSize: page.compactNav ? 22 : 28
                         font.weight: Font.DemiBold
                         font.letterSpacing: -0.5
                     }

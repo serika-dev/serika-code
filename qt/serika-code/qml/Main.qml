@@ -6,14 +6,26 @@ ApplicationWindow {
     visible: true
     width: 1420
     height: 880
-    minimumWidth: 940
-    minimumHeight: 620
+    // Small enough that a half-screen snap still fits on a laptop, including
+    // one whose display scaling makes the work area well under 1000px wide.
+    minimumWidth: 400
+    minimumHeight: 320
     flags: Qt.Window | Qt.FramelessWindowHint
     color: Theme.bg
     title: "Serika Code"
 
     readonly property bool maximized: visibility === Window.Maximized
     readonly property var prefs: ipc.ui
+
+    // The authored size is for a desktop monitor. Shrink it once so a smaller
+    // screen can still snap and restore the window instead of opening past the edges.
+    function fitOnScreen() {
+        const area = win.screen ? win.screen.availableGeometry : null
+        if (!area || area.width < 200) return
+        if (width > area.width - 24) width = Math.max(minimumWidth, area.width - 24)
+        if (height > area.height - 24) height = Math.max(minimumHeight, area.height - 24)
+    }
+    Component.onCompleted: if (!fixedFrame) Qt.callLater(fitOnScreen)
 
     // Saved appearance preferences drive the theme. --theme and --preset are for screenshots.
     readonly property string presetId: {

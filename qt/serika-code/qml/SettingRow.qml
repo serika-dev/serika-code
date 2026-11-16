@@ -7,6 +7,9 @@ Item {
     property string heading: ""
     property string help: ""
     property bool stacked: false
+    // A narrow settings page (a snapped window) puts the control under the label.
+    readonly property bool narrow: width > 0 && width < 520
+    readonly property bool stack: stacked || narrow
     default property alias control: slot.data
     // The first row in a card has no divider above it.
     readonly property bool isFirst: {
@@ -40,7 +43,7 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         anchors.leftMargin: 16
         anchors.rightMargin: 16
-        columns: row.stacked ? 1 : 2
+        columns: row.stack ? 1 : 2
         columnSpacing: 24
         rowSpacing: 10
 
@@ -70,9 +73,9 @@ Item {
         }
         Item {
             id: slot
-            Layout.fillWidth: row.stacked
-            Layout.alignment: row.stacked ? Qt.AlignLeft : (Qt.AlignRight | Qt.AlignVCenter)
-            Layout.preferredWidth: row.stacked ? -1 : childrenRect.width
+            Layout.fillWidth: row.stack
+            Layout.alignment: row.stack ? Qt.AlignLeft : (Qt.AlignRight | Qt.AlignVCenter)
+            Layout.preferredWidth: row.stack ? -1 : childrenRect.width
             implicitHeight: childrenRect.height
             implicitWidth: childrenRect.width
         }

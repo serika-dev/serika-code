@@ -1,4 +1,5 @@
 #include "ipcclient.h"
+#include "windowchrome.h"
 
 #include <QCommandLineParser>
 #include <QGuiApplication>
@@ -8,6 +9,7 @@
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QWindow>
 #include <QTimer>
 
 int main(int argc, char *argv[]) {
@@ -50,9 +52,15 @@ int main(int argc, char *argv[]) {
     engine.rootContext()->setContextProperty(QStringLiteral("startPreset"), parser.value(QStringLiteral("preset")));
     engine.rootContext()->setContextProperty(QStringLiteral("startTab"), parser.value(QStringLiteral("tab")));
     engine.rootContext()->setContextProperty(QStringLiteral("startPanel"), parser.value(QStringLiteral("panel")));
+    // Screenshots want the authored window size, not one fitted to this monitor.
+    engine.rootContext()->setContextProperty(QStringLiteral("fixedFrame"), parser.isSet(QStringLiteral("shot")));
+    WindowChrome chrome;
+    engine.rootContext()->setContextProperty(QStringLiteral("winChrome"), &chrome);
     engine.loadFromModule("SerikaCode", "Main");
     if (engine.rootObjects().isEmpty())
         return 1;
+    if (auto *window = qobject_cast<QWindow *>(engine.rootObjects().constFirst()))
+        chrome.attach(window);
 
     if (parser.isSet(QStringLiteral("shot"))) {
         const QString path = parser.value(QStringLiteral("shot"));

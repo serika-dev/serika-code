@@ -24,6 +24,9 @@ All notable changes to Serika Code are documented in this file.
   come back on top (conflicts, if any, go to the same card).
 
 ### Changed
+- The window snaps like any other Windows app: drag it to a screen edge, use Win+arrow,
+  or hover the maximize button for snap layouts. It can shrink to a half or quarter of
+  the screen, and the sidebar, panels, header and settings fold to fit.
 - Stash rows have labelled **Apply** and **Pop** buttons instead of copy and download icons.
 
 ### Fixed

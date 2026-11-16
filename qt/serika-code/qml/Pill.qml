@@ -1,10 +1,12 @@
 import QtQuick
+import QtQuick.Controls
 
 // Composer action pill (Search, Research).
 Rectangle {
     id: pill
     property string icon: "globe"
     property string label: ""
+    property bool iconOnly: false
     property bool active: false
     signal clicked()
 
@@ -26,6 +28,7 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
         }
         Text {
+            visible: !pill.iconOnly && pill.label.length > 0
             text: pill.label
             color: pill.active ? Theme.accentSecondary : Theme.textSecondary
             font.family: Theme.sans
@@ -40,6 +43,9 @@ Rectangle {
         cursorShape: Qt.PointingHandCursor
         onClicked: pill.clicked()
     }
+    ToolTip.visible: pill.iconOnly && pill.label.length > 0 && area.containsMouse
+    ToolTip.delay: 500
+    ToolTip.text: pill.label
 
     Behavior on color { ColorAnimation { duration: Theme.motionFast } }
     Behavior on border.color { ColorAnimation { duration: Theme.motionFast } }

@@ -13,15 +13,17 @@ Item {
     property string notice: ""
     property bool noticeIsError: true
     readonly property var dict: ipc.strings
-    readonly property real panelWidth: width >= 1100 ? 520 : 440
+    readonly property bool stacked: width < 780
+    readonly property real panelWidth: stacked ? width : (width >= 1100 ? 520 : 440)
 
     function t(key) { return Format.t(dict, key) }
 
     ArtBackdrop {
+        visible: !page.stacked
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        width: page.width - page.panelWidth
+        width: page.stacked ? 0 : page.width - page.panelWidth
     }
 
     Rectangle {
@@ -47,7 +49,7 @@ Item {
 
             ColumnLayout {
                 id: form
-                width: Math.min(380, panel.width - 80)
+                width: Math.min(380, panel.width - (page.stacked ? 48 : 80))
                 x: (scroller.width - width) / 2
                 y: Math.max(32, (scroller.height - implicitHeight) / 2)
                 spacing: 0

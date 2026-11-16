@@ -25,6 +25,8 @@ qt_add_executable(serika-code
     src/ipcclient.h
     src/turnmodel.cpp
     src/turnmodel.h
+    src/windowchrome.cpp
+    src/windowchrome.h
 )
 
 qt_add_qml_module(serika-code
@@ -50,6 +52,10 @@ if(WIN32)
 endif()
 
 target_link_libraries(serika-code PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::Network)
+
+if(WIN32)
+    target_link_libraries(serika-code PRIVATE dwmapi)
+endif()
 
 if(WIN32)
     set_target_properties(serika-code PROPERTIES WIN32_EXECUTABLE TRUE)

@@ -11,6 +11,7 @@ Rectangle {
     signal browserRequested()
     readonly property var dict: ipc.strings
     readonly property bool ctrlToSend: ipc.ui.sendKey === "ctrlenter"
+    readonly property bool tight: width < 560
     readonly property var modes: [
         { id: "restricted", label: Format.tr(dict, "ModeSupervised", "Supervised"), icon: "shield", help: Format.tr(dict, "ModeSupervisedHelp", "Asks before every edit and command") },
         { id: "standard", label: Format.tr(dict, "ModeAutoEdits", "Auto-accept edits"), icon: "edit-2", help: Format.tr(dict, "ModeAutoEditsHelp", "Edits and dev commands run, risky ones ask") },
@@ -318,6 +319,7 @@ Rectangle {
             }
             Pill {
                 id: modePill
+                iconOnly: composer.tight
                 icon: composer.currentMode.icon
                 label: composer.currentMode.label
                 active: ipc.permissionMode === "full"
@@ -374,6 +376,7 @@ Rectangle {
             }
             Pill {
                 id: effortPill
+                iconOnly: composer.tight
                 visible: composer.efforts.length > 0
                 icon: "cpu"
                 label: composer.effort ? composer.effortLabel(composer.effort) : Format.tr(composer.dict, "Effort", "Effort")
@@ -423,12 +426,14 @@ Rectangle {
                 }
             }
             Pill {
+                iconOnly: composer.tight
                 icon: "layers"
                 label: composer.t("PlanMode")
                 active: ipc.planMode
                 onClicked: ipc.planMode = !ipc.planMode
             }
             Pill {
+                iconOnly: composer.tight
                 icon: "globe"
                 label: Format.tr(composer.dict, "Browser", "Browser")
                 onClicked: composer.browserRequested()
